@@ -296,6 +296,7 @@ const woprCommands = `WOPR Commands:
   wopr status [--json]           Show Resources
   wopr docs [show <topic>]       Read the local WOPR documentation
   wopr version                   Show WOPR, Go, and platform versions
+  wopr serve [--port N] [--hostname H]  Start the wopr serve daemon
 
 WOPR keeps its configuration in ~/.wopr.
 
