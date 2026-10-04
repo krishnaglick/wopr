@@ -3,6 +3,7 @@ package serve
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/alexrudloff/wopr/coding/version"
@@ -29,7 +30,7 @@ func TestHealthAnswersOverARealListener(t *testing.T) {
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" || contentType[:len("application/json")] != "application/json" {
+	if contentType == "" || !strings.HasPrefix(contentType, "application/json") {
 		t.Fatalf("expected Content-Type application/json, got %q", contentType)
 	}
 

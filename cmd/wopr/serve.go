@@ -29,20 +29,18 @@ func runServeCommand(args []string) int {
 	flagPort := 0
 	flagHost := ""
 
-	stringFlags := map[string]*string{
-		"--port":     nil,
-		"--hostname": nil,
-	}
-	// Use local variables to capture values
 	var portVal, hostVal string
-	stringFlags["--port"] = &portVal
-	stringFlags["--hostname"] = &hostVal
+	stringFlags := map[string]*string{
+		"--port":     &portVal,
+		"--hostname": &hostVal,
+	}
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if p, ok := stringFlags[arg]; ok {
 			if i+1 >= len(args) || args[i+1] == "" {
 				fmt.Fprintf(os.Stderr, "wopr serve: %s requires a non-empty value\n", arg)
+				fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H]")
 				return 2
 			}
 			i++
@@ -52,9 +50,11 @@ func runServeCommand(args []string) int {
 		switch {
 		case strings.HasPrefix(arg, "-"):
 			fmt.Fprintf(os.Stderr, "wopr serve: unknown option: %s\n", arg)
+			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H]")
 			return 2
 		default:
 			fmt.Fprintf(os.Stderr, "wopr serve: unexpected argument: %s\n", arg)
+			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H]")
 			return 2
 		}
 	}
@@ -63,6 +63,7 @@ func runServeCommand(args []string) int {
 		p, err := strconv.Atoi(portVal)
 		if err != nil || p <= 0 {
 			fmt.Fprintf(os.Stderr, "wopr serve: --port requires a positive integer\n")
+			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H]")
 			return 2
 		}
 		flagPort = p

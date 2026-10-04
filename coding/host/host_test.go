@@ -65,9 +65,8 @@ func TestHostRejectsASecondConcurrentPromptPerSession(t *testing.T) {
 	// Create a blocking HTTP server that signals on entry and blocks until released
 	entryCh := make(chan struct{}, 1)
 	releaseCh := make(chan struct{})
-	requestCount := 0
+	releaseOnce := sync.Once{}
 	blockingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
 		entryCh <- struct{}{}
 		<-releaseCh
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -86,6 +85,7 @@ func TestHostRejectsASecondConcurrentPromptPerSession(t *testing.T) {
 		}
 	}))
 	defer blockingSrv.Close()
+	defer releaseOnce.Do(func() { close(releaseCh) })
 
 	// Create temp dir for WOPR_HOME and models.json
 	tempDir := t.TempDir()
@@ -109,11 +109,10 @@ func TestHostRejectsASecondConcurrentPromptPerSession(t *testing.T) {
 	}
 
 	// Build model by spec using our test server
-	model, err := coding.BuildModel("anthropic/test-model", svcs)
+	_, err = coding.BuildModel("anthropic/test-model", svcs)
 	if err != nil {
 		t.Fatalf("BuildModel: %v", err)
 	}
-	t.Logf("Built model: %s provider: %s", model.ID, model.Provider.ID())
 
 	// Create host
 	h := New(svcs, nil)
@@ -148,7 +147,15 @@ func TestHostRejectsASecondConcurrentPromptPerSession(t *testing.T) {
 	}
 
 	// Now try a second prompt on session A - should return ErrSessionBusy immediately
-	err = sessA.Prompt(context.Background(), "second prompt")
+	contended := make(chan error, 1)
+	wg.Go(func() {
+		contended <- sessA.Prompt(context.Background(), "second prompt")
+	})
+	select {
+	case err = <-contended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second prompt on session A never returned; the run rule is not rejecting it")
+	}
 	if !errors.Is(err, ErrSessionBusy) {
 		t.Fatalf("expected ErrSessionBusy, got %v", err)
 	}
@@ -168,7 +175,7 @@ func TestHostRejectsASecondConcurrentPromptPerSession(t *testing.T) {
 	}
 
 	// Release the blocking server so both requests can complete
-	close(releaseCh)
+	releaseOnce.Do(func() { close(releaseCh) })
 
 	// Wait for both goroutines to finish
 	wg.Wait()
@@ -177,4 +184,27 @@ func TestHostRejectsASecondConcurrentPromptPerSession(t *testing.T) {
 	if errors.Is(sessBErr, ErrSessionBusy) {
 		t.Fatalf("session B should not be busy, got %v", sessBErr)
 	}
+}
+
+// TestSubscriptionCloseIdempotent verifies that Close is safe to call twice and
+// safe to race, and that Publish after Close does not panic.
+func TestSubscriptionCloseIdempotent(t *testing.T) {
+	b := newBus(nil)
+	sub := b.Subscribe(1)
+
+	// Double close must not panic
+	sub.Close()
+	sub.Close()
+
+	// Concurrent close must not panic
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Go(func() {
+			sub.Close()
+		})
+	}
+	wg.Wait()
+
+	// Publish after Close must not panic
+	b.Publish(Event{Type: "test", Session: "", Data: "payload"})
 }

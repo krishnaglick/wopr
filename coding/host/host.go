@@ -13,7 +13,6 @@ var ErrSessionBusy = errors.New("host: session already has a run in flight")
 // Host owns every session a served process runs.
 type Host struct {
 	svcs     *coding.Services
-	sink     func(Event, []byte)
 	bus      *Bus
 	registry map[string]*Session
 	mu       sync.RWMutex
@@ -26,7 +25,6 @@ type Host struct {
 func New(svcs *coding.Services, sink func(Event, []byte)) *Host {
 	h := &Host{
 		svcs:     svcs,
-		sink:     sink,
 		bus:      newBus(sink),
 		registry: make(map[string]*Session),
 	}
@@ -65,7 +63,7 @@ func (h *Host) Start(opts StartOptions) (*Session, error) {
 	h.mu.Lock()
 	if _, exists := h.registry[id]; exists {
 		h.mu.Unlock()
-		_ = sess.Close()
+		_ = sess.Close() // close error dropped; duplicate-id error takes precedence
 		return nil, errors.New("host: session id already registered")
 	}
 	h.registry[id] = wrapped
@@ -73,8 +71,7 @@ func (h *Host) Start(opts StartOptions) (*Session, error) {
 	return wrapped, nil
 }
 
-// Get returns a registered session. Second caller: the gate test starts session B
-// through the registry and prompts it, proving the rejection is per session.
+// Get returns a registered session by id, or nil if not found.
 func (h *Host) Get(id string) (*Session, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

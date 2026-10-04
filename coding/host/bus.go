@@ -33,6 +33,13 @@ func newBus(sink func(Event, []byte)) *Bus {
 // Publish calls json.Marshal(ev) once and passes the resulting []byte to the
 // sink and to every subscriber, so fan-out is one pointer copy each, never a
 // per-subscriber marshal.
+//
+// The returned payload slice may have spare capacity; subscribers MUST treat
+// it as read-only and must not append into it. Doing so corrupts the shared
+// backing array for all other subscribers.
+//
+// Publish blocks on a full subscriber buffer. serve-4 replaces this with a
+// byte-bounded buffer and a terminal drop event.
 func (b *Bus) Publish(ev Event) {
 	payload, err := json.Marshal(ev)
 	if err != nil {
@@ -79,10 +86,11 @@ func (b *Bus) Subscribe(buffer int) *Subscription {
 // Subscription is one subscriber's handle. doneCh is the field, Done the accessor:
 // distinct names, so the select in Publish cannot be confused with the method.
 type Subscription struct {
-	bus    *Bus
-	id     uint64
-	ch     chan []byte
-	doneCh chan struct{}
+	bus       *Bus
+	id        uint64
+	ch        chan []byte
+	doneCh    chan struct{}
+	closeOnce sync.Once // guards idempotent Close
 }
 
 // Payloads returns a read-only channel of serialized event payloads.
@@ -101,9 +109,12 @@ func (s *Subscription) Done() <-chan struct{} {
 // would be wrong twice: a Publish already past the mutex would send on a
 // closed channel, and holding the mutex across the send to avoid that
 // deadlocks against a consumer that calls Close when the channel is full.
+// Close is idempotent: safe to call twice, safe to race.
 func (s *Subscription) Close() {
-	s.bus.mu.Lock()
-	delete(s.bus.subscribers, s.id)
-	s.bus.mu.Unlock()
-	close(s.doneCh)
+	s.closeOnce.Do(func() {
+		s.bus.mu.Lock()
+		delete(s.bus.subscribers, s.id)
+		s.bus.mu.Unlock()
+		close(s.doneCh)
+	})
 }
