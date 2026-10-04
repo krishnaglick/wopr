@@ -20,8 +20,8 @@ type Host struct {
 
 // New returns a Host over svcs. sink, when non-nil, also receives every published
 // event's bytes: the single-consumer path, named by the item
-// (/home/kc/dev/wopr/BACKLOG.md:39-40). Nil in slice 1; serve-2's rpc writer is
-// the first real sink.
+// (/home/kc/dev/wopr/BACKLOG.md:39-40). ServeRPC takes *coding.Services directly
+// and writes its own JSON lines, so the bus is not on the RPC path.
 func New(svcs *coding.Services, sink func(Event, []byte)) *Host {
 	h := &Host{
 		svcs:     svcs,
