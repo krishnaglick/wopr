@@ -80,20 +80,42 @@ so the convention is the project's rather than invented: one item per plan slice
 each with a status marker, the plan section it comes from, and its gates. Step 1's
 claim step needs it to exist.
 
-## Model constraint
+## Model constraint: tier 1 and tier 2 only
 
-**Tier 1 and 2 models only**, per `~/.config/opencode/MODELS.md`:
+Per `~/.config/opencode/MODELS.md`. Four personas are in range and already
+registered — use these:
 
-- `verifier`, `architect` → `opencode-go/space-bunny-free` (tier 1)
-- `qa`, `implementer` → `opencode/nemotron-3-ultra-free` (tier 2)
-- `mechanic` → `opencode/nemotron-3.5-lightning-free` — **tier 4, do not dispatch it**
+| Persona | Model | Role |
+|---|---|---|
+| `architect` | `opencode-go/space-bunny-free` (tier 1) | drafts the slice spec (Step 2) |
+| `verifier` | `opencode-go/space-bunny-free` (tier 1) | the whole verification fan (Steps 3 and 6) |
+| `implementer` | `opencode/nemotron-3-ultra-free` (tier 2) | slice implementation (Step 4) |
+| `qa` | `opencode/nemotron-3-ultra-free` (tier 2) | end-to-end and real-app verification |
 
-The agent registry loads at session start. Creating a new agent file mid-session does
-not register it, so model diversity across dispatches requires the variant agent file
-to exist **before** the session starts. If you want a genuinely mixed-model
-verification fan, say so at launch and the variants get written first; otherwise the
-registered defaults apply and the fan runs mostly on one model's weights — say so in
-the fan report rather than implying diversity you did not have.
+**Two exclusions.** `mechanic` is pinned to `opencode/nemotron-3.5-lightning-free`,
+which is tier 4 — do not dispatch it; route bounded edits to `implementer` instead.
+`explore` and `general` declare no model in `~/.config/opencode/agents/`, so there is
+no evidence they are tier 1 or 2; leave them alone, because an unverifiable model does
+not satisfy a model constraint.
+
+**Fan diversity comes from the angle, not the model.** `verifier`'s persona carries the
+angle list — `runtime-seam`, `spec-fidelity`, `completeness`, `scope-fit`,
+`convention`, `leanness`, `test-oracle` — and takes exactly one per dispatch, named in
+the prompt. Dispatch it three or four times in a single message, one angle each, and do
+not create persona variants: an agent file written mid-session does not register, and
+the angle belongs in the prompt where it is per-dispatch rather than per-project.
+
+Two of the angles earn their place here specifically. `test-oracle` is what catches a
+gate exiting 0 without running the suite — the failure this repository already
+produced, since `make check` had been silently unrunnable for its entire life because
+no Go toolchain was installed. `runtime-seam` is what caught the earlier draft's
+falsified central claim, when four dispatches found 15 blockers in a plan that had
+already been through two rewrites.
+
+`verifier` runs on the same weights as `architect`. Convergence between a `verifier`
+finding and an `architect` judgement is therefore weaker evidence than convergence
+between a `verifier` finding and an `implementer` report. Say which personas actually
+ran in the fan report rather than implying a diversity you did not have.
 
 ## Traps the verification fan already found
 
