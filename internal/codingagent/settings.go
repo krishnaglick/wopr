@@ -100,6 +100,7 @@ type Settings struct {
 
 	Terminal *TerminalSettings `json:"terminal,omitempty"`
 	Images   *ImageSettings    `json:"images,omitempty"`
+	Server   *ServerSettings   `json:"server,omitempty"`
 
 	// DefaultTools is the initial built-in tool selection; nil means the
 	// default read, bash, edit and write.
@@ -164,6 +165,14 @@ type ImageSettings struct {
 	AutoResize *bool `json:"autoResize,omitempty"`
 	// BlockImages hides images in the transcript. Default: false.
 	BlockImages *bool `json:"blockImages,omitempty"`
+}
+
+// ServerSettings is settings.server.
+type ServerSettings struct {
+	// Port is the TCP port wopr serve listens on. 0 means the default.
+	Port int `json:"port,omitempty"`
+	// Hostname is the address wopr serve binds. "" means the default.
+	Hostname string `json:"hostname,omitempty"`
 }
 
 // CompactionSettingsJSON is settings.compaction.
@@ -244,6 +253,9 @@ var CacheWarmingModes = []CacheWarmingMode{"off", "streaming", "idle"}
 const defaultCacheWarmingMode CacheWarmingMode = "streaming"
 
 const defaultHTTPIdleTimeoutMs = 300_000
+
+const defaultServerPort = 4096
+const defaultServerHostname = "127.0.0.1"
 
 // UnmarshalJSON decodes a settings file. A value whose JSON type does not
 // match its key is dropped and the rest of the file still loads. The older
@@ -705,6 +717,22 @@ func parseHTTPIdleTimeoutMs(value any) (int, bool) {
 		return parseHTTPIdleTimeoutMs(parsed)
 	}
 	return 0, false
+}
+
+// GetServerPort returns the TCP port wopr serve listens on. Default: 4096.
+func (s Settings) GetServerPort() int {
+	if s.Server == nil || s.Server.Port <= 0 {
+		return defaultServerPort
+	}
+	return s.Server.Port
+}
+
+// GetServerHostname returns the address wopr serve binds. Default: 127.0.0.1.
+func (s Settings) GetServerHostname() string {
+	if s.Server == nil || s.Server.Hostname == "" {
+		return defaultServerHostname
+	}
+	return s.Server.Hostname
 }
 
 // CompactionConfig is the resolved compaction settings (compaction imports

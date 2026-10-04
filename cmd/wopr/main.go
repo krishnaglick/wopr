@@ -224,6 +224,7 @@ func main() {
 			func(args []string) int { return runVerifyCommand(args, os.Stdout, os.Stderr) },
 			runUpdateCommand,
 			func(args []string) int { return woprdocs.RunCommand(args, os.Stdout, os.Stderr) },
+			runServeCommand,
 		} {
 			if code := run(args); code >= 0 {
 				exitProcess(code)
