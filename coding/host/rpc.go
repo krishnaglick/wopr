@@ -81,6 +81,7 @@ type RPCCommandEnvelope struct {
 	Raw  json.RawMessage `json:"-"` // full original bytes, set by parseRPCCommand
 }
 
+// RPCImageContent is one image part of a prompt or a tool result.
 type RPCImageContent struct {
 	Type     string `json:"type"`
 	Data     string `json:"data"`
@@ -385,11 +386,26 @@ func rpcImages(images []RPCImageContent) []ai.ImageContent {
 	return out
 }
 
+// unmarshalRPC is json.Unmarshal with this package's name rewritten back to
+// "main" in a type error. encoding/json embeds <pkg>.<Type> in its message, and
+// these wire types moved out of package main, so without the rewrite every
+// malformed-command error would change on the wire.
+//
+// ponytail: the rewrite keeps bytes, not accuracy — the type really lives here.
+// Drop it when no client matches the text.
+func unmarshalRPC(data []byte, v any) error {
+	err := json.Unmarshal(data, v)
+	if _, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
+		return errors.New(strings.ReplaceAll(err.Error(), "host.", "main."))
+	}
+	return err
+}
+
 // parseRPCCommand parses a JSON line from stdin into a typed command.
 // Returns the envelope (with Type and ID) and any parse error.
 func parseRPCCommand(line []byte) (RPCCommandEnvelope, error) {
 	var env RPCCommandEnvelope
-	if err := json.Unmarshal(line, &env); err != nil {
+	if err := unmarshalRPC(line, &env); err != nil {
 		return RPCCommandEnvelope{}, err
 	}
 	env.Raw = append([]byte(nil), line...) // safe copy
@@ -1274,7 +1290,7 @@ func readJSONLLines(r io.Reader, onLine func([]byte) bool) error {
 // command when it fails.
 func decodeRPC[T any](env RPCCommandEnvelope, writeRPC func(any)) (T, bool) {
 	var cmd T
-	if err := json.Unmarshal(env.Raw, &cmd); err != nil {
+	if err := unmarshalRPC(env.Raw, &cmd); err != nil {
 		writeRPC(rpcError(env.ID, env.Type, err.Error()))
 		return cmd, false
 	}
