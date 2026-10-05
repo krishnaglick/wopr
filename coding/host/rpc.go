@@ -436,10 +436,7 @@ func rpcModelValue(model *ai.Model) *RPCModel {
 			Input:    []string{},
 		}
 	}
-	provider := model.ProviderMeta.ProviderID
-	if provider == "" && model.Provider != nil {
-		provider = model.Provider.ID()
-	}
+	provider := ModelProviderID(model)
 	input := []string{"text"}
 	if model.Capabilities.SupportsImages {
 		input = append(input, "image")
@@ -521,7 +518,7 @@ func ServeRPC(ctx context.Context, svcs *coding.Services, sess *coding.Session, 
 	close(cycleComplete)
 
 	handleCycleModel := func(id string, currentSession *coding.Session) {
-		models, err := rpcAvailableModels(svcs, currentSession.Model())
+		models, err := AvailableModels(svcs, currentSession.Model())
 		if err != nil {
 			writeRPC(rpcError(id, "cycle_model", err.Error()))
 			return
@@ -658,10 +655,7 @@ func ServeRPC(ctx context.Context, svcs *coding.Services, sess *coding.Session, 
 				writeRPC(rpcError(env.ID, "prompt", codingagent.FormatNoAPIKeyFoundMessage("unknown")))
 				continue
 			} else {
-				providerID := model.ProviderMeta.ProviderID
-				if providerID == "" && model.Provider != nil {
-					providerID = model.Provider.ID()
-				}
+				providerID := ModelProviderID(model)
 				if providerID != "test-faux" && !svcs.Registry().HasConfiguredAuth(providerID) {
 					writeRPC(rpcError(env.ID, "prompt", codingagent.FormatNoAPIKeyFoundMessage(providerID)))
 					continue
@@ -769,7 +763,7 @@ func ServeRPC(ctx context.Context, svcs *coding.Services, sess *coding.Session, 
 			if !ok {
 				continue
 			}
-			models, err := rpcAvailableModels(svcs, sess.Model())
+			models, err := AvailableModels(svcs, sess.Model())
 			if err != nil {
 				writeRPC(rpcError(env.ID, "set_model", err.Error()))
 				continue
@@ -840,9 +834,9 @@ func ServeRPC(ctx context.Context, svcs *coding.Services, sess *coding.Session, 
 			}
 			writeRPC(rpcSuccess(env.ID, "set_auto_compaction", nil))
 
-		// ── get_available_models ─────────────────────────────────────────
+			// ── get_available_models ─────────────────────────────────────────
 		case "get_available_models":
-			models, err := rpcAvailableModels(svcs, sess.Model())
+			models, err := AvailableModels(svcs, sess.Model())
 			if err != nil {
 				writeRPC(rpcError(env.ID, "get_available_models", err.Error()))
 				continue
@@ -1207,10 +1201,7 @@ func rpcAvailableModels(services *coding.Services, current *ai.Model) ([]*ai.Mod
 		models = append(models, model)
 	}
 	if current != nil {
-		provider := current.ProviderMeta.ProviderID
-		if provider == "" && current.Provider != nil {
-			provider = current.Provider.ID()
-		}
+		provider := ModelProviderID(current)
 		key := provider + "\x00" + current.ID
 		if _, exists := seen[key]; !exists {
 			models = append(models, current)
@@ -1337,4 +1328,23 @@ func newManager(cwd, sessionDir string) *codingagent.SessionManager {
 		return codingagent.NewSessionManagerWithDir(cwd, sessionDir)
 	}
 	return codingagent.NewSessionManager(cwd)
+}
+
+// AvailableModels returns all available models for the given services,
+// including the current model if provided. This is an exported version of
+// rpcAvailableModels for use by serve.
+func AvailableModels(services *coding.Services, current *ai.Model) ([]*ai.Model, error) {
+	return rpcAvailableModels(services, current)
+}
+
+// ModelProviderID returns m's provider identity. ProviderMeta.ProviderID can
+// legitimately be empty, which is why the provider's own id is the fallback.
+func ModelProviderID(m *ai.Model) string {
+	if m.ProviderMeta.ProviderID != "" {
+		return m.ProviderMeta.ProviderID
+	}
+	if m.Provider != nil {
+		return m.Provider.ID()
+	}
+	return ""
 }

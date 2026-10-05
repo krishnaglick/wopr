@@ -8,7 +8,15 @@ import (
 	"github.com/alexrudloff/wopr/coding"
 )
 
+// Services is the coding.Services type, re-exported so serve can use it
+// without importing coding directly.
+type Services = coding.Services
+
+// ErrSessionBusy is returned when a session already has a run in flight.
 var ErrSessionBusy = errors.New("host: session already has a run in flight")
+
+// ErrNoModel is returned when StartOptions.Model is not set.
+var ErrNoModel = errors.New("host: StartOptions.Model is required")
 
 // Host owns every session a served process runs.
 type Host struct {
@@ -31,25 +39,43 @@ func New(svcs *coding.Services, sink func(Event, []byte)) *Host {
 	return h
 }
 
+// Services returns the coding.Services for callers that need it.
+func (h *Host) Services() *coding.Services {
+	return h.svcs
+}
+
+// Sessions returns a snapshot of the registry under h.mu.RLock.
+func (h *Host) Sessions() []*Session {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	sessions := make([]*Session, 0, len(h.registry))
+	for _, s := range h.registry {
+		sessions = append(sessions, s)
+	}
+	return sessions
+}
+
 // StartOptions is what a caller outside coding/host may configure. The model is
 // a "provider/model" spec because the host resolves it: no caller here can import
 // coding to build an *ai.Model itself.
 type StartOptions struct {
-	Model string // required, "provider/model"
+	Model      string // required, "provider/model"
+	SessionDir string // optional, empty means default dir
 }
 
 // Start creates one session and registers it under its id. A duplicate id
 // closes the new session and returns an error.
 func (h *Host) Start(opts StartOptions) (*Session, error) {
 	if opts.Model == "" {
-		return nil, errors.New("host: StartOptions.Model is required")
+		return nil, ErrNoModel
 	}
 	model, err := coding.BuildModel(opts.Model, h.svcs)
 	if err != nil {
 		return nil, err
 	}
 	sess, err := coding.StartSession(h.svcs, coding.SessionStartOptions{
-		Model: model,
+		Model:      model,
+		SessionDir: opts.SessionDir,
 	})
 	if err != nil {
 		return nil, err
@@ -90,6 +116,13 @@ type Session struct {
 
 func (s *Session) ID() string {
 	return s.id
+}
+
+// Inner returns the underlying *coding.Session.
+// This is the deliberate, documented escape hatch for the read surface;
+// serve never calls Send on it.
+func (s *Session) Inner() *coding.Session {
+	return s.sess
 }
 
 // Prompt sends a prompt to the session. It returns ErrSessionBusy if the
