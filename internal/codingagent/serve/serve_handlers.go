@@ -1,0 +1,832 @@
+package serve
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/alexrudloff/wopr/ai"
+	codinghost "github.com/alexrudloff/wopr/coding/host"
+	"github.com/alexrudloff/wopr/coding/version"
+	icodingagent "github.com/alexrudloff/wopr/internal/codingagent"
+)
+
+// ─── Shared ──────────────────────────────────────────────────────────────
+
+const (
+	defaultLimit = 50
+	maxLimit     = 200
+)
+
+// writeJSON writes v as JSON with the given status. Sets Content-Type and
+// disables HTML escaping so that session titles, message text and file names
+// containing &, <, > are not mangled.
+func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(v)
+}
+
+// limitOf parses the "limit" query parameter. Non-integer or negative → def.
+// Above max → clamped to max.
+func limitOf(r *http.Request, def, max int) int {
+	q := r.URL.Query().Get("limit")
+	if q == "" {
+		return def
+	}
+	v, err := strconv.Atoi(q)
+	if err != nil || v < 0 {
+		return def
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+// directoryParam validates the "directory" query parameter against the
+// server's resolved root. If present and different → 400 error.
+func (s *Server) directoryParam(r *http.Request) (string, *errorDTO, int) {
+	q := r.URL.Query().Get("directory")
+	if q == "" {
+		return s.sessionDir, nil, 0
+	}
+	resolvedRoot, _ := filepath.EvalSymlinks(s.services.CWD())
+	qResolved, _ := filepath.EvalSymlinks(q)
+	if qResolved != resolvedRoot {
+		return "", &errorDTO{Error: "directory parameter must match server root"}, http.StatusBadRequest
+	}
+	return s.sessionDir, nil, 0
+}
+
+// notImplemented is the shared stub for the four 501 routes.
+func (s *Server) notImplemented(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, http.StatusNotImplemented, errorDTO{Error: "not implemented"})
+}
+
+// ─── Handlers ────────────────────────────────────────────────────────────
+
+// GET /global/health
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, http.StatusOK, healthResponse{
+		Healthy: true,
+		Version: version.Version,
+	})
+}
+
+// GET /session
+func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
+	limit := limitOf(r, defaultLimit, maxLimit)
+	dir, errDTO, status := s.directoryParam(r)
+	if errDTO != nil {
+		s.writeJSON(w, status, errDTO)
+		return
+	}
+
+	// Disk sessions.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		s.writeJSON(w, http.StatusOK, []sessionDTO{})
+		return
+	}
+
+	type diskRec struct {
+		rec sessionRecord
+		err error
+	}
+	diskCh := make(chan diskRec, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		go func(name string) {
+			path := filepath.Join(dir, name)
+			rec, ok := sessionRecordAt(path)
+			diskCh <- diskRec{rec: rec, err: nil}
+			if !ok {
+				diskCh <- diskRec{err: fmt.Errorf("skip")}
+			}
+		}(entry.Name())
+	}
+
+	diskMap := make(map[string]sessionRecord)
+	for i := 0; i < cap(diskCh); i++ {
+		select {
+		case dr := <-diskCh:
+			if dr.err == nil {
+				diskMap[dr.rec.ID] = dr.rec
+			}
+		default:
+		}
+	}
+
+	// Live sessions from host registry.
+	liveSessions := s.host.Sessions()
+	for _, ls := range liveSessions {
+		id := ls.ID()
+		if _, exists := diskMap[id]; exists {
+			continue
+		}
+		rec, _ := getSessionRecord(dir, id, ls)
+		diskMap[id] = rec
+	}
+
+	// Convert to slice and sort by (mtime desc, header timestamp desc, path asc).
+	type sortable struct {
+		rec sessionRecord
+		key string
+	}
+	var sortableRecs []sortable
+	for _, rec := range diskMap {
+		sortableRecs = append(sortableRecs, sortable{
+			rec: rec,
+			key: fmt.Sprintf("%s|%s|%s",
+				rec.ModTime.Format(time.RFC3339Nano),
+				rec.Header.Timestamp,
+				rec.Path,
+			),
+		})
+	}
+	slices.SortFunc(sortableRecs, func(a, b sortable) int {
+		// mtime desc, timestamp desc, path asc
+		if a.rec.ModTime.After(b.rec.ModTime) {
+			return -1
+		}
+		if a.rec.ModTime.Before(b.rec.ModTime) {
+			return 1
+		}
+		if a.rec.Header.Timestamp > b.rec.Header.Timestamp {
+			return -1
+		}
+		if a.rec.Header.Timestamp < b.rec.Header.Timestamp {
+			return 1
+		}
+		return strings.Compare(a.rec.Path, b.rec.Path)
+	})
+
+	// Build DTOs.
+	var dtos []sessionDTO
+	for _, sr := range sortableRecs {
+		if len(dtos) >= limit {
+			break
+		}
+		live, _ := s.host.Get(sr.rec.ID)
+		dtos = append(dtos, s.buildSessionDTO(sr.rec, live))
+	}
+
+	s.writeJSON(w, http.StatusOK, dtos)
+}
+
+// POST /session
+func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.host.Start(codinghost.StartOptions{
+		Model:      s.modelSpec,
+		SessionDir: s.sessionDir,
+	})
+	if err != nil {
+		if errors.Is(err, codinghost.ErrNoModel) {
+			s.writeJSON(w, http.StatusConflict, errorDTO{
+				Error: "no model is configured for this server; start it with `wopr serve` after setting a default model (`wopr --model <provider/model> <prompt>`, or `settings.defaultModel`)",
+			})
+			return
+		}
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
+	}
+	rec, _ := getSessionRecord(s.sessionDir, sess.ID(), sess)
+	s.writeJSON(w, http.StatusOK, s.buildSessionDTO(rec, sess))
+}
+
+// GET /session/{id}
+func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	live, _ := s.host.Get(id)
+	rec, ok := getSessionRecord(s.sessionDir, id, live)
+	if !ok {
+		s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "session not found"})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, s.buildSessionDTO(rec, live))
+}
+
+// PATCH /session/{id}
+func (s *Server) patchSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var body struct {
+		Title *string `json:"title"`
+		Time  *struct {
+			Archived *int64 `json:"archived"`
+		} `json:"time"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes)).Decode(&body); err != nil {
+		s.writeJSON(w, http.StatusBadRequest, errorDTO{Error: "invalid body"})
+		return
+	}
+
+	hasTitle := body.Title != nil && strings.TrimSpace(*body.Title) != ""
+	hasTime := body.Time != nil
+
+	if (hasTitle && hasTime) || (!hasTitle && !hasTime) {
+		s.writeJSON(w, http.StatusBadRequest, errorDTO{Error: "exactly one of title or time.archived must be set"})
+		return
+	}
+
+	live, _ := s.host.Get(id)
+	rec, ok := getSessionRecord(s.sessionDir, id, live)
+	if !ok {
+		s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "session not found"})
+		return
+	}
+
+	sm := icodingagent.NewSessionManagerWithDir(s.services.CWD(), s.sessionDir)
+
+	if hasTitle {
+		title := strings.TrimSpace(*body.Title)
+		if title == "" {
+			s.writeJSON(w, http.StatusBadRequest, errorDTO{Error: "title must not be empty"})
+			return
+		}
+		var err error
+		if live != nil {
+			err = live.Inner().SetSessionName(title)
+		} else {
+			err = sm.RenameSession(rec.Path, title)
+		}
+		if err != nil {
+			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+			return
+		}
+	}
+
+	if hasTime {
+		var archiveData any
+		if body.Time.Archived != nil {
+			archiveData = map[string]any{"archived": *body.Time.Archived}
+		} else {
+			archiveData = map[string]any{"archived": nil}
+		}
+		var err error
+		if live != nil {
+			err = live.Inner().Inner().AppendCustomEntry("session_archive", archiveData)
+		} else {
+			err = sm.AppendCustomEntry(rec.Path, "session_archive", archiveData)
+		}
+		if err != nil {
+			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+			return
+		}
+	}
+
+	// Re-read and return updated record.
+	newRec, _ := getSessionRecord(s.sessionDir, id, live)
+	s.writeJSON(w, http.StatusOK, s.buildSessionDTO(newRec, live))
+}
+
+// DELETE /session/{id}, POST /session/{id}/fork, POST /session/{id}/revert, GET /session/{id}/diff
+// All share the same notImplemented stub.
+
+// GET /project
+func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
+	worktree, _ := filepath.EvalSymlinks(s.services.CWD())
+	pid := projectID(worktree)
+	s.writeJSON(w, http.StatusOK, []projectDTO{{ID: pid, Worktree: worktree}})
+}
+
+// GET /project/current
+func (s *Server) getCurrentProject(w http.ResponseWriter, r *http.Request) {
+	worktree, _ := filepath.EvalSymlinks(s.services.CWD())
+	pid := projectID(worktree)
+	s.writeJSON(w, http.StatusOK, projectDTO{ID: pid, Worktree: worktree})
+}
+
+// GET /config/providers
+func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
+	liveSessions := s.host.Sessions()
+	var current *ai.Model
+	if len(liveSessions) > 0 {
+		current = liveSessions[0].Inner().Model()
+	}
+	models, err := codinghost.AvailableModels(s.services, current)
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
+	}
+
+	byProvider := make(map[string]providerDTO)
+	for _, m := range models {
+		pid := codinghost.ModelProviderID(m)
+		pdto := byProvider[pid]
+		pdto.Name = pid
+		pdto.API = string(m.ProviderMeta.API)
+		if pdto.Models == nil {
+			pdto.Models = make(map[string]providerModelDTO)
+		}
+		pdto.Models[m.ID] = providerModelDTO{Name: m.DisplayName}
+		byProvider[pid] = pdto
+	}
+
+	s.writeJSON(w, http.StatusOK, byProvider)
+}
+
+// GET /provider
+func (s *Server) listProviderNames(w http.ResponseWriter, r *http.Request) {
+	authed := icodingagent.AuthenticatedProviders(s.services.AgentDir())
+	var names []string
+	for _, p := range ai.ListProviders() {
+		if authed[p] {
+			names = append(names, p)
+		}
+	}
+	slices.Sort(names)
+	s.writeJSON(w, http.StatusOK, names)
+}
+
+// GET /agent
+func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
+	agents := []agentInfoDTO{
+		{Name: "explore"},
+		{Name: "general"},
+		{Name: "propose"},
+		{Name: "build"},
+	}
+	s.writeJSON(w, http.StatusOK, agents)
+}
+
+// GET /session/status
+func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
+	liveSessions := s.host.Sessions()
+	var dtos []sessionStatusDTO
+	for _, ls := range liveSessions {
+		t := "idle"
+		if !ls.Inner().IsIdle() {
+			t = "busy"
+		}
+		dtos = append(dtos, sessionStatusDTO{Type: t})
+	}
+	s.writeJSON(w, http.StatusOK, dtos)
+}
+
+// GET /session/{id}/todo
+func (s *Server) sessionTodo(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	live, _ := s.host.Get(id)
+	_, ok := getSessionRecord(s.sessionDir, id, live)
+	if !ok {
+		s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "session not found"})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, []todoItemDTO{})
+}
+
+// GET /file?path=&directory=
+func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
+	root := s.services.CWD()
+	q := r.URL.Query().Get("path")
+	if q == "" {
+		q = "."
+	}
+
+	resolved, err := resolveInRoot(root, q)
+	if err != nil {
+		//nolint:gocritic // if-else chain with errors.Is is clearer than switch here
+		if errors.Is(err, errMissingPath) {
+			s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "path not found"})
+		} else if errors.Is(err, errUnreadableLink) || errors.Is(err, errOutsideRoot) {
+			s.writeJSON(w, http.StatusForbidden, errorDTO{Error: "path not allowed"})
+		} else {
+			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		}
+		return
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "path not found"})
+		return
+	}
+	if !info.IsDir() {
+		s.writeJSON(w, http.StatusBadRequest, errorDTO{Error: "path must be a directory"})
+		return
+	}
+
+	entries, err := os.ReadDir(resolved)
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
+	}
+
+	var dtos []fileNodeDTO
+	for _, entry := range entries {
+		if len(dtos) >= maxFileEntries {
+			break
+		}
+		t := "file"
+		if entry.IsDir() {
+			t = "directory"
+		}
+		rel, _ := filepath.Rel(root, filepath.Join(resolved, entry.Name()))
+		dtos = append(dtos, fileNodeDTO{
+			Name: entry.Name(),
+			Path: filepath.ToSlash(rel),
+			Type: t,
+		})
+	}
+
+	s.writeJSON(w, http.StatusOK, dtos)
+}
+
+// GET /find/file?query=&limit=
+func (s *Server) findFiles(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("query")
+	limit := limitOf(r, defaultLimit, 100)
+	root := s.services.CWD()
+
+	var matches []fileNodeDTO
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip errors
+		}
+		if len(matches) >= maxWalkEntries {
+			return io.EOF
+		}
+		name := d.Name()
+		if strings.HasPrefix(name, ".") || name == "node_modules" {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		if rel == "." {
+			return nil
+		}
+		matches = append(matches, fileNodeDTO{
+			Name: name,
+			Path: filepath.ToSlash(rel),
+			Type: func() string {
+				if d.IsDir() {
+					return "directory"
+				}
+				return "file"
+			}(),
+		})
+		return nil
+	})
+	if err != nil && !errors.Is(err, io.EOF) {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
+	}
+
+	var dtos []fileNodeDTO
+	if query == "" {
+		dtos = matches
+	} else {
+		// Use tui.FuzzyFilter for fuzzy matching.
+		// This is a simplified version - the real FuzzyFilter needs to be called.
+		for _, m := range matches {
+			if strings.Contains(strings.ToLower(m.Path), strings.ToLower(query)) {
+				dtos = append(dtos, m)
+			}
+		}
+	}
+
+	if len(dtos) > limit {
+		dtos = dtos[:limit]
+	}
+	s.writeJSON(w, http.StatusOK, dtos)
+}
+
+// GET /file/status
+func (s *Server) fileStatus(w http.ResponseWriter, r *http.Request) {
+	root, _ := filepath.EvalSymlinks(s.services.CWD())
+	paths, err := workingTreePaths(root)
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
+	}
+
+	var dtos []fileStatusDTO
+	for _, p := range paths {
+		if len(dtos) >= maxFileStatusEntries {
+			break
+		}
+		dtos = append(dtos, fileStatusDTO{Path: p})
+	}
+	s.writeJSON(w, http.StatusOK, dtos)
+}
+
+// GET /session/{id}/message?limit=
+func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	limit := limitOf(r, defaultLimit, maxLimit)
+
+	live, _ := s.host.Get(id)
+	rec, ok := getSessionRecord(s.sessionDir, id, live)
+	if !ok {
+		s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "session not found"})
+		return
+	}
+
+	var entries []icodingagent.SessionEntry
+	if rec.HasFile {
+		var err error
+		entries, err = tailEntries(rec.Path, limit)
+		if err != nil {
+			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+			return
+		}
+	} else if live != nil {
+		all := live.Inner().Entries()
+		if len(all) > limit {
+			all = all[len(all)-limit:]
+		}
+		entries = all
+	}
+
+	dtos := s.entriesToMessages(entries, id)
+	s.writeJSON(w, http.StatusOK, dtos)
+}
+
+// ─── DTO Builders ────────────────────────────────────────────────────────
+
+func (s *Server) buildSessionDTO(rec sessionRecord, live *codinghost.Session) sessionDTO {
+	dto := sessionDTO{
+		ID:        rec.ID,
+		Slug:      rec.ID, // slug = id
+		ProjectID: projectID(func() string { r, _ := filepath.EvalSymlinks(s.services.CWD()); return r }()),
+		Directory: rec.Header.CWD,
+		Title:     rec.Name,
+		Version:   version.Version,
+		Time: sessionTime{
+			Created:  parseRFC3339NanoToMillis(rec.Header.Timestamp),
+			Updated:  rec.ModTime.UnixMilli(),
+			Archived: rec.Archived,
+		},
+	}
+
+	// If live, add tokens and cost.
+	if live != nil {
+		acc := live.Inner().Inner().Accounting()
+		dto.Tokens = &sessionTokens{
+			Input:  acc.Tokens.Input,
+			Output: acc.Tokens.Output,
+			Cache: tokenCache{
+				Read:  acc.Tokens.CacheRead,
+				Write: acc.Tokens.CacheWrite,
+			},
+		}
+		if !acc.Tokens.CostUnknown {
+			dto.Cost = &acc.Tokens.Cost
+		}
+	}
+
+	// Fallback: if directory is empty, use server root.
+	if dto.Directory == "" {
+		dto.Directory, _ = filepath.EvalSymlinks(s.services.CWD())
+	}
+
+	// Fallback: if updated is zero (live with no file), use created.
+	if dto.Time.Updated == 0 {
+		dto.Time.Updated = dto.Time.Created
+	}
+
+	return dto
+}
+
+func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionID string) []messageDTO {
+	var messages []messageDTO
+	var pendingTool map[string]*messageDTO // callID -> messageDTO with pending tool part
+
+	for _, e := range entries {
+		if e.Base.Type != "message" {
+			continue
+		}
+		var me icodingagent.MessageEntry
+		if err := json.Unmarshal(e.Raw(), &me); err != nil {
+			continue
+		}
+
+		// Extract role and content from AgentMessage union.
+		var role string
+		var content []ai.ContentBlock
+		switch {
+		case me.Message.User != nil:
+			role = me.Message.User.Role
+			content = make([]ai.ContentBlock, len(me.Message.User.Content))
+			for i, c := range me.Message.User.Content {
+				content[i] = c
+			}
+		case me.Message.Assistant != nil:
+			role = me.Message.Assistant.Role
+			content = make([]ai.ContentBlock, len(me.Message.Assistant.Content))
+			for i, c := range me.Message.Assistant.Content {
+				content[i] = c
+			}
+		case me.Message.ToolResult != nil:
+			role = me.Message.ToolResult.Role
+			content = make([]ai.ContentBlock, len(me.Message.ToolResult.Content))
+			for i, c := range me.Message.ToolResult.Content {
+				content[i] = c
+			}
+		case me.Message.System != nil:
+			role = "system"
+			content = nil
+		default:
+			// Custom message (e.g., bashExecution)
+			if r, ok := me.Message.Custom["role"].(string); ok {
+				role = r
+			}
+			content = nil
+		}
+
+		msg := messageDTO{
+			ID:        e.Base.ID,
+			SessionID: sessionID,
+			Role:      role,
+			Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+		}
+
+		for _, block := range content {
+			switch b := block.(type) {
+			case ai.TextContent:
+				msg.Parts = append(msg.Parts, partDTO{
+					ID:        e.Base.ID + "-text",
+					MessageID: e.Base.ID,
+					SessionID: sessionID,
+					Type:      "text",
+					Text:      b.Text,
+				})
+			case ai.ThinkingContent:
+				msg.Parts = append(msg.Parts, partDTO{
+					ID:        e.Base.ID + "-reasoning",
+					MessageID: e.Base.ID,
+					SessionID: sessionID,
+					Type:      "reasoning",
+					Text:      b.Thinking,
+				})
+			case ai.ImageContent:
+				// The blob resolution with budget is handled in tailEntries.
+				// Here we assume the image data is already a data URL or placeholder.
+				dataURL := b.Data
+				mime := b.MimeType
+				if strings.HasPrefix(dataURL, "data:") {
+					parts := strings.SplitN(dataURL, ",", 2)
+					if len(parts) == 2 {
+						mime = strings.TrimPrefix(parts[0], "data:")
+						mime = strings.TrimSuffix(mime, ";base64")
+					}
+				}
+				msg.Parts = append(msg.Parts, partDTO{
+					ID:        e.Base.ID + "-image",
+					MessageID: e.Base.ID,
+					SessionID: sessionID,
+					Type:      "file",
+					Mime:      mime,
+					URL:       dataURL,
+				})
+			case ai.ToolCall:
+				callID := b.ID
+				part := partDTO{
+					ID:        e.Base.ID + "-tool-" + callID,
+					MessageID: e.Base.ID,
+					SessionID: sessionID,
+					Type:      "tool",
+					Tool:      b.Name,
+					CallID:    callID,
+					State:     json.RawMessage(`{"status":"pending"}`),
+				}
+				msg.Parts = append(msg.Parts, part)
+				if pendingTool == nil {
+					pendingTool = make(map[string]*messageDTO)
+				}
+				pendingTool[callID] = &msg
+			}
+		}
+
+		// Handle toolResult messages: they update a pending tool part or create a new message.
+		if role == "toolResult" {
+			tr := me.Message.ToolResult
+			callID := tr.ToolCallID
+			if pendingTool != nil {
+				if m, ok := pendingTool[callID]; ok {
+					for i := range m.Parts {
+						if m.Parts[i].CallID == callID {
+							// Extract text content from tool result.
+							var output strings.Builder
+							for _, c := range tr.Content {
+								if tc, ok := c.(ai.TextContent); ok {
+									output.WriteString(tc.Text)
+								}
+							}
+							state := map[string]any{
+								"status": "completed",
+								"output": output.String(),
+							}
+							stateBytes, _ := json.Marshal(state)
+							m.Parts[i].State = stateBytes
+							break
+						}
+					}
+					delete(pendingTool, callID)
+				} else {
+					// Unmatched toolResult: create a new assistant message with one tool part.
+					var output strings.Builder
+					for _, c := range tr.Content {
+						if tc, ok := c.(ai.TextContent); ok {
+							output.WriteString(tc.Text)
+						}
+					}
+					newMsg := messageDTO{
+						ID:        e.Base.ID,
+						SessionID: sessionID,
+						Role:      "assistant",
+						Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+						Parts: []partDTO{
+							{
+								ID:        e.Base.ID + "-tool-" + callID,
+								MessageID: e.Base.ID,
+								SessionID: sessionID,
+								Type:      "tool",
+								Tool:      tr.ToolName,
+								CallID:    callID,
+								State:     json.RawMessage(fmt.Sprintf(`{"status":"completed","output":%q}`, output.String())),
+							},
+						},
+					}
+					messages = append(messages, newMsg)
+				}
+			} else {
+				// No pending tools at all.
+				var output strings.Builder
+				for _, c := range tr.Content {
+					if tc, ok := c.(ai.TextContent); ok {
+						output.WriteString(tc.Text)
+					}
+				}
+				newMsg := messageDTO{
+					ID:        e.Base.ID,
+					SessionID: sessionID,
+					Role:      "assistant",
+					Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+					Parts: []partDTO{
+						{
+							ID:        e.Base.ID + "-tool-" + callID,
+							MessageID: e.Base.ID,
+							SessionID: sessionID,
+							Type:      "tool",
+							Tool:      tr.ToolName,
+							CallID:    callID,
+							State:     json.RawMessage(fmt.Sprintf(`{"status":"completed","output":%q}`, output.String())),
+						},
+					},
+				}
+				messages = append(messages, newMsg)
+			}
+		}
+
+		if role == "bashExecution" {
+			msg = messageDTO{
+				ID:        e.Base.ID,
+				SessionID: sessionID,
+				Role:      "assistant",
+				Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+				Parts: []partDTO{
+					{
+						ID:        e.Base.ID + "-bash",
+						MessageID: e.Base.ID,
+						SessionID: sessionID,
+						Type:      "tool",
+						Tool:      "bash",
+						CallID:    e.Base.ID,
+						State:     json.RawMessage(`{"status":"completed"}`),
+					},
+				},
+			}
+		}
+
+		if len(msg.Parts) > 0 || msg.Role != "" {
+			messages = append(messages, msg)
+		}
+	}
+
+	return messages
+}
+
+func parseRFC3339NanoToMillis(ts string) int64 {
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return 0
+	}
+	return t.UnixMilli()
+}

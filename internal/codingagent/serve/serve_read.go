@@ -1,0 +1,509 @@
+package serve
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/alexrudloff/wopr/agent"
+	"github.com/alexrudloff/wopr/ai"
+	codinghost "github.com/alexrudloff/wopr/coding/host"
+	icodingagent "github.com/alexrudloff/wopr/internal/codingagent"
+	"github.com/alexrudloff/wopr/internal/codingagent/sessionblob"
+)
+
+// ─── walkBack: the one backward primitive ────────────────────────────────
+
+// walkStop controls when walkBack stops reading.
+type walkStop func(records [][]byte) bool
+
+// walkBack opens path, seeks to end, and walks backwards in tailBlockBytes
+// blocks until stop is satisfied or byteLimit is reached. Returns records
+// oldest-first (after dropping the first partial record).
+func walkBack(path string, byteLimit int64, stop walkStop) ([][]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	size := stat.Size()
+	if size == 0 {
+		return nil, nil
+	}
+
+	var (
+		buf       = make([]byte, tailBlockBytes)
+		records   [][]byte
+		readBytes int64
+		offset    = size
+	)
+
+	for offset > 0 && readBytes < byteLimit {
+		readSize := tailBlockBytes
+		if offset < int64(readSize) {
+			readSize = int(offset)
+		}
+		offset -= int64(readSize)
+
+		if _, err := f.ReadAt(buf[:readSize], offset); err != nil && err != io.EOF {
+			return nil, err
+		}
+
+		block := buf[:readSize]
+		records = append(records, block)
+		readBytes += int64(readSize)
+
+		joined := bytes.Join(records, nil)
+		lines := bytes.Split(joined, []byte{'\n'})
+		if stop(lines) || offset == 0 {
+			break
+		}
+	}
+
+	// Join all blocks once (prepending block-by-block is O(n²)).
+	// Records are in reverse order (last block first), so reverse them to get
+	// file content in forward order (start to end).
+	slices.Reverse(records)
+	joined := bytes.Join(records, nil)
+	lines := bytes.Split(joined, []byte{'\n'})
+
+	// Drop everything through the first \n (the first block may be a partial record).
+	firstNL := bytes.IndexByte(joined, '\n')
+	if firstNL >= 0 {
+		joined = joined[firstNL+1:]
+		lines = bytes.Split(joined, []byte{'\n'})
+	}
+
+	// Lines are now in oldest-first order (file forward order after dropping header).
+	// Filter empty lines.
+	var out [][]byte
+	for _, line := range lines {
+		if len(line) > 0 {
+			out = append(out, line)
+		}
+	}
+	return out, nil
+}
+
+// stopMeta is satisfied when the newest session_info AND the newest
+// session_archive custom entry have both been seen, or the file head is reached.
+func stopMeta(records [][]byte) bool {
+	var seenInfo, seenArchive bool
+	for _, rec := range records {
+		var base icodingagent.SessionEntryBase
+		if err := json.Unmarshal(rec, &base); err != nil {
+			continue
+		}
+		if base.Type == "session_info" {
+			seenInfo = true
+		}
+		if base.Type == "custom" {
+			var ce icodingagent.CustomEntry
+			if err := json.Unmarshal(rec, &ce); err == nil && ce.CustomType == "session_archive" {
+				seenArchive = true
+			}
+		}
+		if seenInfo && seenArchive {
+			return true
+		}
+	}
+	return false
+}
+
+// stopTail is satisfied when limit+1 complete records are held.
+func stopTail(limit int) walkStop {
+	return func(records [][]byte) bool {
+		return len(records) >= limit+1
+	}
+}
+
+// ─── sessionRecord types ─────────────────────────────────────────────────
+
+type sessionRecord struct {
+	ID       string
+	Header   icodingagent.SessionHeader
+	Name     string
+	Archived *int64
+	Path     string
+	ModTime  time.Time
+	HasFile  bool
+}
+
+// sessionPath maps a session id to its transcript file in dir.
+// Session files are named <timestamp>_<id>.jsonl, so filepath.Join(dir, id+".jsonl")
+// never matches: the timestamp prefix is part of the name. This is a bounded suffix
+// match over one already-resolved directory.
+func sessionPath(dir, id string) (string, bool) {
+	if !sessionIDPattern.MatchString(id) {
+		return "", false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	suffix := "_" + id + ".jsonl"
+	for _, entry := range entries {
+		if name := entry.Name(); !entry.IsDir() && strings.HasSuffix(name, suffix) {
+			return filepath.Join(dir, name), true
+		}
+	}
+	return "", false
+}
+
+// sessionRecordAt reads the metadata Branch A needs from a known file.
+func sessionRecordAt(path string) (sessionRecord, bool) {
+	stat, err := os.Stat(path)
+	if err != nil {
+		return sessionRecord{}, false
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return sessionRecord{}, false
+	}
+	defer func() { _ = f.Close() }()
+
+	reader := bufio.NewReaderSize(f, 64*1024)
+
+	// Read header line.
+	headerLine, err := reader.ReadBytes('\n')
+	if err != nil {
+		return sessionRecord{}, false
+	}
+	headerLine = bytes.TrimSuffix(bytes.TrimSuffix(headerLine, []byte{'\n'}), []byte{'\r'})
+	if len(headerLine) == 0 {
+		return sessionRecord{}, false
+	}
+
+	var header icodingagent.SessionHeader
+	if err := json.Unmarshal(headerLine, &header); err != nil || header.Type != "session" {
+		return sessionRecord{}, false
+	}
+
+	// Read tail for session_info and session_archive.
+	records, err := walkBack(path, metaProbeBytes, stopMeta)
+	if err != nil {
+		return sessionRecord{}, false
+	}
+
+	var name string
+	var archived *int64
+	for _, rec := range records {
+		var base icodingagent.SessionEntryBase
+		if err := json.Unmarshal(rec, &base); err != nil {
+			continue
+		}
+		if base.Type == "session_info" && name == "" {
+			var sie icodingagent.SessionInfoEntry
+			if err := json.Unmarshal(rec, &sie); err == nil {
+				name = sie.Name
+			}
+		}
+		if base.Type == "custom" && archived == nil {
+			var ce icodingagent.CustomEntry
+			if err := json.Unmarshal(rec, &ce); err == nil && ce.CustomType == "session_archive" {
+				dataBytes, _ := json.Marshal(ce.Data)
+				var data map[string]any
+				if err := json.Unmarshal(dataBytes, &data); err == nil {
+					if v, ok := data["archived"]; ok {
+						switch tv := v.(type) {
+						case float64:
+							i := int64(tv)
+							archived = &i
+						case int64:
+							archived = &tv
+						case int:
+							i := int64(tv)
+							archived = &i
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Title fallback: first user message (head probe) if no name found.
+	if name == "" {
+		headData := make([]byte, titleProbeBytes)
+		n, _ := f.ReadAt(headData, 0)
+		headData = headData[:n]
+		lines := bytes.SplitSeq(headData, []byte{'\n'})
+		for line := range lines {
+			if len(line) == 0 {
+				continue
+			}
+			var base icodingagent.SessionEntryBase
+			if err := json.Unmarshal(line, &base); err != nil {
+				continue
+			}
+			if base.Type == "message" {
+				var me icodingagent.MessageEntry
+				if err := json.Unmarshal(line, &me); err == nil {
+					if me.Message.Role() == "user" {
+						if text := firstTextBlock(me.Message); text != "" {
+							if len(text) > 200 {
+								text = text[:200]
+							}
+							name = text
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return sessionRecord{
+		ID:       header.ID,
+		Header:   header,
+		Name:     name,
+		Archived: archived,
+		Path:     path,
+		ModTime:  stat.ModTime(),
+		HasFile:  true,
+	}, true
+}
+
+// firstTextBlock extracts the first text block from an agent message.
+func firstTextBlock(msg agent.AgentMessage) string {
+	if msg.User != nil {
+		for _, c := range msg.User.Content {
+			if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
+				return tc.Text
+			}
+		}
+	}
+	if msg.Assistant != nil {
+		for _, c := range msg.Assistant.Content {
+			if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
+				return tc.Text
+			}
+		}
+	}
+	return ""
+}
+
+// getSessionRecord is the id-addressed front door. live is the host's wrapped
+// session when it owns one, and nil otherwise; it is what makes Branch B
+// reachable, because Branch B reads a *coding.Session that an id cannot yield.
+func getSessionRecord(dir, id string, live *codinghost.Session) (sessionRecord, bool) {
+	// Branch B: live session with no file yet.
+	if live != nil {
+		inner := live.Inner()
+		path := inner.Path()
+		hasFile := false
+		if _, err := os.Stat(path); err == nil {
+			hasFile = true
+		}
+
+		if !hasFile {
+			return sessionRecordFromLive(inner.Inner())
+		}
+		// Has file: fall through to Branch A using the live session's path.
+		return sessionRecordAt(path)
+	}
+
+	// Branch A: not live (or live with file), read from disk.
+	path, ok := sessionPath(dir, id)
+	if !ok {
+		return sessionRecord{}, false
+	}
+	return sessionRecordAt(path)
+}
+
+// sessionRecordFromLive builds a sessionRecord from a live session with no file.
+func sessionRecordFromLive(sess *icodingagent.Session) (sessionRecord, bool) {
+	header := sess.Header()
+	name := ""
+	archived := (*int64)(nil)
+
+	// Scan entries backwards for session_info and session_archive.
+	entries := sess.Entries()
+	for _, e := range slices.Backward(entries) {
+
+		if e.Base.Type == "session_info" && name == "" {
+			var sie icodingagent.SessionInfoEntry
+			if err := json.Unmarshal(e.Raw(), &sie); err == nil {
+				name = sie.Name
+			}
+		}
+		if e.Base.Type == "custom" && archived == nil {
+			var ce icodingagent.CustomEntry
+			if err := json.Unmarshal(e.Raw(), &ce); err == nil && ce.CustomType == "session_archive" {
+				dataBytes, _ := json.Marshal(ce.Data)
+				var data map[string]any
+				if err := json.Unmarshal(dataBytes, &data); err == nil {
+					if v, ok := data["archived"]; ok {
+						switch tv := v.(type) {
+						case float64:
+							i := int64(tv)
+							archived = &i
+						case int64:
+							archived = &tv
+						case int:
+							i := int64(tv)
+							archived = &i
+						}
+					}
+				}
+			}
+		}
+		if name != "" && archived != nil {
+			break
+		}
+	}
+
+	// Title fallback.
+	if name == "" {
+		for _, e := range entries {
+			if e.Base.Type == "message" {
+				var me icodingagent.MessageEntry
+				if err := json.Unmarshal(e.Raw(), &me); err == nil {
+					if me.Message.Role() == "user" {
+						if text := firstTextBlock(me.Message); text != "" {
+							if len(text) > 200 {
+								text = text[:200]
+							}
+							name = text
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return sessionRecord{
+		ID:       header.ID,
+		Header:   header,
+		Name:     name,
+		Archived: archived,
+		Path:     sess.Path(),
+		ModTime:  time.Time{}, // zero for live with no file
+		HasFile:  false,
+	}, true
+}
+
+// ─── tailEntries ──────────────────────────────────────────────────────────
+
+// tailEntries returns the last limit entries from path, oldest-first.
+// Applies blob resolution to each record before decoding.
+func tailEntries(path string, limit int) ([]icodingagent.SessionEntry, error) {
+	records, err := walkBack(path, maxTailBytes, stopTail(limit))
+	if err != nil {
+		return nil, err
+	}
+
+	// Take the last limit records (walkBack returns oldest-first, but we want the last limit).
+	if len(records) > limit {
+		records = records[len(records)-limit:]
+	}
+
+	var out []icodingagent.SessionEntry
+	budget := maxInlinedImageBytes
+
+	for _, rec := range records {
+		// Resolve blobs before decoding.
+		resolved := sessionblob.Resolve(path, rec)
+		budget -= len(resolved)
+		if budget < 0 {
+			// Emit a text part for the omitted image.
+			// We still need to decode the base to get the entry ID.
+			var base icodingagent.SessionEntryBase
+			if err := json.Unmarshal(resolved, &base); err == nil {
+				out = append(out, icodingagent.NewSessionEntry(
+					json.RawMessage(`{"type":"message","id":"`+base.ID+`","parentId":null,"timestamp":"`+base.Timestamp+`","message":{"role":"assistant","content":[{"type":"text","text":"[image omitted: budget exceeded]"}]}}`),
+					base,
+				))
+			}
+			continue
+		}
+
+		var base icodingagent.SessionEntryBase
+		if err := json.Unmarshal(resolved, &base); err != nil {
+			continue // skip malformed
+		}
+		out = append(out, icodingagent.NewSessionEntry(resolved, base))
+	}
+	return out, nil
+}
+
+const maxInlinedImageBytes = 8 << 20
+
+// ─── workingTreePaths ─────────────────────────────────────────────────────
+
+// workingTreePaths runs `git -C <root> status --porcelain=v2 -z` and parses the
+// NUL-separated output. Returns a slice of root-relative paths.
+func workingTreePaths(root string) ([]string, error) {
+	cmd := exec.Command("git", "-C", root, "status", "--porcelain=v2", "-z")
+	output, err := cmd.Output()
+	if err != nil {
+		// Non-zero exit outside a git repo: return empty slice.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() != 0 {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+
+	// Split on NUL, drop trailing empty record.
+	records := bytes.Split(output, []byte{'\000'})
+	if len(records) > 0 && len(records[len(records)-1]) == 0 {
+		records = records[:len(records)-1]
+	}
+
+	var paths []string
+	skipNext := false
+	for _, rec := range records {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if len(rec) == 0 {
+			continue
+		}
+		first := rec[0]
+		var path string
+		switch first {
+		case '1', '2', 'u':
+			// Path is the last space-separated field.
+			fields := bytes.Fields(rec)
+			if len(fields) > 0 {
+				path = string(fields[len(fields)-1])
+			}
+			if first == '2' {
+				// Skip the next record (original path for rename).
+				skipNext = true
+			}
+		case '?':
+			// Format: "? <path>"
+			if len(rec) > 2 && rec[1] == ' ' {
+				path = string(rec[2:])
+			}
+		default:
+			continue
+		}
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+
+	// Truncate to maxFileStatusEntries.
+	if len(paths) > maxFileStatusEntries {
+		paths = paths[:maxFileStatusEntries]
+	}
+	return paths, nil
+}

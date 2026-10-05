@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/alexrudloff/wopr/coding"
+	codinghost "github.com/alexrudloff/wopr/coding/host"
 	"github.com/alexrudloff/wopr/internal/codingagent"
 	"github.com/alexrudloff/wopr/internal/codingagent/serve"
 )
@@ -99,7 +101,41 @@ func runServeCommand(args []string) int {
 		fmt.Fprintf(os.Stderr, "wopr serve: no authentication. Anyone who can reach %s can run tools and read files as this user. Binding to a LAN is not a security control.\n", net.JoinHostPort(host, strconv.Itoa(port)))
 	}
 
-	srv, ln, err := serve.New(net.JoinHostPort(host, strconv.Itoa(port)))
+	// Build Services.
+	services, err := coding.NewServices(coding.ServicesOptions{
+		CWD:            cwd,
+		AgentDir:       agentDir,
+		ProjectTrusted: func() *bool { b := true; return &b }(),
+	})
+	if err != nil {
+		return failf("wopr serve: %v", err)
+	}
+
+	// Build Host.
+	hostObj := codinghost.New(services, nil)
+
+	// Resolve session directory once.
+	sessionDir, err := resolveSessionDir("", settings)
+	if err != nil {
+		return failf("wopr serve: %v", err)
+	}
+	if sessionDir == "" {
+		sessionDir = codingagent.NewSessionManager(cwd).SessionDir()
+	}
+
+	// Resolve model spec.
+	startup, err := selectStartupModel(startupModelOptions{}, settings.Get(), services)
+	if err != nil {
+		return failf("wopr serve: %v", err)
+	}
+	var modelSpec string
+	if startup.Model != nil {
+		modelSpec = codinghost.ModelProviderID(startup.Model) + "/" + startup.Model.ID
+	} else {
+		modelSpec = "test-faux/faux-1" // fallback for tests
+	}
+
+	srv, ln, err := serve.New(net.JoinHostPort(host, strconv.Itoa(port)), hostObj, sessionDir, modelSpec)
 	if err != nil {
 		return failf("wopr serve: %v", err)
 	}

@@ -340,6 +340,33 @@ func (sm *SessionManager) RenameSession(path, newName string) error {
 	return err
 }
 
+// AppendCustomEntry appends a custom entry to the session file.
+// It is the file-level sibling of RenameSession, used for session_archive
+// and other custom entry types. Opens the file with O_APPEND|O_WRONLY
+// (no O_CREATE), so it fails on a session with no file.
+func (sm *SessionManager) AppendCustomEntry(path, customType string, data any) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("sessionmanager: append custom open: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	id := generateSessionID()
+	entry := CustomEntry{
+		Type:       "custom",
+		ID:         id,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339Nano),
+		CustomType: customType,
+		Data:       data,
+	}
+	entryData, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(f, "%s\n", entryData)
+	return err
+}
+
 // forEachJSONLLine calls fn with each line of r without its line ending. Lines
 // have no length limit, and each is a fresh slice fn may keep. A read error
 // is wrapped; an fn error is returned as is.
