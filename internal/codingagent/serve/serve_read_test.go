@@ -13,6 +13,7 @@ import (
 	"github.com/alexrudloff/wopr/coding"
 	codinghost "github.com/alexrudloff/wopr/coding/host"
 	icodingagent "github.com/alexrudloff/wopr/internal/codingagent"
+	"github.com/alexrudloff/wopr/internal/testenv"
 )
 
 // writeTestSession creates a test session file with the given entries (for *testing.T).
@@ -335,9 +336,7 @@ func TestResolveInRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(root, "link.txt")
-	if err := os.Symlink(outsideFile, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, outsideFile, link)
 	_, err = resolveInRoot(root, "link.txt")
 	if err == nil {
 		t.Error("expected error for symlink out of root")

@@ -204,7 +204,12 @@ func sessionRecordAt(path string) (sessionRecord, bool) {
 
 	var name string
 	var archived *int64
-	for _, rec := range records {
+	// archivedSet records that a session_archive entry carrying an "archived"
+	// key has been consumed, whether or not it latched a value: the writer
+	// clears the stamp with a null, which latches nothing.
+	var archivedSet bool
+	// Last writer wins, so scan newest-first. walkBack returns oldest-first.
+	for _, rec := range slices.Backward(records) {
 		var base icodingagent.SessionEntryBase
 		if err := json.Unmarshal(rec, &base); err != nil {
 			continue
@@ -215,13 +220,14 @@ func sessionRecordAt(path string) (sessionRecord, bool) {
 				name = sie.Name
 			}
 		}
-		if base.Type == "custom" && archived == nil {
+		if base.Type == "custom" && !archivedSet {
 			var ce icodingagent.CustomEntry
 			if err := json.Unmarshal(rec, &ce); err == nil && ce.CustomType == "session_archive" {
 				dataBytes, _ := json.Marshal(ce.Data)
 				var data map[string]any
 				if err := json.Unmarshal(dataBytes, &data); err == nil {
 					if v, ok := data["archived"]; ok {
+						archivedSet = true
 						switch tv := v.(type) {
 						case float64:
 							i := int64(tv)
@@ -332,6 +338,10 @@ func sessionRecordFromLive(sess *icodingagent.Session) (sessionRecord, bool) {
 	header := sess.Header()
 	name := ""
 	archived := (*int64)(nil)
+	// archivedSet records that a session_archive entry carrying an "archived"
+	// key has been consumed, whether or not it latched a value: the writer
+	// clears the stamp with a null, which latches nothing.
+	archivedSet := false
 
 	// Scan entries backwards for session_info and session_archive.
 	entries := sess.Entries()
@@ -343,13 +353,14 @@ func sessionRecordFromLive(sess *icodingagent.Session) (sessionRecord, bool) {
 				name = sie.Name
 			}
 		}
-		if e.Base.Type == "custom" && archived == nil {
+		if e.Base.Type == "custom" && !archivedSet {
 			var ce icodingagent.CustomEntry
 			if err := json.Unmarshal(e.Raw(), &ce); err == nil && ce.CustomType == "session_archive" {
 				dataBytes, _ := json.Marshal(ce.Data)
 				var data map[string]any
 				if err := json.Unmarshal(dataBytes, &data); err == nil {
 					if v, ok := data["archived"]; ok {
+						archivedSet = true
 						switch tv := v.(type) {
 						case float64:
 							i := int64(tv)
@@ -364,7 +375,7 @@ func sessionRecordFromLive(sess *icodingagent.Session) (sessionRecord, bool) {
 				}
 			}
 		}
-		if name != "" && archived != nil {
+		if name != "" && archivedSet {
 			break
 		}
 	}

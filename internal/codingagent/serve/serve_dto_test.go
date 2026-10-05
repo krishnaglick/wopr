@@ -3,6 +3,7 @@ package serve
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -684,6 +685,248 @@ func TestPatchThenGetAgrees(t *testing.T) {
 		if patchDTO.Title != getDTO.Title {
 			t.Errorf("title mismatch: PATCH=%q GET=%q", patchDTO.Title, getDTO.Title)
 		}
+	})
+}
+
+// writeUnterminatedSession writes a session file whose last record has no
+// trailing newline. writeTestSession terminates every record, which is exactly
+// the property under test here: an append to such a file has to terminate the
+// last line itself or it glues onto it.
+func writeUnterminatedSession(t *testing.T, dir, id string, entries []string) string {
+	t.Helper()
+	header := `{"type":"session","version":3,"id":"` + id + `","timestamp":"2024-01-01T00:00:00.000000000Z","cwd":"/test"}`
+	path := filepath.Join(dir, time.Now().UTC().Format("2006-01-02T15-04-05")+"_"+id+".jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(append([]string{header}, entries...), "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// sessionRequest issues one request against /session/{id} and returns the
+// status and the raw body. The body is returned raw so a caller can measure
+// key presence, which sessionTime.Archived's omitempty hides.
+func sessionRequest(t *testing.T, method, baseURL, id, body string) (int, []byte) {
+	t.Helper()
+	var rdr io.Reader
+	if body != "" {
+		rdr = strings.NewReader(body)
+		req, err := http.NewRequest(method, baseURL+"/session/"+id, rdr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return readResponse(t, req)
+	}
+	req, err := http.NewRequest(method, baseURL+"/session/"+id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return readResponse(t, req)
+}
+
+func readResponse(t *testing.T, req *http.Request) (int, []byte) {
+	t.Helper()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, data
+}
+
+// decodeDTO decodes a session response body into sessionDTO.
+func decodeDTO(t *testing.T, body []byte) sessionDTO {
+	t.Helper()
+	var dto sessionDTO
+	if err := json.Unmarshal(body, &dto); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return dto
+}
+
+// archivedPresent reports whether the response body's time object carries an
+// "archived" key. sessionDTO cannot answer this: sessionTime.Archived is
+// omitempty, so a nil pointer and an absent key are the same wire value.
+func archivedPresent(t *testing.T, body []byte) bool {
+	t.Helper()
+	var probe struct {
+		Time map[string]json.RawMessage `json:"time"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	_, present := probe.Time["archived"]
+	return present
+}
+
+// assertTailLinesParse checks that the last two lines of a session file each
+// unmarshal as a JSON object independently. A newline count cannot detect a
+// glued append: the bad append adds exactly one "\n" either way.
+func assertTailLinesParse(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	if len(lines) < 2 {
+		t.Fatalf("%s: want at least 2 lines, got %d", path, len(lines))
+	}
+	for _, line := range lines[len(lines)-2:] {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Errorf("tail line is not a standalone JSON object: %v\nline: %s", err, line)
+		}
+	}
+}
+
+// TestPatchRenameAndArchiveOnFileBackedSession drives PATCH /session/{id} over a
+// real listener against sessions written straight to disk, the state every
+// session is in after a restart or an import. It covers the three defects the
+// file-backed reader and the file-level appends carried: newest-record-wins
+// (title and archived stamp), the null that clears an archive stamp, and the
+// missing separator on a file that does not end in a newline.
+func TestPatchRenameAndArchiveOnFileBackedSession(t *testing.T) {
+	agentDir := t.TempDir()
+
+	services, err := coding.NewServices(coding.ServicesOptions{
+		CWD:            t.TempDir(),
+		AgentDir:       agentDir,
+		ProjectTrusted: func() *bool { b := true; return &b }(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := host.New(services, nil)
+
+	sessionDir := filepath.Join(agentDir, "sessions", "--test--")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Five fixtures, all file-backed. (a) rename, (b) archive-then-clear,
+	// (e) re-archive: every record terminated. (c) archive append and
+	// (d) rename append: last record unterminated, so the append under test
+	// has to write the separator itself.
+	const (
+		idRename    = "file-backed-rename"
+		idClear     = "file-backed-clear"
+		idNoNLArch  = "file-backed-no-nl-archive"
+		idNoNLName  = "file-backed-no-nl-rename"
+		idReArchive = "file-backed-re-archive"
+	)
+	writeTestSession(t, sessionDir, idRename, []string{infoEntry("oldinfo01", "ORIGINAL-NAME")})
+	writeTestSession(t, sessionDir, idClear, nil)
+	writeTestSession(t, sessionDir, idReArchive, []string{archiveEntry("arc000002", 111)})
+	pathNoNLArchive := writeUnterminatedSession(t, sessionDir, idNoNLArch, []string{archiveEntry("arc000001", 111)})
+	pathNoNLRename := writeUnterminatedSession(t, sessionDir, idNoNLName, []string{infoEntry("oldinfo02", "ORIGINAL-NAME")})
+
+	srv, ln, err := New("127.0.0.1:0", h, sessionDir, "test-faux/faux-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Close() }()
+	base := "http://" + ln.Addr().String()
+
+	// A rename must report the new title in the PATCH body and in a later GET.
+	// Status alone is not evidence: the defect answered 200 while returning the
+	// old title.
+	t.Run("rename_takes_the_newest_session_info", func(t *testing.T) {
+		status, body := sessionRequest(t, "PATCH", base, idRename, `{"title":"NEW-TITLE"}`)
+		if status != http.StatusOK {
+			t.Fatalf("PATCH status = %d, want 200", status)
+		}
+		if got := decodeDTO(t, body).Title; got != "NEW-TITLE" {
+			t.Errorf("PATCH title = %q, want %q", got, "NEW-TITLE")
+		}
+
+		status, body = sessionRequest(t, "GET", base, idRename, "")
+		if status != http.StatusOK {
+			t.Fatalf("GET status = %d, want 200", status)
+		}
+		dto := decodeDTO(t, body)
+		if dto.Title != "NEW-TITLE" {
+			t.Errorf("GET title = %q, want %q", dto.Title, "NEW-TITLE")
+		}
+		if dto.Version != coding.Version {
+			t.Errorf("GET version = %q, want %q", dto.Version, coding.Version)
+		}
+	})
+
+	// The clear is a value, not a deletion: a null is the newest answer and must
+	// not fall through to the older numeric stamp.
+	t.Run("clear_takes_the_newest_archive_record", func(t *testing.T) {
+		status, _ := sessionRequest(t, "PATCH", base, idClear, `{"time":{"archived":222}}`)
+		if status != http.StatusOK {
+			t.Fatalf("PATCH archive status = %d, want 200", status)
+		}
+		status, body := sessionRequest(t, "GET", base, idClear, "")
+		if status != http.StatusOK {
+			t.Fatalf("GET status = %d, want 200", status)
+		}
+		archived := decodeDTO(t, body).Time.Archived
+		if archived == nil {
+			t.Fatalf("GET time.archived absent, want 222")
+		}
+		if *archived != 222 {
+			t.Errorf("GET time.archived = %d, want 222", *archived)
+		}
+
+		status, _ = sessionRequest(t, "PATCH", base, idClear, `{"time":{"archived":null}}`)
+		if status != http.StatusOK {
+			t.Fatalf("PATCH clear status = %d, want 200", status)
+		}
+		status, body = sessionRequest(t, "GET", base, idClear, "")
+		if status != http.StatusOK {
+			t.Fatalf("GET status = %d, want 200", status)
+		}
+		if archivedPresent(t, body) {
+			t.Errorf("GET time.archived present after clear, want absent")
+		}
+	})
+
+	// A second archive must win over the stamp already on disk.
+	t.Run("rearchive_takes_the_newest_archive_record", func(t *testing.T) {
+		status, _ := sessionRequest(t, "PATCH", base, idReArchive, `{"time":{"archived":222}}`)
+		if status != http.StatusOK {
+			t.Fatalf("PATCH status = %d, want 200", status)
+		}
+		status, body := sessionRequest(t, "GET", base, idReArchive, "")
+		if status != http.StatusOK {
+			t.Fatalf("GET status = %d, want 200", status)
+		}
+		archived := decodeDTO(t, body).Time.Archived
+		if archived == nil {
+			t.Fatalf("GET time.archived absent, want 222")
+		}
+		if *archived != 222 {
+			t.Errorf("GET time.archived = %d, want 222 not the 111 on disk", *archived)
+		}
+	})
+
+	// Both file-level appends have to terminate the file's last line. (c) is the
+	// archive append, (d) the rename append; (d) is the only assertion anywhere
+	// in this package that covers RenameSession's separator.
+	t.Run("appends_terminate_an_unterminated_last_line", func(t *testing.T) {
+		status, _ := sessionRequest(t, "PATCH", base, idNoNLArch, `{"time":{"archived":222}}`)
+		if status != http.StatusOK {
+			t.Fatalf("PATCH archive status = %d, want 200", status)
+		}
+		assertTailLinesParse(t, pathNoNLArchive)
+
+		status, _ = sessionRequest(t, "PATCH", base, idNoNLName, `{"title":"NEW-TITLE"}`)
+		if status != http.StatusOK {
+			t.Fatalf("PATCH rename status = %d, want 200", status)
+		}
+		assertTailLinesParse(t, pathNoNLRename)
 	})
 }
 
