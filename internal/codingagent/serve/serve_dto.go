@@ -138,6 +138,11 @@ func projectID(root string) string {
 // Symlinks are resolved on both sides first, so a link out of the project is a
 // refusal rather than a read.
 func resolveInRoot(root, want string) (string, error) {
+	// Reject absolute paths immediately (MAJOR: absolute paths silently reinterpreted as root-relative).
+	if filepath.IsAbs(want) {
+		return "", errOutsideRoot
+	}
+
 	cleaned := filepath.Clean(want)
 	cleaned = strings.TrimPrefix(cleaned, "/")
 	candidate := filepath.Join(root, cleaned)
@@ -155,7 +160,12 @@ func resolveInRoot(root, want string) (string, error) {
 	}
 
 	rel, err := filepath.Rel(root, resolved)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil {
+		return "", errOutsideRoot
+	}
+	// MAJOR: strings.HasPrefix(rel, "..") false-positives on legitimate names like "..foo".
+	// Use exact match or prefix with separator.
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", errOutsideRoot
 	}
 

@@ -444,14 +444,16 @@ func TestTailEntriesMultiBlock(t *testing.T) {
 	dir := t.TempDir()
 	id := "multi-block-test"
 
-	// Create entries that span multiple 64 KiB blocks.
-	// Each entry is roughly 200 bytes. 400 entries = ~80 KiB > 64 KiB block.
-	entries := make([]string, 400)
+	// Create entries that span at least 3 read blocks (64 KiB each = 192 KiB minimum).
+	// Each entry is ~1.5 KiB (large text content). 200 entries = ~300 KiB > 3 blocks.
+	entries := make([]string, 200)
 	baseTime := time.Now().UTC()
-	for i := range 400 {
+	// Large content to ensure multi-block: 1.5 KiB per entry
+	largeContent := strings.Repeat("x", 1500)
+	for i := range 200 {
 		id := func() string { id, _ := icodingagent.GenerateEntryID(); return id }()
 		ts := baseTime.Add(time.Duration(i) * time.Millisecond).Format(time.RFC3339Nano)
-		entries[i] = `{"type":"message","id":"` + id + `","parentId":null,"timestamp":"` + ts + `","message":{"role":"user","content":[{"type":"text","text":"msg"}],"timestamp":` + strconv.FormatInt(baseTime.Add(time.Duration(i)*time.Millisecond).UnixMilli(), 10) + `}}`
+		entries[i] = `{"type":"message","id":"` + id + `","parentId":null,"timestamp":"` + ts + `","message":{"role":"user","content":[{"type":"text","text":"` + largeContent + `"}],"timestamp":` + strconv.FormatInt(baseTime.Add(time.Duration(i)*time.Millisecond).UnixMilli(), 10) + `}}`
 	}
 
 	path := writeTestSession(t, dir, id, entries)

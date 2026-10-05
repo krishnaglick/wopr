@@ -31,6 +31,11 @@ type walkStop func(completeRecords int) bool
 // oldest-first (after dropping the first partial record).
 // stop is called with the count of complete records seen so far.
 // The byte limit is an independent bound: reading stops on whichever bound is reached first.
+// Note: the byte limit may be reached before the record limit, in which case
+// fewer records than requested are returned. This is expected behavior for
+// very large entries that exceed the byte limit before the record count is met.
+// Callers should be aware that tailEntries may return fewer than 'limit' records
+// when entries are very large (exceeding maxTailBytes/limit per entry).
 func walkBack(path string, byteLimit int64, stop walkStop) ([][]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -104,6 +109,15 @@ func walkBack(path string, byteLimit int64, stop walkStop) ([][]byte, error) {
 		lines = bytes.Split(joined, []byte{'\n'})
 	}
 
+	// Drop the trailing fragment if the file doesn't end with a newline.
+	// A session file being actively written has no trailing newline; that last
+	// fragment is a partial record and must not be returned.
+	if len(joined) > 0 && joined[len(joined)-1] != '\n' {
+		if len(lines) > 0 {
+			lines = lines[:len(lines)-1]
+		}
+	}
+
 	// Lines are now in oldest-first order (file forward order after dropping header).
 	// Filter empty lines.
 	var out [][]byte
@@ -114,10 +128,6 @@ func walkBack(path string, byteLimit int64, stop walkStop) ([][]byte, error) {
 	}
 	return out, nil
 }
-
-// stopMeta was the predicate for reading metadata (session_info and session_archive)
-// but is no longer used; the byte probe is the only bound for metadata reads.
-// Kept for reference; see comment in walkBack about bounds.
 
 // ─── sessionRecord types ─────────────────────────────────────────────────
 
@@ -394,15 +404,20 @@ func sessionRecordFromLive(sess *icodingagent.Session) (sessionRecord, bool) {
 
 // tailEntries returns the last limit entries from path, oldest-first.
 // Applies blob resolution to each record before decoding.
+// Reads the entire file up to maxTailBytes to ensure we get the true last
+// limit entries, not just the last ones within a partial read.
 func tailEntries(path string, limit int) ([]icodingagent.SessionEntry, error) {
+	// Read the entire file up to maxTailBytes; do not stop early.
+	// We need the true last 'limit' entries, which may be spread across
+	// multiple read blocks. The stop condition only limits byte count.
 	records, err := walkBack(path, maxTailBytes, func(completeRecords int) bool {
-		return completeRecords >= limit+1
+		return false // never stop early; byte limit is the only bound
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Take the last limit records (walkBack returns oldest-first, but we want the last limit).
+	// Take the last limit records (walkBack returns oldest-first).
 	if len(records) > limit {
 		records = records[len(records)-limit:]
 	}
@@ -486,16 +501,47 @@ func workingTreePaths(root string) ([]string, error) {
 		first := rec[0]
 		var path string
 		switch first {
-		case '1', '2', 'u':
-			// Path is the last space-separated field.
-			fields := bytes.Fields(rec)
-			if len(fields) > 0 {
-				path = string(fields[len(fields)-1])
+		case '1', 'u':
+			// Format: 1 XY <sub> <mH> <mI> <mW> <hH> <hI> <path>
+			//         u XY <sub> <mH> <mI> <mW> <hH> <hI> <path>
+			// 9 fields total, 8 spaces before path.
+			spaceCount := 0
+			pathStart := -1
+			for i := 1; i < len(rec); i++ {
+				if rec[i] == ' ' {
+					spaceCount++
+					if spaceCount == 8 {
+						pathStart = i + 1
+						break
+					}
+				}
 			}
-			if first == '2' {
-				// Skip the next record (original path for rename).
-				skipNext = true
+			if pathStart >= 0 && pathStart < len(rec) {
+				path = string(rec[pathStart:])
 			}
+		case '2':
+			// Format: 2 XY <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>\t<origPath>
+			// 10 fields, 9 spaces before path.
+			spaceCount := 0
+			pathStart := -1
+			for i := 1; i < len(rec); i++ {
+				if rec[i] == ' ' {
+					spaceCount++
+					if spaceCount == 9 {
+						pathStart = i + 1
+						break
+					}
+				}
+			}
+			if pathStart >= 0 && pathStart < len(rec) {
+				path = string(rec[pathStart:])
+				// Path is followed by TAB and origPath; take only the destination path.
+				if tabIdx := bytes.IndexByte([]byte(path), '\t'); tabIdx >= 0 {
+					path = path[:tabIdx]
+				}
+			}
+			// Skip the next record (original path for rename).
+			skipNext = true
 		case '?':
 			// Format: "? <path>"
 			if len(rec) > 2 && rec[1] == ' ' {

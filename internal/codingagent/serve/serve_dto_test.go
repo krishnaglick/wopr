@@ -686,3 +686,67 @@ func TestPatchThenGetAgrees(t *testing.T) {
 		}
 	})
 }
+
+// TestIDPatternValidation tests that the session ID pattern validation rejects
+// invalid characters (., /, etc.) and accepts valid ones.
+func TestIDPatternValidation(t *testing.T) {
+	validIDs := []string{
+		"abc123",
+		"abc-def",
+		"ABC123",
+		"a",
+		strings.Repeat("a", 64),
+	}
+	for _, id := range validIDs {
+		if !sessionIDPattern.MatchString(id) {
+			t.Errorf("expected %q to be valid, but it was rejected", id)
+		}
+	}
+
+	invalidIDs := []string{
+		"abc.def",
+		"abc/def",
+		"abc:def",
+		"abc def",
+		"",
+		strings.Repeat("a", 65),
+		"abc$def",
+		"abc*def",
+		"abc?def",
+		"abc[def",
+		"abc]def",
+		"abc{def",
+		"abc}def",
+		"abc|def",
+	}
+	for _, id := range invalidIDs {
+		if sessionIDPattern.MatchString(id) {
+			t.Errorf("expected %q to be invalid, but it was accepted", id)
+		}
+	}
+}
+
+// TestProjectIDStable tests that projectID returns a stable 12-char hex string
+// for the same input, and different for different inputs.
+func TestProjectIDStable(t *testing.T) {
+	// Same input should produce same output
+	id1 := projectID("/home/user/project")
+	id2 := projectID("/home/user/project")
+	if id1 != id2 {
+		t.Errorf("projectID not stable: %s != %s", id1, id2)
+	}
+	if len(id1) != 12 {
+		t.Errorf("projectID length should be 12, got %d", len(id1))
+	}
+	for _, c := range id1 {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			t.Errorf("projectID contains non-hex char: %c", c)
+		}
+	}
+
+	// Different inputs should produce different outputs (with very high probability)
+	id3 := projectID("/home/user/other")
+	if id1 == id3 {
+		t.Errorf("projectID collision: %s == %s", id1, id3)
+	}
+}

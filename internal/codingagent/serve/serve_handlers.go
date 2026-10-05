@@ -563,6 +563,10 @@ func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request) {
 			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
 			return
 		}
+		// Note: tailEntries may return fewer than 'limit' records if the byte
+		// limit (maxTailBytes = 16 MiB) is reached before 'limit' complete
+		// records are found. This happens with very large entries (images,
+		// large tool outputs) that exceed the per-entry byte budget.
 	} else if live != nil {
 		all := live.Inner().Entries()
 		if len(all) > limit {
