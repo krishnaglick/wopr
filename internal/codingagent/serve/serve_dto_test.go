@@ -23,7 +23,7 @@ func TestSessionDTODecode(t *testing.T) {
 		ProjectID: "abc123def456",
 		Directory: "/home/user/project",
 		Title:     "Test Session",
-		Version:   "0.2.1",
+		Version:   coding.Version,
 		Time: sessionTime{
 			Created:  1700000000000,
 			Updated:  1700000001000,
