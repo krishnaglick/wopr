@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 
 	"github.com/alexrudloff/wopr/coding"
 	codinghost "github.com/alexrudloff/wopr/coding/host"
-	"github.com/alexrudloff/wopr/internal/codingagent"
+	icodingagent "github.com/alexrudloff/wopr/internal/codingagent"
 )
 
 // writeTestSession creates a test session file with the given entries (for *testing.T).
@@ -22,7 +23,7 @@ func writeTestSession(t *testing.T, dir, id string, entries []string) string {
 		t.Fatal(err)
 	}
 
-	header := codingagent.SessionHeader{
+	header := icodingagent.SessionHeader{
 		Type:      "session",
 		Version:   3,
 		ID:        id,
@@ -46,7 +47,7 @@ func writeTestSessionB(b *testing.B, dir, id string, entries []string) string {
 		b.Fatal(err)
 	}
 
-	header := codingagent.SessionHeader{
+	header := icodingagent.SessionHeader{
 		Type:      "session",
 		Version:   3,
 		ID:        id,
@@ -85,10 +86,10 @@ func TestSessionMetaFindsTailMarkers(t *testing.T) {
 
 	entries := make([]string, 0, 502)
 	for range 500 {
-		entries = append(entries, userEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), "x"))
+		entries = append(entries, userEntry(func() string { id, _ := icodingagent.GenerateEntryID(); return id }(), "x"))
 	}
-	entries = append(entries, infoEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), "Test Session"))
-	entries = append(entries, archiveEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), time.Now().UnixMilli()))
+	entries = append(entries, infoEntry(func() string { id, _ := icodingagent.GenerateEntryID(); return id }(), "Test Session"))
+	entries = append(entries, archiveEntry(func() string { id, _ := icodingagent.GenerateEntryID(); return id }(), time.Now().UnixMilli()))
 
 	path := writeTestSession(t, dir, id, entries)
 
@@ -110,11 +111,11 @@ func TestSessionMetaResidual(t *testing.T) {
 	dir := t.TempDir()
 	id := "def"
 
-	entries := []string{infoEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), "Old Name")}
+	entries := []string{infoEntry(func() string { id, _ := icodingagent.GenerateEntryID(); return id }(), "Old Name")}
 	// Write enough entries to push the marker beyond metaProbeBytes (32 KiB).
 	// Each entry is roughly 200 bytes, so 1000 entries = ~200 KiB.
 	for range 2000 {
-		entries = append(entries, userEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), "padding"))
+		entries = append(entries, userEntry(func() string { id, _ := icodingagent.GenerateEntryID(); return id }(), "padding"))
 	}
 
 	path := writeTestSession(t, dir, id, entries)
@@ -133,7 +134,7 @@ func TestTitleFallback(t *testing.T) {
 	dir := t.TempDir()
 	id := "ghi"
 
-	entries := []string{userEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), "First user message")}
+	entries := []string{userEntry(func() string { id, _ := icodingagent.GenerateEntryID(); return id }(), "First user message")}
 	path := writeTestSession(t, dir, id, entries)
 
 	rec, ok := sessionRecordAt(path)
@@ -153,7 +154,7 @@ func TestTailEntries(t *testing.T) {
 	entries := make([]string, 10)
 	baseTime := time.Now().UTC()
 	for i := range 10 {
-		id := func() string { id, _ := codingagent.GenerateEntryID(); return id }()
+		id := func() string { id, _ := icodingagent.GenerateEntryID(); return id }()
 		ts := baseTime.Add(time.Duration(i) * time.Millisecond).Format(time.RFC3339Nano)
 		entries[i] = `{"type":"message","id":"` + id + `","parentId":null,"timestamp":"` + ts + `","message":{"role":"user","content":[{"type":"text","text":"msg"}],"timestamp":` + strconv.FormatInt(baseTime.Add(time.Duration(i)*time.Millisecond).UnixMilli(), 10) + `}}`
 	}
@@ -187,11 +188,11 @@ func TestTailEntriesSkipsMalformed(t *testing.T) {
 	// The malformed one should be skipped, returning 4 valid entries.
 	entries := make([]string, 0, 7)
 	for range 3 {
-		entries = append(entries, userEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), "msg"))
+		entries = append(entries, userEntry(func() string { id, _ := icodingagent.GenerateEntryID(); return id }(), "msg"))
 	}
 	entries = append(entries, "not valid json")
 	for range 3 {
-		entries = append(entries, userEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), "msg"))
+		entries = append(entries, userEntry(func() string { id, _ := icodingagent.GenerateEntryID(); return id }(), "msg"))
 	}
 
 	path := writeTestSession(t, dir, id, entries)
@@ -352,10 +353,10 @@ func BenchmarkServeListRead(b *testing.B) {
 			agentDir := b.TempDir()
 
 			for range 50 {
-				id := func() string { id, _ := codingagent.GenerateEntryID(); return id }()
+				id := func() string { id, _ := icodingagent.GenerateEntryID(); return id }()
 				entries := make([]string, entriesPerSession)
 				for j := range entriesPerSession {
-					entries[j] = userEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), "msg")
+					entries[j] = userEntry(func() string { id, _ := icodingagent.GenerateEntryID(); return id }(), "msg")
 				}
 				writeTestSessionB(b, dir, id, entries)
 			}
@@ -398,10 +399,10 @@ func BenchmarkServeTailRead(b *testing.B) {
 			agentDir := b.TempDir()
 
 			for range 50 {
-				id := func() string { id, _ := codingagent.GenerateEntryID(); return id }()
+				id := func() string { id, _ := icodingagent.GenerateEntryID(); return id }()
 				entries := make([]string, entriesPerSession)
 				for j := range entriesPerSession {
-					entries[j] = userEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), "msg")
+					entries[j] = userEntry(func() string { id, _ := icodingagent.GenerateEntryID(); return id }(), "msg")
 				}
 				writeTestSessionB(b, dir, id, entries)
 			}
@@ -434,5 +435,59 @@ func BenchmarkServeTailRead(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// TestTailEntriesMultiBlock tests that tailEntries returns exactly 'limit' entries
+// when entries span multiple 64 KiB read blocks.
+func TestTailEntriesMultiBlock(t *testing.T) {
+	dir := t.TempDir()
+	id := "multi-block-test"
+
+	// Create entries that span multiple 64 KiB blocks.
+	// Each entry is roughly 200 bytes. 400 entries = ~80 KiB > 64 KiB block.
+	entries := make([]string, 400)
+	baseTime := time.Now().UTC()
+	for i := range 400 {
+		id := func() string { id, _ := icodingagent.GenerateEntryID(); return id }()
+		ts := baseTime.Add(time.Duration(i) * time.Millisecond).Format(time.RFC3339Nano)
+		entries[i] = `{"type":"message","id":"` + id + `","parentId":null,"timestamp":"` + ts + `","message":{"role":"user","content":[{"type":"text","text":"msg"}],"timestamp":` + strconv.FormatInt(baseTime.Add(time.Duration(i)*time.Millisecond).UnixMilli(), 10) + `}}`
+	}
+
+	path := writeTestSession(t, dir, id, entries)
+	result, err := tailEntries(path, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Must return exactly 20 entries (the limit), not fewer due to block counting bug.
+	if len(result) != 20 {
+		t.Errorf("expected exactly 20 entries, got %d", len(result))
+	}
+
+	// Verify they are distinct (no duplicates from block aliasing)
+	ids := make(map[string]bool)
+	for _, r := range result {
+		if ids[r.Base.ID] {
+			t.Errorf("duplicate entry ID: %s", r.Base.ID)
+		}
+		ids[r.Base.ID] = true
+	}
+
+	// Verify they are in ascending order (oldest first)
+	for i := 1; i < len(result); i++ {
+		if result[i].Base.Timestamp < result[i-1].Base.Timestamp {
+			t.Errorf("entries not in ascending order: %s >= %s", result[i-1].Base.Timestamp, result[i].Base.Timestamp)
+		}
+	}
+
+	// Verify the last entry is complete (not truncated)
+	last := result[len(result)-1]
+	var me icodingagent.MessageEntry
+	if err := json.Unmarshal(last.Raw(), &me); err != nil {
+		t.Fatalf("last entry not valid JSON: %v", err)
+	}
+	if me.Message.Role() != "user" {
+		t.Errorf("expected user message, got %s", me.Message.Role())
 	}
 }

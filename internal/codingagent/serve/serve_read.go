@@ -23,11 +23,14 @@ import (
 // ─── walkBack: the one backward primitive ────────────────────────────────
 
 // walkStop controls when walkBack stops reading.
-type walkStop func(records [][]byte) bool
+// It receives the count of complete records seen so far.
+type walkStop func(completeRecords int) bool
 
 // walkBack opens path, seeks to end, and walks backwards in tailBlockBytes
 // blocks until stop is satisfied or byteLimit is reached. Returns records
 // oldest-first (after dropping the first partial record).
+// stop is called with the count of complete records seen so far.
+// The byte limit is an independent bound: reading stops on whichever bound is reached first.
 func walkBack(path string, byteLimit int64, stop walkStop) ([][]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -45,10 +48,12 @@ func walkBack(path string, byteLimit int64, stop walkStop) ([][]byte, error) {
 	}
 
 	var (
-		buf       = make([]byte, tailBlockBytes)
-		records   [][]byte
-		readBytes int64
-		offset    = size
+		buf         = make([]byte, tailBlockBytes)
+		records     [][]byte
+		readBytes   int64
+		offset      = size
+		carried     []byte // partial line carried from previous (older) block
+		recordCount int    // number of complete records seen so far
 	)
 
 	for offset > 0 && readBytes < byteLimit {
@@ -67,10 +72,20 @@ func walkBack(path string, byteLimit int64, stop walkStop) ([][]byte, error) {
 		records = append(records, block)
 		readBytes += int64(readSize)
 
-		// Check stop condition without joining all blocks each iteration (MAJOR 3).
-		// We only need to check if we've read enough lines to satisfy stop.
-		// For efficiency, we check stop by counting newlines in the accumulated blocks.
-		if stop(records) || offset == 0 {
+		// Count complete records in this block plus any carried partial.
+		// We prepend the carried partial to the new block and count newlines.
+		data := block
+		if len(carried) > 0 {
+			data = bytes.Join([][]byte{block, carried}, nil)
+		}
+		lines := bytes.Split(data, []byte{'\n'})
+		// All but the last element are complete records (end with \n).
+		recordCount += len(lines) - 1
+		// The last element is the new carried partial (may be empty if block ends with \n).
+		carried = lines[len(lines)-1]
+
+		// Check stop condition with the count of complete records.
+		if stop(recordCount) || offset == 0 {
 			break
 		}
 	}
@@ -100,37 +115,9 @@ func walkBack(path string, byteLimit int64, stop walkStop) ([][]byte, error) {
 	return out, nil
 }
 
-// stopMeta is satisfied when the newest session_info AND the newest
-// session_archive custom entry have both been seen, or the file head is reached.
-func stopMeta(records [][]byte) bool {
-	var seenInfo, seenArchive bool
-	for _, rec := range records {
-		var base icodingagent.SessionEntryBase
-		if err := json.Unmarshal(rec, &base); err != nil {
-			continue
-		}
-		if base.Type == "session_info" {
-			seenInfo = true
-		}
-		if base.Type == "custom" {
-			var ce icodingagent.CustomEntry
-			if err := json.Unmarshal(rec, &ce); err == nil && ce.CustomType == "session_archive" {
-				seenArchive = true
-			}
-		}
-		if seenInfo && seenArchive {
-			return true
-		}
-	}
-	return false
-}
-
-// stopTail is satisfied when limit+1 complete records are held.
-func stopTail(limit int) walkStop {
-	return func(records [][]byte) bool {
-		return len(records) >= limit+1
-	}
-}
+// stopMeta was the predicate for reading metadata (session_info and session_archive)
+// but is no longer used; the byte probe is the only bound for metadata reads.
+// Kept for reference; see comment in walkBack about bounds.
 
 // ─── sessionRecord types ─────────────────────────────────────────────────
 
@@ -197,7 +184,10 @@ func sessionRecordAt(path string) (sessionRecord, bool) {
 	}
 
 	// Read tail for session_info and session_archive.
-	records, err := walkBack(path, metaProbeBytes, stopMeta)
+	// The metadata read is bounded by metaProbeBytes; we just read enough records.
+	records, err := walkBack(path, metaProbeBytes, func(completeRecords int) bool {
+		return completeRecords >= 1000 // generous upper bound
+	})
 	if err != nil {
 		return sessionRecord{}, false
 	}
@@ -405,7 +395,9 @@ func sessionRecordFromLive(sess *icodingagent.Session) (sessionRecord, bool) {
 // tailEntries returns the last limit entries from path, oldest-first.
 // Applies blob resolution to each record before decoding.
 func tailEntries(path string, limit int) ([]icodingagent.SessionEntry, error) {
-	records, err := walkBack(path, maxTailBytes, stopTail(limit))
+	records, err := walkBack(path, maxTailBytes, func(completeRecords int) bool {
+		return completeRecords >= limit+1
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +442,6 @@ const maxInlinedImageBytes = 8 << 20
 
 // workingTreePaths runs `git -C <root> status --porcelain=v2 -z` and parses the
 // NUL-separated output. Returns a slice of root-relative paths.
-// Uses a pipe with bounded reader; stops reading once maxFileStatusEntries is reached (MAJOR 5).
 func workingTreePaths(root string) ([]string, error) {
 	cmd := exec.Command("git", "-C", root, "status", "--porcelain=v2", "-z")
 	stdout, err := cmd.StdoutPipe()
@@ -461,13 +452,9 @@ func workingTreePaths(root string) ([]string, error) {
 		return nil, err
 	}
 
-	// Bounded reader: we only need maxFileStatusEntries paths.
-	// Each path is at most 4096 bytes (typical PATH_MAX), so cap at a reasonable multiple.
-	const maxReadBytes = maxFileStatusEntries * 4096
-	reader := io.LimitReader(stdout, int64(maxReadBytes))
-
-	// Read all data (up to limit) and split on NUL.
-	output, err := io.ReadAll(reader)
+	// Read all data and split on NUL.
+	// The 500-entry cap bounds the result; no byte limit needed.
+	output, err := io.ReadAll(stdout)
 	if err != nil {
 		_ = cmd.Wait()
 		return nil, err
