@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alexrudloff/wopr/ai"
@@ -104,29 +105,41 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 		rec sessionRecord
 		err error
 	}
+	// Cap concurrent goroutines to maxListFanOut (MAJOR 4).
+	sem := make(chan struct{}, maxListFanOut)
 	diskCh := make(chan diskRec, len(entries))
+	var wg sync.WaitGroup
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
 		}
+		wg.Add(1)
+		sem <- struct{}{}
 		go func(name string) {
+			defer func() {
+				wg.Done()
+				<-sem
+			}()
 			path := filepath.Join(dir, name)
 			rec, ok := sessionRecordAt(path)
-			diskCh <- diskRec{rec: rec, err: nil}
 			if !ok {
 				diskCh <- diskRec{err: fmt.Errorf("skip")}
+				return
 			}
+			diskCh <- diskRec{rec: rec, err: nil}
 		}(entry.Name())
 	}
 
+	// Close channel after all workers finish.
+	go func() {
+		wg.Wait()
+		close(diskCh)
+	}()
+
 	diskMap := make(map[string]sessionRecord)
-	for i := 0; i < cap(diskCh); i++ {
-		select {
-		case dr := <-diskCh:
-			if dr.err == nil {
-				diskMap[dr.rec.ID] = dr.rec
-			}
-		default:
+	for dr := range diskCh {
+		if dr.err == nil {
+			diskMap[dr.rec.ID] = dr.rec
 		}
 	}
 
@@ -175,7 +188,7 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Build DTOs.
-	var dtos []sessionDTO
+	dtos := make([]sessionDTO, 0)
 	for _, sr := range sortableRecs {
 		if len(dtos) >= limit {
 			break
@@ -219,16 +232,20 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, s.buildSessionDTO(rec, live))
 }
 
+// patchSessionBody is the request body for PATCH /session/{id}.
+// Exported so TestRequestBodyFieldsAreBuiltins can reflect it (MAJOR 6).
+type patchSessionBody struct {
+	Title *string `json:"title"`
+	Time  *struct {
+		Archived *int64 `json:"archived"`
+	} `json:"time"`
+}
+
 // PATCH /session/{id}
 func (s *Server) patchSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	var body struct {
-		Title *string `json:"title"`
-		Time  *struct {
-			Archived *int64 `json:"archived"`
-		} `json:"time"`
-	}
+	var body patchSessionBody
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes)).Decode(&body); err != nil {
 		s.writeJSON(w, http.StatusBadRequest, errorDTO{Error: "invalid body"})
 		return
@@ -342,7 +359,7 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 // GET /provider
 func (s *Server) listProviderNames(w http.ResponseWriter, r *http.Request) {
 	authed := icodingagent.AuthenticatedProviders(s.services.AgentDir())
-	var names []string
+	names := make([]string, 0)
 	for _, p := range ai.ListProviders() {
 		if authed[p] {
 			names = append(names, p)
@@ -366,7 +383,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 // GET /session/status
 func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	liveSessions := s.host.Sessions()
-	var dtos []sessionStatusDTO
+	dtos := make([]sessionStatusDTO, 0)
 	for _, ls := range liveSessions {
 		t := "idle"
 		if !ls.Inner().IsIdle() {
@@ -426,7 +443,7 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var dtos []fileNodeDTO
+	dtos := make([]fileNodeDTO, 0)
 	for _, entry := range entries {
 		if len(dtos) >= maxFileEntries {
 			break
@@ -452,7 +469,7 @@ func (s *Server) findFiles(w http.ResponseWriter, r *http.Request) {
 	limit := limitOf(r, defaultLimit, 100)
 	root := s.services.CWD()
 
-	var matches []fileNodeDTO
+	matches := make([]fileNodeDTO, 0)
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip errors
@@ -488,7 +505,7 @@ func (s *Server) findFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var dtos []fileNodeDTO
+	dtos := make([]fileNodeDTO, 0)
 	if query == "" {
 		dtos = matches
 	} else {
@@ -516,7 +533,7 @@ func (s *Server) fileStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var dtos []fileStatusDTO
+	dtos := make([]fileStatusDTO, 0)
 	for _, p := range paths {
 		if len(dtos) >= maxFileStatusEntries {
 			break
@@ -553,6 +570,9 @@ func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		entries = all
 	}
+	if entries == nil {
+		entries = make([]icodingagent.SessionEntry, 0)
+	}
 
 	dtos := s.entriesToMessages(entries, id)
 	s.writeJSON(w, http.StatusOK, dtos)
@@ -561,6 +581,13 @@ func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request) {
 // ─── DTO Builders ────────────────────────────────────────────────────────
 
 func (s *Server) buildSessionDTO(rec sessionRecord, live *codinghost.Session) sessionDTO {
+	// Compute Updated time: if ModTime is zero (live session with no file yet),
+	// fall back to Created. This avoids emitting a negative epoch (year 1).
+	updated := rec.ModTime.UnixMilli()
+	if rec.ModTime.IsZero() {
+		updated = parseRFC3339NanoToMillis(rec.Header.Timestamp)
+	}
+
 	dto := sessionDTO{
 		ID:        rec.ID,
 		Slug:      rec.ID, // slug = id
@@ -570,23 +597,27 @@ func (s *Server) buildSessionDTO(rec sessionRecord, live *codinghost.Session) se
 		Version:   version.Version,
 		Time: sessionTime{
 			Created:  parseRFC3339NanoToMillis(rec.Header.Timestamp),
-			Updated:  rec.ModTime.UnixMilli(),
+			Updated:  updated,
 			Archived: rec.Archived,
 		},
 	}
 
-	// If live, add tokens and cost.
+	// If live, add tokens and cost only when they have meaningful values.
+	// The backlog item forbids emitting zeros that read as real totals.
 	if live != nil {
 		acc := live.Inner().Inner().Accounting()
-		dto.Tokens = &sessionTokens{
-			Input:  acc.Tokens.Input,
-			Output: acc.Tokens.Output,
-			Cache: tokenCache{
-				Read:  acc.Tokens.CacheRead,
-				Write: acc.Tokens.CacheWrite,
-			},
+		hasTokens := acc.Tokens.Input != 0 || acc.Tokens.Output != 0 || acc.Tokens.CacheRead != 0 || acc.Tokens.CacheWrite != 0
+		if hasTokens {
+			dto.Tokens = &sessionTokens{
+				Input:  acc.Tokens.Input,
+				Output: acc.Tokens.Output,
+				Cache: tokenCache{
+					Read:  acc.Tokens.CacheRead,
+					Write: acc.Tokens.CacheWrite,
+				},
+			}
 		}
-		if !acc.Tokens.CostUnknown {
+		if !acc.Tokens.CostUnknown && acc.Tokens.Cost != 0 {
 			dto.Cost = &acc.Tokens.Cost
 		}
 	}
@@ -605,7 +636,7 @@ func (s *Server) buildSessionDTO(rec sessionRecord, live *codinghost.Session) se
 }
 
 func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionID string) []messageDTO {
-	var messages []messageDTO
+	messages := make([]messageDTO, 0)
 	var pendingTool map[string]*messageDTO // callID -> messageDTO with pending tool part
 
 	for _, e := range entries {

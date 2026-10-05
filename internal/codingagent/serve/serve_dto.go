@@ -2,6 +2,7 @@ package serve
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -121,6 +122,7 @@ const (
 	maxFileEntries       = 500
 	maxWalkEntries       = 20000
 	maxFileStatusEntries = 500
+	maxListFanOut        = 100 // cap concurrent goroutines for listSessions (MAJOR 4)
 )
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
@@ -129,7 +131,7 @@ var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
 func projectID(root string) string {
 	h := sha256.New()
 	_, _ = h.Write([]byte(root))
-	return string(h.Sum(nil))[:12]
+	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
 // resolveInRoot resolves want against root, refusing anything that leaves it.

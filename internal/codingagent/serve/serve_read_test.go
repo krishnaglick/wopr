@@ -182,12 +182,15 @@ func TestTailEntriesSkipsMalformed(t *testing.T) {
 	dir := t.TempDir()
 	id := "mno"
 
-	entries := make([]string, 0, 11)
-	for range 5 {
+	// Create 3 valid entries, then malformed, then 3 valid entries.
+	// Request limit=5: the last 5 entries are (valid, malformed, valid, valid, valid).
+	// The malformed one should be skipped, returning 4 valid entries.
+	entries := make([]string, 0, 7)
+	for range 3 {
 		entries = append(entries, userEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), "msg"))
 	}
 	entries = append(entries, "not valid json")
-	for range 5 {
+	for range 3 {
 		entries = append(entries, userEntry(func() string { id, _ := codingagent.GenerateEntryID(); return id }(), "msg"))
 	}
 
@@ -196,8 +199,9 @@ func TestTailEntriesSkipsMalformed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result) != 5 {
-		t.Errorf("expected 5 entries (skipping malformed), got %d", len(result))
+	// Malformed line is skipped, so we get 4 valid entries (the 3 after + 1 before malformed)
+	if len(result) != 4 {
+		t.Errorf("expected 4 entries (skipping malformed), got %d", len(result))
 	}
 }
 
@@ -412,16 +416,21 @@ func BenchmarkServeTailRead(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
+				totalEntries := 0
 				entries, _ := os.ReadDir(dir)
 				for _, entry := range entries {
 					if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 						continue
 					}
 					path := filepath.Join(dir, entry.Name())
-					_, err := tailEntries(path, 20)
+					entries, err := tailEntries(path, 20)
 					if err != nil {
 						b.Fatal(err)
 					}
+					totalEntries += len(entries)
+				}
+				if totalEntries != 50*20 {
+					b.Fatalf("expected %d total entries, got %d", 50*20, totalEntries)
 				}
 			}
 		})

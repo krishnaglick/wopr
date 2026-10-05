@@ -14,6 +14,7 @@ import (
 	"github.com/alexrudloff/wopr/coding"
 	codinghost "github.com/alexrudloff/wopr/coding/host"
 	"github.com/alexrudloff/wopr/coding/version"
+	"github.com/alexrudloff/wopr/internal/codingagent/web"
 )
 
 // TestMain sets up hermetic test environment.
@@ -32,8 +33,8 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 	}
-	// Unset every key from ai.ProviderCredentialEnvVars()
-	for _, v := range ai.ProviderCredentialEnvVars() {
+	// Unset every key from ai.ProviderCredentialEnvVars() and web.SearchEnvVars()
+	for _, v := range append(ai.ProviderCredentialEnvVars(), web.SearchEnvVars()...) {
 		_ = os.Unsetenv(v)
 	}
 	// Apply aitest.HermeticCredentialEnv

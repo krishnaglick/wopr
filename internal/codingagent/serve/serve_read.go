@@ -62,13 +62,15 @@ func walkBack(path string, byteLimit int64, stop walkStop) ([][]byte, error) {
 			return nil, err
 		}
 
-		block := buf[:readSize]
+		// Clone the block to avoid aliasing the same buffer (BLOCKER 1).
+		block := bytes.Clone(buf[:readSize])
 		records = append(records, block)
 		readBytes += int64(readSize)
 
-		joined := bytes.Join(records, nil)
-		lines := bytes.Split(joined, []byte{'\n'})
-		if stop(lines) || offset == 0 {
+		// Check stop condition without joining all blocks each iteration (MAJOR 3).
+		// We only need to check if we've read enough lines to satisfy stop.
+		// For efficiency, we check stop by counting newlines in the accumulated blocks.
+		if stop(records) || offset == 0 {
 			break
 		}
 	}
@@ -176,7 +178,8 @@ func sessionRecordAt(path string) (sessionRecord, bool) {
 	}
 	defer func() { _ = f.Close() }()
 
-	reader := bufio.NewReaderSize(f, 64*1024)
+	// Bound header read at metaProbeBytes (MAJOR 4).
+	reader := bufio.NewReaderSize(io.LimitReader(f, metaProbeBytes), 64*1024)
 
 	// Read header line.
 	headerLine, err := reader.ReadBytes('\n')
@@ -447,11 +450,29 @@ const maxInlinedImageBytes = 8 << 20
 
 // workingTreePaths runs `git -C <root> status --porcelain=v2 -z` and parses the
 // NUL-separated output. Returns a slice of root-relative paths.
+// Uses a pipe with bounded reader; stops reading once maxFileStatusEntries is reached (MAJOR 5).
 func workingTreePaths(root string) ([]string, error) {
 	cmd := exec.Command("git", "-C", root, "status", "--porcelain=v2", "-z")
-	output, err := cmd.Output()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		// Non-zero exit outside a git repo: return empty slice.
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	// Bounded reader: we only need maxFileStatusEntries paths.
+	// Each path is at most 4096 bytes (typical PATH_MAX), so cap at a reasonable multiple.
+	const maxReadBytes = maxFileStatusEntries * 4096
+	reader := io.LimitReader(stdout, int64(maxReadBytes))
+
+	// Read all data (up to limit) and split on NUL.
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		_ = cmd.Wait()
+		return nil, err
+	}
+	if err := cmd.Wait(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() != 0 {
 			return []string{}, nil
@@ -498,12 +519,11 @@ func workingTreePaths(root string) ([]string, error) {
 		}
 		if path != "" {
 			paths = append(paths, path)
+			if len(paths) >= maxFileStatusEntries {
+				break
+			}
 		}
 	}
 
-	// Truncate to maxFileStatusEntries.
-	if len(paths) > maxFileStatusEntries {
-		paths = paths[:maxFileStatusEntries]
-	}
 	return paths, nil
 }

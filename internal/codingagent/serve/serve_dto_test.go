@@ -2,6 +2,7 @@ package serve
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -262,15 +263,8 @@ func TestRequestBodyFieldsAreBuiltins(t *testing.T) {
 	// Both are builtin or anonymous struct types.
 
 	// Use reflection to check all types that serve decodes into.
-	// We manually enumerate the request body types here.
-	type patchBody struct {
-		Title *string `json:"title"`
-		Time  *struct {
-			Archived *int64 `json:"archived"`
-		} `json:"time"`
-	}
-
-	checkStruct(t, reflect.TypeFor[patchBody]())
+	// We reflect the production type, not a test-local copy (MAJOR 6).
+	checkStruct(t, reflect.TypeFor[patchSessionBody]())
 }
 
 func checkStruct(t *testing.T, typ reflect.Type) {
@@ -310,9 +304,10 @@ func checkFieldType(t *testing.T, typ reflect.Type) {
 
 // TestPatchThenGetAgrees tests that PATCH /session/{id} then GET /session/{id}
 // returns the same data in both reachable states: cold (file on disk) and live (no file).
+// For each state, tests both PATCH bodies (rename and archive) - 4 cases total (MAJOR 7).
 func TestPatchThenGetAgrees(t *testing.T) {
-	// State 1: cold session (file on disk)
-	t.Run("cold_session", func(t *testing.T) {
+	// Case 1: cold session (file on disk), rename
+	t.Run("cold_rename", func(t *testing.T) {
 		agentDir := t.TempDir()
 
 		services, err := coding.NewServices(coding.ServicesOptions{
@@ -366,7 +361,21 @@ func TestPatchThenGetAgrees(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("PATCH failed: %d", resp.StatusCode)
 		}
+
+		// Assert PATCH 200 body
+		var patchDTO sessionDTO
+		err = json.NewDecoder(resp.Body).Decode(&patchDTO)
+		if err != nil {
+			t.Fatal(err)
+		}
 		defer func() { _ = resp.Body.Close() }()
+
+		if patchDTO.Title != "New Name" {
+			t.Errorf("PATCH title: expected 'New Name', got %q", patchDTO.Title)
+		}
+		if patchDTO.Time.Archived != nil {
+			t.Errorf("PATCH time.archived: expected nil, got %v", *patchDTO.Time.Archived)
+		}
 
 		// GET to verify
 		resp, err = http.Get(baseURL + "/session/" + id)
@@ -380,15 +389,114 @@ func TestPatchThenGetAgrees(t *testing.T) {
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		// Verify PATCH response matches GET
-		// (In this test we only verify GET works after PATCH)
-		if getDTO.Title != "New Name" {
-			t.Errorf("expected title 'New Name', got %q", getDTO.Title)
+		// Assert PATCH == GET
+		if patchDTO.Title != getDTO.Title {
+			t.Errorf("title mismatch: PATCH=%q GET=%q", patchDTO.Title, getDTO.Title)
+		}
+		if (patchDTO.Time.Archived == nil) != (getDTO.Time.Archived == nil) {
+			t.Errorf("archived presence mismatch: PATCH=%v GET=%v", patchDTO.Time.Archived, getDTO.Time.Archived)
+		}
+		if patchDTO.Time.Archived != nil && *patchDTO.Time.Archived != *getDTO.Time.Archived {
+			t.Errorf("archived value mismatch: PATCH=%d GET=%d", *patchDTO.Time.Archived, *getDTO.Time.Archived)
 		}
 	})
 
-	// State 2: live session (no file yet)
-	t.Run("live_session", func(t *testing.T) {
+	// Case 2: cold session (file on disk), archive
+	t.Run("cold_archive", func(t *testing.T) {
+		agentDir := t.TempDir()
+
+		services, err := coding.NewServices(coding.ServicesOptions{
+			CWD:            t.TempDir(),
+			AgentDir:       agentDir,
+			ProjectTrusted: func() *bool { b := true; return &b }(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		host := host.New(services, nil)
+
+		sessionDir := filepath.Join(agentDir, "sessions", "--test--")
+		if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		id := "cold-session-archive"
+		path := filepath.Join(sessionDir, time.Now().UTC().Format("2006-01-02T15-04-05")+"_"+id+".jsonl")
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		header := `{"type":"session","version":3,"id":"` + id + `","timestamp":"2024-01-01T00:00:00.000000000Z","cwd":"/test"}`
+		_, _ = f.WriteString(header + "\n")
+		entry1 := `{"type":"message","id":"e1","parentId":null,"timestamp":"2024-01-01T00:00:01.000000000Z","message":{"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":1704067201000}}`
+		_, _ = f.WriteString(entry1 + "\n")
+		_ = f.Close()
+
+		srv, ln, err := New("127.0.0.1:0", host, sessionDir, "test-faux/faux-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() { _ = srv.Serve(ln) }()
+		defer func() { _ = srv.Close() }()
+
+		baseURL := "http://" + ln.Addr().String()
+
+		// PATCH to archive
+		archiveTime := time.Now().UnixMilli()
+		patchBody := fmt.Sprintf(`{"time":{"archived":%d}}`, archiveTime)
+		req, err := http.NewRequest("PATCH", baseURL+"/session/"+id, strings.NewReader(patchBody))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("PATCH failed: %d", resp.StatusCode)
+		}
+
+		// Assert PATCH 200 body
+		var patchDTO sessionDTO
+		err = json.NewDecoder(resp.Body).Decode(&patchDTO)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if patchDTO.Time.Archived == nil {
+			t.Errorf("PATCH time.archived: expected %d, got nil", archiveTime)
+		} else if *patchDTO.Time.Archived != archiveTime {
+			t.Errorf("PATCH time.archived: expected %d, got %d", archiveTime, *patchDTO.Time.Archived)
+		}
+		// Title should remain unchanged after archiving (only archived timestamp is set/cleared)
+
+		// GET to verify
+		resp, err = http.Get(baseURL + "/session/" + id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var getDTO sessionDTO
+		err = json.NewDecoder(resp.Body).Decode(&getDTO)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		// Assert PATCH == GET
+		if (patchDTO.Time.Archived == nil) != (getDTO.Time.Archived == nil) {
+			t.Errorf("archived presence mismatch")
+		} else if patchDTO.Time.Archived != nil && *patchDTO.Time.Archived != *getDTO.Time.Archived {
+			t.Errorf("archived value mismatch: PATCH=%d GET=%d", *patchDTO.Time.Archived, *getDTO.Time.Archived)
+		}
+		if patchDTO.Title != getDTO.Title {
+			t.Errorf("title mismatch: PATCH=%q GET=%q", patchDTO.Title, getDTO.Title)
+		}
+	})
+
+	// Case 3: live session (no file yet), rename
+	t.Run("live_rename", func(t *testing.T) {
 		t.Setenv("WOPR_TEST_FAUX", "1")
 		dir := t.TempDir()
 		agentDir := t.TempDir()
@@ -444,7 +552,21 @@ func TestPatchThenGetAgrees(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("PATCH failed: %d", resp.StatusCode)
 		}
+
+		// Assert PATCH 200 body
+		var patchDTO sessionDTO
+		err = json.NewDecoder(resp.Body).Decode(&patchDTO)
+		if err != nil {
+			t.Fatal(err)
+		}
 		defer func() { _ = resp.Body.Close() }()
+
+		if patchDTO.Title != "Live Session Name" {
+			t.Errorf("PATCH title: expected 'Live Session Name', got %q", patchDTO.Title)
+		}
+		if patchDTO.Time.Archived != nil {
+			t.Errorf("PATCH time.archived: expected nil, got %v", *patchDTO.Time.Archived)
+		}
 
 		// GET to verify
 		resp, err = http.Get(baseURL + "/session/" + id)
@@ -458,8 +580,109 @@ func TestPatchThenGetAgrees(t *testing.T) {
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		if getDTO.Title != "Live Session Name" {
-			t.Errorf("expected title 'Live Session Name', got %q", getDTO.Title)
+		// Assert PATCH == GET
+		if patchDTO.Title != getDTO.Title {
+			t.Errorf("title mismatch: PATCH=%q GET=%q", patchDTO.Title, getDTO.Title)
+		}
+		if (patchDTO.Time.Archived == nil) != (getDTO.Time.Archived == nil) {
+			t.Errorf("archived presence mismatch")
+		}
+	})
+
+	// Case 4: live session (no file yet), archive
+	t.Run("live_archive", func(t *testing.T) {
+		t.Setenv("WOPR_TEST_FAUX", "1")
+		dir := t.TempDir()
+		agentDir := t.TempDir()
+
+		services, err := coding.NewServices(coding.ServicesOptions{
+			CWD:            dir,
+			AgentDir:       agentDir,
+			ProjectTrusted: func() *bool { b := true; return &b }(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		host := host.New(services, nil)
+
+		sessionDir := filepath.Join(agentDir, "sessions", "--"+strings.ReplaceAll(dir, "/", "-")+"--")
+		if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		srv, ln, err := New("127.0.0.1:0", host, sessionDir, "test-faux/faux-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() { _ = srv.Serve(ln) }()
+		defer func() { _ = srv.Close() }()
+
+		baseURL := "http://" + ln.Addr().String()
+
+		// Create session (POST /session)
+		resp, err := http.Post(baseURL+"/session", "application/json", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var createDTO sessionDTO
+		err = json.NewDecoder(resp.Body).Decode(&createDTO)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		id := createDTO.ID
+
+		// PATCH to archive
+		archiveTime := time.Now().UnixMilli()
+		patchBody := fmt.Sprintf(`{"time":{"archived":%d}}`, archiveTime)
+		req, err := http.NewRequest("PATCH", baseURL+"/session/"+id, strings.NewReader(patchBody))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("PATCH failed: %d", resp.StatusCode)
+		}
+
+		// Assert PATCH 200 body
+		var patchDTO sessionDTO
+		err = json.NewDecoder(resp.Body).Decode(&patchDTO)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if patchDTO.Time.Archived == nil {
+			t.Errorf("PATCH time.archived: expected %d, got nil", archiveTime)
+		} else if *patchDTO.Time.Archived != archiveTime {
+			t.Errorf("PATCH time.archived: expected %d, got %d", archiveTime, *patchDTO.Time.Archived)
+		}
+		// Title should remain unchanged after archiving (only archived timestamp is set/cleared)
+
+		// GET to verify
+		resp, err = http.Get(baseURL + "/session/" + id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var getDTO sessionDTO
+		err = json.NewDecoder(resp.Body).Decode(&getDTO)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		// Assert PATCH == GET
+		if (patchDTO.Time.Archived == nil) != (getDTO.Time.Archived == nil) {
+			t.Errorf("archived presence mismatch")
+		} else if patchDTO.Time.Archived != nil && *patchDTO.Time.Archived != *getDTO.Time.Archived {
+			t.Errorf("archived value mismatch: PATCH=%d GET=%d", *patchDTO.Time.Archived, *getDTO.Time.Archived)
+		}
+		if patchDTO.Title != getDTO.Title {
+			t.Errorf("title mismatch: PATCH=%q GET=%q", patchDTO.Title, getDTO.Title)
 		}
 	})
 }
