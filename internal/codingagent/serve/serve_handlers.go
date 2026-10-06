@@ -1,6 +1,8 @@
 package serve
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,11 +15,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/alexrudloff/wopr/agent"
 	"github.com/alexrudloff/wopr/ai"
 	codinghost "github.com/alexrudloff/wopr/coding/host"
 	"github.com/alexrudloff/wopr/coding/version"
 	icodingagent "github.com/alexrudloff/wopr/internal/codingagent"
+	"github.com/alexrudloff/wopr/internal/codingagent/askuser"
+	"github.com/alexrudloff/wopr/internal/codingagent/tools"
 )
 
 // ─── Shared ──────────────────────────────────────────────────────────────
@@ -70,7 +76,7 @@ func (s *Server) directoryParam(r *http.Request) (string, *errorDTO, int) {
 	return s.sessionDir, nil, 0
 }
 
-// notImplemented is the shared stub for the four 501 routes.
+// notImplemented is the shared stub for the six 501 routes.
 func (s *Server) notImplemented(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusNotImplemented, errorDTO{Error: "not implemented"})
 }
@@ -217,6 +223,11 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec, _ := getSessionRecord(s.sessionDir, sess.ID(), sess)
+	// The asker is what offers ask_user at all: a session joins the tool only
+	// while one is installed, which is why print and RPC modes never show it.
+	sess.Inner().SetUserAsker(func(ctx context.Context, q askuser.Question) (askuser.Answer, error) {
+		return s.ask(ctx, sess.ID(), q)
+	})
 	s.writeJSON(w, http.StatusOK, s.buildSessionDTO(rec, sess))
 }
 
@@ -405,15 +416,52 @@ func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /session/{id}/todo
+//
+// The newest todowrite result in the transcript, not a list held in this
+// process: a session is a file and the server is not, so a client reconnecting
+// after a restart must see the todos a conversation visibly has.
 func (s *Server) sessionTodo(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	live, _ := s.host.Get(id)
-	_, ok := getSessionRecord(s.sessionDir, id, live)
+	rec, ok := getSessionRecord(s.sessionDir, id, live)
 	if !ok {
 		s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "session not found"})
 		return
 	}
-	s.writeJSON(w, http.StatusOK, []todoItemDTO{})
+	entries, err := sessionEntries(rec, live, maxLimit)
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
+	}
+	todos := transcriptTodos(entries)
+	if todos == nil {
+		todos = []tools.Todo{}
+	}
+	s.writeJSON(w, http.StatusOK, todos)
+}
+
+// transcriptTodos returns the items of the newest todowrite result in entries,
+// or nil when the session has none. It walks backwards so the newest match is
+// the first one found, and it decodes through JSON because a result read back
+// from disk is map[string]any, not the tool's own value.
+func transcriptTodos(entries []icodingagent.SessionEntry) []tools.Todo {
+	for _, e := range slices.Backward(entries) {
+		if e.Base.Type != "message" {
+			continue
+		}
+		var me icodingagent.MessageEntry
+		if err := json.Unmarshal(e.Raw(), &me); err != nil {
+			continue
+		}
+		tr := me.Message.ToolResult
+		if tr == nil {
+			continue
+		}
+		if todos := todosFromDetails(tr.ToolName, tr.Details); len(todos) > 0 {
+			return todos
+		}
+	}
+	return nil
 }
 
 // GET /file?path=&directory=
@@ -426,14 +474,7 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 
 	resolved, err := resolveInRoot(root, q)
 	if err != nil {
-		//nolint:gocritic // if-else chain with errors.Is is clearer than switch here
-		if errors.Is(err, errMissingPath) {
-			s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "path not found"})
-		} else if errors.Is(err, errUnreadableLink) || errors.Is(err, errOutsideRoot) {
-			s.writeJSON(w, http.StatusForbidden, errorDTO{Error: "path not allowed"})
-		} else {
-			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
-		}
+		s.writeResolveError(w, err)
 		return
 	}
 
@@ -471,6 +512,98 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, dtos)
+}
+
+// writeResolveError answers a resolveInRoot refusal. It is shared with
+// /file/content because both handlers read the same three sentinels, and two
+// mappings of them is drift nobody would notice.
+//
+//nolint:gocritic // if-else chain with errors.Is is clearer than switch here
+func (s *Server) writeResolveError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errMissingPath) {
+		s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "path not found"})
+	} else if errors.Is(err, errUnreadableLink) || errors.Is(err, errOutsideRoot) {
+		s.writeJSON(w, http.StatusForbidden, errorDTO{Error: "path not allowed"})
+	} else {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+	}
+}
+
+// GET /file/content?path=&directory=
+//
+// 200 with {"content": …} for a text file inside the server root; 404 for a
+// path that does not exist; 403 for one that leaves the root, including through
+// a symlink; 400 for a directory; 415 for a file that is not text; 413 over
+// maxFileContentBytes; 500 for a read that fails. The cap is refused rather than
+// applied: a truncated body served as a whole file is a lie the client cannot
+// detect, because the cap is the server's and not the file's.
+func (s *Server) fileContent(w http.ResponseWriter, r *http.Request) {
+	if _, errDTO, status := s.directoryParam(r); errDTO != nil {
+		s.writeJSON(w, status, errDTO)
+		return
+	}
+	resolved, err := resolveInRoot(s.services.CWD(), r.URL.Query().Get("path"))
+	if err != nil {
+		s.writeResolveError(w, err)
+		return
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "path not found"})
+		return
+	}
+	if info.IsDir() {
+		s.writeJSON(w, http.StatusBadRequest, errorDTO{Error: "path must be a file"})
+		return
+	}
+	if !info.Mode().IsRegular() {
+		s.writeJSON(w, http.StatusBadRequest, errorDTO{Error: "path must be a regular file"})
+		return
+	}
+	if info.Size() > maxFileContentBytes {
+		s.writeJSON(w, http.StatusRequestEntityTooLarge, errorDTO{Error: tooLargeMessage(info.Size())})
+		return
+	}
+
+	f, err := os.Open(resolved)
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
+	}
+	defer func() { _ = f.Close() }()
+	// LimitReader bounds memory: a file that grew between the stat and the read
+	// still cannot pull more than the cap plus one byte into the process.
+	data, err := io.ReadAll(io.LimitReader(f, maxFileContentBytes+1))
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
+	}
+	if len(data) > maxFileContentBytes {
+		s.writeJSON(w, http.StatusRequestEntityTooLarge, errorDTO{Error: tooLargeMessage(int64(len(data)))})
+		return
+	}
+	if !isTextFile(data) {
+		s.writeJSON(w, http.StatusUnsupportedMediaType, errorDTO{Error: "file is not text"})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]string{"content": string(data)})
+}
+
+func tooLargeMessage(size int64) string {
+	return fmt.Sprintf("file is %d bytes, over the %d byte limit", size, int64(maxFileContentBytes))
+}
+
+// isTextFile reports whether data can be served as a JSON string unchanged. Any
+// invalid UTF-8 says no, because json.Encoder substitutes U+FFFD for it and the
+// corruption would be silent; a NUL byte in the first 8 KiB says no on its own
+// account, because it marks the file as non-text to every other reader.
+func isTextFile(data []byte) bool {
+	probe := data
+	if len(probe) > 8<<10 {
+		probe = probe[:8<<10]
+	}
+	return !bytes.Contains(probe, []byte{0}) && utf8.Valid(data)
 }
 
 // GET /find/file?query=&limit=
@@ -565,31 +698,40 @@ func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var entries []icodingagent.SessionEntry
-	if rec.HasFile {
-		var err error
-		entries, err = tailEntries(rec.Path, limit)
-		if err != nil {
-			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
-			return
-		}
-		// Note: tailEntries may return fewer than 'limit' records if the byte
-		// limit (maxTailBytes = 16 MiB) is reached before 'limit' complete
-		// records are found. This happens with very large entries (images,
-		// large tool outputs) that exceed the per-entry byte budget.
-	} else if live != nil {
-		all := live.Inner().Entries()
-		if len(all) > limit {
-			all = all[len(all)-limit:]
-		}
-		entries = all
-	}
-	if entries == nil {
-		entries = make([]icodingagent.SessionEntry, 0)
+	entries, err := sessionEntries(rec, live, limit)
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
 	}
 
 	dtos := s.entriesToMessages(entries, id)
 	s.writeJSON(w, http.StatusOK, dtos)
+}
+
+// sessionEntries is how a handler reads a session's transcript, so /todo and
+// /message cannot disagree about one session. The file wins over the live
+// session, because a live session with a file holds the same entries in memory
+// and the file is the one that survives a restart.
+//
+// tailEntries may return fewer than limit records if the byte limit
+// (maxTailBytes = 16 MiB) is reached before limit complete records are found.
+// This happens with very large entries (images, large tool outputs) that exceed
+// the per-entry byte budget.
+func sessionEntries(rec sessionRecord, live *codinghost.Session, limit int) ([]icodingagent.SessionEntry, error) {
+	if rec.HasFile {
+		return tailEntries(rec.Path, limit)
+	}
+	var entries []icodingagent.SessionEntry
+	if live != nil {
+		entries = live.Inner().Entries()
+	}
+	if entries == nil {
+		entries = make([]icodingagent.SessionEntry, 0)
+	}
+	if len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	return entries, nil
 }
 
 // ─── DTO Builders ────────────────────────────────────────────────────────
@@ -769,31 +911,13 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 				if m, ok := pendingTool[callID]; ok {
 					for i := range m.Parts {
 						if m.Parts[i].CallID == callID {
-							// Extract text content from tool result.
-							var output strings.Builder
-							for _, c := range tr.Content {
-								if tc, ok := c.(ai.TextContent); ok {
-									output.WriteString(tc.Text)
-								}
-							}
-							state := map[string]any{
-								"status": "completed",
-								"output": output.String(),
-							}
-							stateBytes, _ := json.Marshal(state)
-							m.Parts[i].State = stateBytes
+							m.Parts[i].State = toolResultState(tr)
 							break
 						}
 					}
 					delete(pendingTool, callID)
 				} else {
 					// Unmatched toolResult: create a new assistant message with one tool part.
-					var output strings.Builder
-					for _, c := range tr.Content {
-						if tc, ok := c.(ai.TextContent); ok {
-							output.WriteString(tc.Text)
-						}
-					}
 					newMsg := messageDTO{
 						Info: messageInfoDTO{
 							ID:        e.Base.ID,
@@ -809,7 +933,7 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 								Type:      "tool",
 								Tool:      tr.ToolName,
 								CallID:    callID,
-								State:     json.RawMessage(fmt.Sprintf(`{"status":"completed","output":%q}`, output.String())),
+								State:     toolResultState(tr),
 							},
 						},
 					}
@@ -817,12 +941,6 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 				}
 			} else {
 				// No pending tools at all.
-				var output strings.Builder
-				for _, c := range tr.Content {
-					if tc, ok := c.(ai.TextContent); ok {
-						output.WriteString(tc.Text)
-					}
-				}
 				newMsg := messageDTO{
 					Info: messageInfoDTO{
 						ID:        e.Base.ID,
@@ -838,7 +956,7 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 							Type:      "tool",
 							Tool:      tr.ToolName,
 							CallID:    callID,
-							State:     json.RawMessage(fmt.Sprintf(`{"status":"completed","output":%q}`, output.String())),
+							State:     toolResultState(tr),
 						},
 					},
 				}
@@ -878,6 +996,31 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 	}
 
 	return messages
+}
+
+// toolResultState is a finished tool part's state: its status, its text
+// output, and the metadata the tool produced.
+//
+// todos ride along because this is a recovery surface, not a convenience one:
+// the client has no replay and re-fetches history, so a todo panel that only
+// filled from the stream would be empty for every client that was not connected
+// when the tool ran.
+func toolResultState(tr *agent.ToolResultMessage) json.RawMessage {
+	var output strings.Builder
+	for _, c := range tr.Content {
+		if tc, ok := c.(ai.TextContent); ok {
+			output.WriteString(tc.Text)
+		}
+	}
+	state := map[string]any{
+		"status": "completed",
+		"output": output.String(),
+	}
+	if todos := todosFromDetails(tr.ToolName, tr.Details); len(todos) > 0 {
+		state["metadata"] = map[string]any{"todos": todos}
+	}
+	stateBytes, _ := json.Marshal(state)
+	return stateBytes
 }
 
 func parseRFC3339NanoToMillis(ts string) int64 {

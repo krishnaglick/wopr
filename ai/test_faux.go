@@ -453,6 +453,46 @@ func classifyTestFauxRequest(msgs []Message) (kind, text string, toolCalls []tes
 		}}
 	}
 
+	// Todo list parity: the tool the client's todo panel reads.
+	if strings.Contains(lastText, "Run: write todos") {
+		return "tool", "", []testFauxToolCall{{
+			Name: "todowrite",
+			Args: map[string]any{"todos": []map[string]any{
+				{"id": "todo-1", "content": "read the spec", "status": "completed", "priority": "high"},
+				{"id": "todo-2", "content": "write the code", "status": "in_progress", "priority": "medium"},
+				{"id": "todo-3", "content": "cut the changelog", "status": "pending", "priority": "low"},
+			}},
+		}}
+	}
+
+	// A second todo write with a longer list, so a reader can tell the newest
+	// result from the first one it finds.
+	if strings.Contains(lastText, "Run: rewrite todos") {
+		return "tool", "", []testFauxToolCall{{
+			Name: "todowrite",
+			Args: map[string]any{"todos": []map[string]any{
+				{"id": "todo-1", "content": "read the spec", "status": "completed", "priority": "high"},
+				{"id": "todo-2", "content": "write the code", "status": "in_progress", "priority": "medium"},
+				{"id": "todo-3", "content": "cut the changelog", "status": "completed", "priority": "low"},
+				{"id": "todo-4", "content": "ship the fix round", "status": "pending", "priority": "high"},
+			}},
+		}}
+	}
+
+	// Ask-the-user parity: the tool that blocks until a client answers.
+	if strings.Contains(lastText, "Run: ask a question") {
+		return "tool", "", []testFauxToolCall{{
+			Name: "ask_user",
+			Args: map[string]any{
+				"question": "Which store should the service use?",
+				"options": []map[string]any{
+					{"label": "Postgres", "description": "already deployed"},
+					{"label": "SQLite", "description": "simplest on one host"},
+				},
+			},
+		}}
+	}
+
 	// Long-output bash tool (exercises the bash collapse hint).
 	if strings.Contains(lastText, "Run: bash long output") {
 		return "tool", "", []testFauxToolCall{{
@@ -533,6 +573,13 @@ func classifyTestFauxRequest(msgs []Message) (kind, text string, toolCalls []tes
 		}
 		if strings.Contains(currentUserText, "Run: bash with invalid args") {
 			return "text", "validation-handled", nil
+		}
+		if strings.Contains(currentUserText, "Run: write todos") ||
+			strings.Contains(currentUserText, "Run: rewrite todos") {
+			return "text", "todos-written", nil
+		}
+		if strings.Contains(currentUserText, "Run: ask a question") {
+			return "text", "question-answered", nil
 		}
 	}
 

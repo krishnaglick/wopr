@@ -22,6 +22,9 @@ type Server struct {
 	modelSpec  string
 	srv        *http.Server
 	ln         net.Listener
+	// questions holds the ask_user calls waiting for a client to answer them.
+	// It is on the Server because GET /question is not session-scoped.
+	questions questionStore
 	// sseConnections counts the live /global/event streams, which is what the
 	// connection cap bounds.
 	sseConnections atomic.Int64
@@ -47,6 +50,7 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 		modelSpec:  modelSpec,
 		ln:         ln,
 	}
+	s.questions.seed()
 
 	mux := http.NewServeMux()
 	// Health
@@ -68,6 +72,9 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 	mux.HandleFunc("POST /session/{id}/prompt_async", s.promptAsync)
 	mux.HandleFunc("POST /session/{id}/message", s.sessionMessage)
 	mux.HandleFunc("POST /session/{id}/abort", s.sessionAbort)
+	// ServeMux rejects a pattern that reuses a wildcard name, and HandleFunc
+	// panics on that error, so this route's wildcard is permissionID and not id.
+	mux.HandleFunc("POST /session/{id}/permissions/{permissionID}", s.notImplemented)
 
 	// Project
 	mux.HandleFunc("GET /project", s.listProjects)
@@ -82,8 +89,17 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 	// Agents
 	mux.HandleFunc("GET /agent", s.listAgents)
 
+	// Permissions
+	mux.HandleFunc("GET /permission", s.notImplemented)
+
+	// Questions
+	mux.HandleFunc("GET /question", s.listQuestions)
+	mux.HandleFunc("POST /question/{id}/reply", s.replyQuestion)
+	mux.HandleFunc("POST /question/{id}/reject", s.rejectQuestion)
+
 	// Files
 	mux.HandleFunc("GET /file", s.listFiles)
+	mux.HandleFunc("GET /file/content", s.fileContent)
 	mux.HandleFunc("GET /find/file", s.findFiles)
 	mux.HandleFunc("GET /file/status", s.fileStatus)
 
