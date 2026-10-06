@@ -257,14 +257,31 @@ func (s *Session) PromptContentWait(ctx context.Context, content []ai.UserConten
 		return nil, ErrSessionBusy
 	}
 	if before != nil {
-		if err := before(); err != nil {
-			s.run.Unlock()
+		if err := s.withReservation(before); err != nil {
 			return nil, err
 		}
 	}
 	runCtx, cancel := s.ownRun(ctx)
 	defer s.releaseRun(cancel)
 	return s.sess.SendContentWithPreflight(runCtx, content, nil)
+}
+
+// withReservation runs before with the run slot held and gives the slot back if
+// it fails. The release is deferred rather than a statement on the error path so
+// a panic in caller code cannot wedge the slot for every later prompt. On
+// success the slot stays held and belongs to releaseRun.
+func (s *Session) withReservation(before func() error) error {
+	keepSlot := false
+	defer func() {
+		if !keepSlot {
+			s.run.Unlock()
+		}
+	}()
+	if err := before(); err != nil {
+		return err
+	}
+	keepSlot = true
+	return nil
 }
 
 // ownRun detaches ctx from its cancellation, makes it cancellable, and stores

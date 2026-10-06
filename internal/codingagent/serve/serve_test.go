@@ -796,15 +796,11 @@ func TestSSEStreamDropsAStalledConnectionAtTheByteBound(t *testing.T) {
 		t.Errorf("the terminal frame is server-wide, got sessionID %q", terminal.SessionID)
 	}
 
-	// The prefix comes first: the connection was owed those frames before the
-	// byte bound said it would get no more, and a subscriber that discarded its
-	// queue on the drop would satisfy every assertion above.
-	if before := slices.IndexFunc(frames[:dropAt], func(f sseFrame) bool { return f.Name == eventMessagePartDelta }); before < 0 {
-		t.Errorf("the queued delta frames must arrive before the terminal frame; frames: %s", summarize(frames))
-	}
-	if after := slices.IndexFunc(frames[dropAt:], func(f sseFrame) bool { return f.Name == eventMessagePartDelta }); after >= 0 {
-		t.Errorf("a delta frame arrived behind the terminal frame; frames: %s", summarize(frames))
-	}
+	// The prefix-before-terminal ordering is pinned at the queue, not here:
+	// TestServeFanoutDropsStalledSubscribers reads the subscription directly, so
+	// it can see whether frames were queued. Over a socket the kernel buffer
+	// absorbs several MiB before the handler blocks, which is enough that this
+	// test passes even if the queue were discarded on drop.
 }
 
 // TestStreamPartIDsMatchTranscriptPartIDs is the topology gate: the final burst
@@ -939,22 +935,22 @@ func toolDeltaPartID(frames []sseFrame) string {
 	return ""
 }
 
-// TestToolCallDeltaWithoutACallIDEmitsNothing is the guard on a streamed tool
-// delta whose call id cannot be resolved: nothing is at that index, or what is
-// there is not a tool call. The alternative is an id ending in "-tool-", which
-// matches neither the ToolCallEndEvent's part nor the transcript's, and no
-// guard downstream rejects it.
-//
-// Both branches: the same event over a message whose copy does carry the call
-// is emitted, so a mapper that emitted nothing for every tool delta would fail
-// here rather than pass.
-func TestToolCallDeltaWithoutACallIDEmitsNothing(t *testing.T) {
+// TestToolCallDeltaAgreesWithThePartItCompletes pins the one reachable
+// unresolvable-call-id case: an OpenAI-compatible server that streams
+// tool_calls with no id. toolPart and the transcript both build their tool id
+// from the same empty value, so the delta must too, or it is a frame for a
+// part nothing else ever announces. The arguments are the only live channel
+// for a tool call in flight, so losing them leaves the bubble empty until the
+// client refetches history.
+func TestToolCallDeltaAgreesWithThePartItCompletes(t *testing.T) {
 	mapper := &eventMapper{sessionID: "sess-guard"}
-	streamed := &ai.AssistantMessage{Content: []ai.AssistantContentBlock{ai.TextContent{Text: "no tool here"}}}
 	ev := agent.MessageUpdateEvent{
 		Message: agent.AgentMessage{Assistant: &agent.AssistantMessage{Role: "assistant"}},
 		AssistantMessageEvent: ai.ToolCallDeltaEvent{
-			ContentIndex: 0, Delta: `{"command":`, Partial: streamed,
+			ContentIndex: 0, Delta: `{"command":`,
+			Partial: &ai.AssistantMessage{Content: []ai.AssistantContentBlock{
+				ai.ToolCall{Name: "bash"},
+			}},
 		},
 	}
 
@@ -962,11 +958,21 @@ func TestToolCallDeltaWithoutACallIDEmitsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("a delta with no resolvable call id must emit nothing, got %d event(s)", len(got))
+	if len(got) != 1 || got[0].Type != eventMessagePartDelta {
+		t.Fatalf("an id-less tool call must still stream its arguments, got %+v", got)
+	}
+	var payload ssePartDelta
+	if err := json.Unmarshal(mustMarshal(t, got[0].Data), &payload); err != nil {
+		t.Fatalf("decode the delta: %v", err)
+	}
+	// The same empty call id toolPart and the transcript produce, so the delta
+	// matches the part it completes.
+	if want := "msg_sess-guard-0-tool-"; payload.PartID != want {
+		t.Errorf("partID: expected %q, got %q", want, payload.PartID)
 	}
 
-	streamed.Content = []ai.AssistantContentBlock{ai.ToolCall{ID: "call-9", Name: "bash"}}
+	streamed := &ai.AssistantMessage{Content: []ai.AssistantContentBlock{ai.ToolCall{ID: "call-9", Name: "bash"}}}
+	ev.AssistantMessageEvent = ai.ToolCallDeltaEvent{ContentIndex: 0, Delta: `{"command":`, Partial: streamed}
 	got, err = mapper.translate(ev, "")
 	if err != nil {
 		t.Fatalf("translate: %v", err)
@@ -974,7 +980,6 @@ func TestToolCallDeltaWithoutACallIDEmitsNothing(t *testing.T) {
 	if len(got) != 1 || got[0].Type != eventMessagePartDelta {
 		t.Fatalf("a delta with a resolvable call id must emit one message.part.delta, got %+v", got)
 	}
-	var payload ssePartDelta
 	if err := json.Unmarshal(mustMarshal(t, got[0].Data), &payload); err != nil {
 		t.Fatalf("decode the delta: %v", err)
 	}

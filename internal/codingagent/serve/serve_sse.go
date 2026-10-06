@@ -310,14 +310,13 @@ func (m *eventMapper) messageUpdate(ev agent.MessageUpdateEvent) ([]codinghost.E
 	case ai.ToolCallDeltaEvent:
 		// The index is over the streamed message's content, so the call id has
 		// to come from there: a tool-call delta carries no id of its own.
+		// An OpenAI-compatible server can stream tool_calls with no id, so the
+		// call id can be empty. toolPart and the transcript build their tool id
+		// from the same empty value, so the empty form is what everything else
+		// emits too — falling back keeps the delta agreeing with the part it
+		// completes, and the arguments still stream. Dropping it instead left
+		// the live tool bubble empty until the client refetched history.
 		callID := toolCallID(stream.Partial, stream.ContentIndex)
-		if callID == "" {
-			// Nothing to identify the part by. partID would end in "-tool-",
-			// matching neither the ToolCallEndEvent's part nor the transcript's,
-			// and nothing downstream rejects the mismatch — so the delta is
-			// dropped rather than emitted under an id nothing agrees with.
-			return nil, nil
-		}
 		return m.one(m.delta(messageID, partID(messageID, "tool", stream.ContentIndex, callID), "arguments", stream.Delta)), nil
 	case ai.TextEndEvent:
 		return m.one(m.part(textPart(messageID, m.sessionID, stream.ContentIndex, stream.Content))), nil
