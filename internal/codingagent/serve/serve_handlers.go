@@ -466,6 +466,14 @@ func transcriptTodos(entries []icodingagent.SessionEntry) []tools.Todo {
 
 // GET /file?path=&directory=
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
+	s.serveListFiles(w, r, nil)
+}
+
+// serveListFiles is listFiles with a test-only hook. beforeOpen, when non-nil,
+// runs in the window between resolving the request path and opening it, so a
+// test can swap a component for a symlink deterministically. Production always
+// passes nil.
+func (s *Server) serveListFiles(w http.ResponseWriter, r *http.Request, beforeOpen func()) {
 	root := s.services.CWD()
 	q := r.URL.Query().Get("path")
 	if q == "" {
@@ -476,6 +484,17 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeResolveError(w, err)
 		return
+	}
+	// The same root/resolved pair resolveInRoot just validated, so this cannot
+	// escape; it reproduces the relative path that check already accepted.
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
+	}
+
+	if beforeOpen != nil {
+		beforeOpen()
 	}
 
 	info, err := os.Stat(resolved)
@@ -488,11 +507,32 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := os.ReadDir(resolved)
+	f, err := os.OpenInRoot(root, rel)
+	if err != nil {
+		// os.Root exports no escape sentinel, so classify by re-resolving: a
+		// fresh refusal is the same refusal (403, or 404 for a path deleted
+		// since the stat); a resolve that still succeeds means a genuine open
+		// failure, e.g. a mode-0000 directory (500). A racer can only flip
+		// 403/404/500, never read outside: the descriptor is confined by
+		// os.Root regardless.
+		if _, rerr := resolveInRoot(root, q); rerr != nil {
+			s.writeResolveError(w, rerr)
+		} else {
+			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		}
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	entries, err := f.ReadDir(-1)
 	if err != nil {
 		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
 		return
 	}
+	// (*os.File).ReadDir(-1) returns directory order, so sort by name to
+	// reproduce the filename order os.ReadDir documented. Which entries
+	// survive maxFileEntries depends on it.
+	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 
 	dtos := make([]fileNodeDTO, 0)
 	for _, entry := range entries {
