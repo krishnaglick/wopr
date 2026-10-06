@@ -31,14 +31,14 @@ The endpoint table below was derived from `grapeot/opencode_ios_client` at commi
 
 ## Endpoints
 
-The server registers 30 routes. Twenty-four are implemented; six answer `501` with `{"error":"not implemented"}` for a mutating operation the client can request but the server does not do yet. A `501` is a supported answer the client treats as not implemented.
+The server registers 30 routes. Twenty-four are implemented; six answer `501` with `{"error":"not implemented"}` for an operation the client can request but the server does not implement yet. A `501` is a supported answer the client treats as not implemented.
 
 | Method | Path | Status | Behavior |
 |---|---|---|---|
 | `GET` | /global/health | 200 | `{healthy: true, version}`. The client's Test connection call. |
 | `GET` | /global/event | SSE | One event stream for every session: `server.connected` first, then `server.heartbeat` every 15 seconds, and a terminal `session.error` with `data: [DONE]` when the byte budget drops. Answers 503 past 16 concurrent streams. |
 | `GET` | /session | 200 | `sessionDTO[]` merged from disk and live sessions. Query `directory`; `limit` default 50, max 200; 400 on a directory mismatch. |
-| `POST` | /session | 200 | Starts a host session, installs the `ask_user` asker, and returns `sessionDTO`; 409 when no model is configured. No `directory` parameter. |
+| `POST` | /session | 200 | Starts a host session, installs the `ask_user` asker, and returns `sessionDTO`; 500 when the server has no usable model. No `directory` parameter. |
 | `GET` | /session/{id} | 200 | `sessionDTO`; 404 unknown. |
 | `PATCH` | /session/{id} | 200 | Body is exactly one of `{title}` or `{time:{archived}}`; renames or archives and publishes `session.updated`; 400, 404, or 500. |
 | `DELETE` | /session/{id} | **501 stub** | `{"error":"not implemented"}`. |
@@ -50,7 +50,7 @@ The server registers 30 routes. Twenty-four are implemented; six answer `501` wi
 | `GET` | /session/status | 200 | `sessionStatusDTO[]` (`idle` or `busy`) for live sessions. |
 | `POST` | /session/{id}/prompt_async | 204 | Reserves the run slot and returns no body; 404 when the session was not started here, 409 busy, 400 bad directory or body, 413 over 16 MiB. Query `directory`. |
 | `POST` | /session/{id}/message | 200 | Runs to completion and returns `{info, parts}`; the same codes as `prompt_async` plus 400 for a bad model. Query `directory`. |
-| `POST` | /session/{id}/abort | 200 | Cancels a run; 200 whether it is running or idle, 404 when the session was not started here. |
+| `POST` | /session/{id}/abort | 200 | Cancels a run; 200 whether it is running or idle, 400 on a directory mismatch, 404 when the session was not started here. Query `directory`. |
 | `POST` | /session/{id}/permissions/{permissionID} | **501 stub** | Not implemented. The wildcard is `permissionID` because `{id}` is already used in the pattern. |
 | `GET` | /project | 200 | `[projectDTO{ID, Worktree}]` for the server root. |
 | `GET` | /project/current | 200 | `projectDTO`. |
@@ -63,7 +63,7 @@ The server registers 30 routes. Twenty-four are implemented; six answer `501` wi
 | `POST` | /question/{id}/reject | 200 | No body read; 404 gone; publishes `question.rejected`. |
 | `GET` | /file | 200 | `fileNodeDTO[]` directory listing inside the project root; 403 outside the root, 404 missing, 400 not a directory. Query `path` only. |
 | `GET` | /file/content | 200 | `{"content": …}` for a text file inside the root; 403 outside the root, including through a symlink, 404 missing, 400 directory or non-regular file, 413 over 8 MiB, 415 non-text, 500 read failure. Query `path`, `directory`. |
-| `GET` | /find/file | 200 | `fileNodeDTO[]` walk of the root, skipping dot-directories and `node_modules`; `query`, `limit` default 50, max 100. |
+| `GET` | /find/file | 200 | `fileNodeDTO[]` walk of the root, skipping dot-entries and `node_modules`; `query`, `limit` default 50, max 100. |
 | `GET` | /file/status | 200 | `fileStatusDTO[]` for the working tree, at most 500 entries. |
 
 ## Events
