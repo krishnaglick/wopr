@@ -479,6 +479,20 @@ func classifyTestFauxRequest(msgs []Message) (kind, text string, toolCalls []tes
 		}}
 	}
 
+	// A todowrite whose args pass the JSON schema but fail Parse: two items share
+	// an id, which the schema cannot express. The agent turns the Parse error into
+	// an error tool result with nil Details — the serve mapper must not broadcast
+	// an empty todo.updated for it.
+	if strings.Contains(lastText, "Run: failed todowrite") {
+		return "tool", "", []testFauxToolCall{{
+			Name: "todowrite",
+			Args: map[string]any{"todos": []map[string]any{
+				{"id": "dup", "content": "first", "status": "pending", "priority": "high"},
+				{"id": "dup", "content": "second", "status": "pending", "priority": "high"},
+			}},
+		}}
+	}
+
 	// Ask-the-user parity: the tool that blocks until a client answers.
 	if strings.Contains(lastText, "Run: ask a question") {
 		return "tool", "", []testFauxToolCall{{
