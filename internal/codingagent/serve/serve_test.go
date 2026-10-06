@@ -1,12 +1,17 @@
 package serve
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -114,9 +119,10 @@ func TestHealthAnswersOverARealListener(t *testing.T) {
 }
 
 // promptServer starts a serve server over a test-faux host and returns its base
-// URL. WOPR_TEST_FAUX=1 is required: BuildModel refuses test-faux without it,
-// so createSession would answer 500 instead of the code under test.
-func promptServer(t *testing.T) string {
+// URL and the host behind it. WOPR_TEST_FAUX=1 is required: BuildModel refuses
+// test-faux without it, so createSession would answer 500 instead of the code
+// under test.
+func promptServer(t *testing.T) (string, *codinghost.Host) {
 	t.Helper()
 	t.Setenv("WOPR_TEST_FAUX", "1")
 
@@ -141,7 +147,7 @@ func promptServer(t *testing.T) string {
 	}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	return "http://" + ln.Addr().String()
+	return "http://" + ln.Addr().String(), host
 }
 
 // createPromptSession creates a live session and returns its id.
@@ -182,7 +188,7 @@ func postJSON(t *testing.T, baseURL, path, body string) (int, []byte) {
 // contract: 204, no body, and the run actually happened after the response was
 // written — the detached context, not the request's.
 func TestPromptAsyncAnswers204ForALiveSession(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 
 	status, body := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
@@ -211,7 +217,7 @@ func TestPromptAsyncAnswers204ForALiveSession(t *testing.T) {
 
 // TestPromptAsyncAnswers404ForAnUnknownSession verifies the not-live case.
 func TestPromptAsyncAnswers404ForAnUnknownSession(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	status, _ := postJSON(t, baseURL, "/session/no-such-session/prompt_async",
 		`{"parts":[{"type":"text","text":"hi"}]}`)
 	if status != http.StatusNotFound {
@@ -222,7 +228,7 @@ func TestPromptAsyncAnswers404ForAnUnknownSession(t *testing.T) {
 // TestPromptAsyncAnswers400ForAForeignDirectory verifies directoryParam applies
 // to the prompt endpoints.
 func TestPromptAsyncAnswers400ForAForeignDirectory(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 	status, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async?directory=/somewhere/else",
 		`{"parts":[{"type":"text","text":"hi"}]}`)
@@ -234,7 +240,7 @@ func TestPromptAsyncAnswers400ForAForeignDirectory(t *testing.T) {
 // TestPromptAsyncAnswers400ForAMalformedBody verifies the malformed-body case,
 // distinct from the oversize case.
 func TestPromptAsyncAnswers400ForAMalformedBody(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 	status, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async", `{"parts":`)
 	if status != http.StatusBadRequest {
@@ -245,7 +251,7 @@ func TestPromptAsyncAnswers400ForAMalformedBody(t *testing.T) {
 // TestPromptAsyncAnswers413ForABodyOverTheCap verifies the body cap on the
 // endpoint that ingests base64 images from an unauthenticated LAN peer.
 func TestPromptAsyncAnswers413ForABodyOverTheCap(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 	huge := `{"parts":[{"type":"text","text":"` + strings.Repeat("x", maxBodyBytes+1024) + `"}]}`
 	status, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async", huge)
@@ -257,7 +263,7 @@ func TestPromptAsyncAnswers413ForABodyOverTheCap(t *testing.T) {
 // TestPromptAsyncAnswers409WhileTheSessionIsBusy verifies one run per session:
 // a second accepted prompt while the first is in flight is refused.
 func TestPromptAsyncAnswers409WhileTheSessionIsBusy(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 
 	// "Run: sleep for a while" gives a tool call that blocks long enough for
@@ -284,7 +290,7 @@ func TestPromptAsyncAnswers409WhileTheSessionIsBusy(t *testing.T) {
 // TestMessageAnswers200WithTheFinishedAssistantMessage verifies /message's
 // contract: 200 with the nested {info, parts} shape and the assistant reply.
 func TestMessageAnswers200WithTheFinishedAssistantMessage(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 
 	status, payload := postJSON(t, baseURL, "/session/"+id+"/message",
@@ -317,7 +323,7 @@ func TestMessageAnswers200WithTheFinishedAssistantMessage(t *testing.T) {
 
 // TestMessageAnswers404ForAnUnknownSession verifies the not-live case.
 func TestMessageAnswers404ForAnUnknownSession(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	status, _ := postJSON(t, baseURL, "/session/no-such-session/message",
 		`{"parts":[{"type":"text","text":"hi"}]}`)
 	if status != http.StatusNotFound {
@@ -327,7 +333,7 @@ func TestMessageAnswers404ForAnUnknownSession(t *testing.T) {
 
 // TestMessageAnswers413ForABodyOverTheCap verifies the body cap on /message.
 func TestMessageAnswers413ForABodyOverTheCap(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 	huge := `{"parts":[{"type":"file","url":"data:image/png;base64,` + strings.Repeat("A", maxBodyBytes+1024) + `"}]}`
 	status, _ := postJSON(t, baseURL, "/session/"+id+"/message", huge)
@@ -339,7 +345,7 @@ func TestMessageAnswers413ForABodyOverTheCap(t *testing.T) {
 // TestMessageAnswers400ForAnUnresolvableModel verifies the model picker cannot
 // get a 200 that changed nothing.
 func TestMessageAnswers400ForAnUnresolvableModel(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 	status, _ := postJSON(t, baseURL, "/session/"+id+"/message",
 		`{"parts":[{"type":"text","text":"hi"}],"model":{"providerID":"nope","modelID":"nope"}}`)
@@ -350,7 +356,7 @@ func TestMessageAnswers400ForAnUnresolvableModel(t *testing.T) {
 
 // TestAbortAnswers200ForAnIdleSession verifies "stop nothing" is success.
 func TestAbortAnswers200ForAnIdleSession(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 	status, _ := postJSON(t, baseURL, "/session/"+id+"/abort", `{}`)
 	if status != http.StatusOK {
@@ -360,7 +366,7 @@ func TestAbortAnswers200ForAnIdleSession(t *testing.T) {
 
 // TestAbortAnswers404ForAnUnknownSession verifies the not-live case.
 func TestAbortAnswers404ForAnUnknownSession(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	status, _ := postJSON(t, baseURL, "/session/no-such-session/abort", `{}`)
 	if status != http.StatusNotFound {
 		t.Fatalf("abort unknown session: expected 404, got %d", status)
@@ -371,7 +377,7 @@ func TestAbortAnswers404ForAnUnknownSession(t *testing.T) {
 // is outstanding, which coding's own cancel cannot: beginAgentRun has not run
 // yet at the reservation.
 func TestAbortStopsARunningPrompt(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 
 	started, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
@@ -392,7 +398,7 @@ func TestAbortStopsARunningPrompt(t *testing.T) {
 // TestSessionStatusCarriesSessionID verifies the pull-path status can be
 // attributed to a session.
 func TestSessionStatusCarriesSessionID(t *testing.T) {
-	baseURL := promptServer(t)
+	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 	resp, err := http.Get(baseURL + "/session/status")
 	if err != nil {
@@ -635,4 +641,418 @@ func TestListSessionsReturnsAllSessions(t *testing.T) {
 			t.Errorf("expected session %q not found", id)
 		}
 	}
+}
+
+// ─── /global/event ─────────────────────────────────────────────────────────
+
+// sseFrame is one parsed frame off /global/event.
+type sseFrame struct {
+	Name string
+	Data string
+}
+
+// TestSSEStreamDropsAStalledConnectionAtTheByteBound reaches end 2 of the
+// stream over a real listener: a client that connects and then never reads, a
+// producer that overruns the connection's byte budget, and a terminal frame the
+// client can act on instead of a stream that just stops mid-message.
+//
+// A raw socket, not http.Client: the transport reads into its own buffer as
+// fast as the server writes, so a net/http client never stalls the server and
+// the queue would never fill.
+func TestSSEStreamDropsAStalledConnectionAtTheByteBound(t *testing.T) {
+	baseURL, host := promptServer(t)
+	createPromptSession(t, baseURL)
+
+	addr := strings.TrimPrefix(baseURL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := fmt.Fprintf(conn, "GET /global/event HTTP/1.1\r\nHost: %s\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n\r\n", addr); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(60 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The response is chunked, so the body has to be de-chunked rather than
+	// read as raw bytes: one Read can return the head and several frames
+	// together, and reading by frame boundary would then skip frames.
+	reader := bufio.NewReader(conn)
+	head := readHead(t, reader)
+	for _, want := range []string{
+		"HTTP/1.1 200 OK",
+		"Content-Type: text/event-stream",
+		"Cache-Control: no-cache",
+		"Connection: keep-alive",
+		"X-Accel-Buffering: no",
+	} {
+		if !strings.Contains(head, want) {
+			t.Errorf("response head: expected %q, got:\n%s", want, head)
+		}
+	}
+
+	// Nothing reads the body until the overrun is published, but the first frame
+	// is read now so the assertions about it are made before the stall.
+	body := httputil.NewChunkedReader(reader)
+	frames := readSSE(t, body, func(frames []sseFrame) bool { return len(frames) > 0 })
+	if len(frames) == 0 || frames[0].Name != "server.connected" {
+		t.Fatalf("expected server.connected as the first frame, got %s", summarize(frames))
+	}
+	if !strings.Contains(frames[0].Data, `"version":`) {
+		t.Errorf("server.connected must carry the server version, got %q", frames[0].Data)
+	}
+
+	blob := strings.Repeat("x", 1<<20)
+	for range sseQueueBytes/(1<<20) + 8 {
+		err := host.Publish(codinghost.Event{
+			Type:    eventMessagePartDelta,
+			Session: "",
+			Data:    ssePartDelta{MessageID: "msg", PartID: "msg-text-0", Field: "text", Delta: blob},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	frames = append(frames, readSSE(t, body, func(frames []sseFrame) bool {
+		for _, f := range frames {
+			if f.Data == "[DONE]" {
+				return true
+			}
+		}
+		return false
+	})...)
+	if len(frames) == 0 || frames[len(frames)-1].Data != "[DONE]" {
+		t.Fatalf("the overrun ended the stream with no [DONE] sentinel; %d frames arrived: %s", len(frames), summarize(frames))
+	}
+	dropAt := -1
+	for i, f := range frames {
+		if f.Name == "session.error" {
+			dropAt = i
+			break
+		}
+	}
+	if dropAt < 0 {
+		t.Fatalf("the overrun ended the stream with no session.error; frames: %s", summarize(frames))
+	}
+	if !strings.Contains(frames[dropAt].Data, `"name":"SSEDropped"`) {
+		t.Errorf("the terminal frame must name the byte bound, got %q", frames[dropAt].Data)
+	}
+	var terminal sseSessionError
+	if err := json.Unmarshal([]byte(frames[dropAt].Data), &terminal); err != nil {
+		t.Fatalf("decode the terminal frame %q: %v", frames[dropAt].Data, err)
+	}
+	if terminal.SessionID != "" {
+		t.Errorf("the terminal frame is server-wide, got sessionID %q", terminal.SessionID)
+	}
+}
+
+// TestStreamPartIDsMatchTranscriptPartIDs is the topology gate: the final burst
+// and the persisted transcript must report the same literal part ids for the
+// same message. Deltas stream under a provisional id, because wopr allocates
+// the transcript entry at message_end; the reconciliation burst re-announces the
+// message under its real entry id, and both sides build the ids from that one
+// id. Elementwise, not as a set — a duplicate collapses in a set on both sides,
+// which is how serve-3's duplicate-part-id defect passed green.
+func TestStreamPartIDsMatchTranscriptPartIDs(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resp := openSSE(t, baseURL, ctx)
+	defer func() { _ = resp.Body.Close() }()
+
+	status, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"reply with exactly: topo-ok"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async: expected 204, got %d", status)
+	}
+
+	// Stop as soon as the reconciliation burst is complete, then end the stream:
+	// a live reader would otherwise hold the connection to go test's 10-minute
+	// panic.
+	frames := readSSEUntil(t, resp, func(frames []sseFrame) bool {
+		_, parts := burstFrom(frames)
+		return len(parts) > 0
+	})
+	cancel()
+
+	entryID, streamed := burstFrom(frames)
+	if entryID == "" {
+		t.Fatalf("no message.updated for the assistant message; frames: %s", summarize(frames))
+	}
+	// The literal form, not partID's own output: asserting against the helper
+	// would pass for any helper that is self-consistent.
+	want := []string{entryID + "-text-0"}
+	if !slices.Equal(streamed, want) {
+		t.Errorf("streamed part ids: expected %v, got %v", want, streamed)
+	}
+
+	var persisted []string
+	for _, m := range readTranscript(t, baseURL, id) {
+		if m.Info.ID != entryID || m.Info.Role != "assistant" {
+			continue
+		}
+		for _, p := range m.Parts {
+			persisted = append(persisted, p.ID)
+		}
+	}
+	if !slices.Equal(persisted, want) {
+		t.Errorf("transcript part ids: expected %v, got %v", want, persisted)
+	}
+}
+
+// TestFailedRunEmitsSessionError covers the failure report. Without it a prompt
+// that streams deltas and then fails leaves the app with a blank bubble and a
+// session it still believes is busy.
+func TestFailedRunEmitsSessionError(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resp := openSSE(t, baseURL, ctx)
+	defer func() { _ = resp.Body.Close() }()
+
+	// test-faux fails an unrecognised request, and the failure is not one of the
+	// retryable provider errors, so the run settles with one errored message.
+	status, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"serve-sse-failure-probe"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async: expected 204, got %d", status)
+	}
+
+	frames := readSSEUntil(t, resp, func(frames []sseFrame) bool {
+		for _, f := range frames {
+			if f.Name == "session.error" {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+
+	var found *sseSessionError
+	for _, f := range frames {
+		if f.Name != "session.error" {
+			continue
+		}
+		var payload sseSessionError
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		found = &payload
+	}
+	if found == nil {
+		t.Fatalf("a failed run emitted no session.error; frames: %s", summarize(frames))
+	}
+	if found.SessionID != id {
+		t.Errorf("session.error sessionID: expected %q, got %q", id, found.SessionID)
+	}
+	if !strings.Contains(found.Error.Message, "test-faux: unhandled request") {
+		t.Errorf("session.error must carry the provider's reason, got %q", found.Error.Message)
+	}
+}
+
+// TestSSEStreamCapsConcurrentConnections pins the cap's decrement. A leaked
+// count is silent and permanent: once 16 slots are stuck the endpoint is dead for
+// the life of the process, and only a reconnect can prove otherwise.
+func TestSSEStreamCapsConcurrentConnections(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	createPromptSession(t, baseURL)
+
+	cancels := make([]context.CancelFunc, 0, maxSSEConnections)
+	defer func() {
+		for _, cancel := range cancels {
+			cancel()
+		}
+	}()
+	for range maxSSEConnections {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancels = append(cancels, cancel)
+		resp := openSSE(t, baseURL, ctx)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("connection %d: expected 200, got %d", len(cancels), resp.StatusCode)
+		}
+	}
+
+	resp, err := http.Get(baseURL + "/global/event")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("connection %d: expected 503, got %d", maxSSEConnections+1, resp.StatusCode)
+	}
+
+	// Release one slot: the endpoint has to accept again, which it cannot if the
+	// decrement is missing.
+	cancels[0]()
+	if !waitForSSESlot(t, baseURL) {
+		t.Fatal("a disconnected stream did not release its slot")
+	}
+}
+
+// waitForSSESlot polls until /global/event accepts a connection again.
+func waitForSSESlot(t *testing.T, baseURL string) bool {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(baseURL + "/global/event")
+		if err != nil {
+			t.Fatal(err)
+		}
+		status := resp.StatusCode
+		_ = resp.Body.Close()
+		if status == http.StatusOK {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// readSSEUntil reads frames until stop reports it has what it needs, the stream
+// ends, or the budget elapses. The budget closes the body, so a regression that
+// emits nothing fails with the frames it did emit instead of hanging to go
+// test's 10-minute panic.
+func readSSEUntil(t *testing.T, resp *http.Response, stop func([]sseFrame) bool) []sseFrame {
+	t.Helper()
+	timer := time.AfterFunc(30*time.Second, func() { _ = resp.Body.Close() })
+	defer timer.Stop()
+	return readSSE(t, resp.Body, stop)
+}
+
+// openSSE connects to /global/event under a cancellable context and returns the
+// response. Cancelling the context is the client disconnect the stream's first
+// of three ends is built on.
+func openSSE(t *testing.T, baseURL string, ctx context.Context) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/global/event", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /global/event: expected 200, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("Content-Type: expected text/event-stream, got %q", got)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("Cache-Control: expected no-cache, got %q", got)
+	}
+	return resp
+}
+
+// readSSE reads frames until stop reports it has what it needs or the stream
+// ends. stop sees only complete frames.
+func readSSE(t *testing.T, body io.Reader, stop func([]sseFrame) bool) []sseFrame {
+	t.Helper()
+	var (
+		frames []sseFrame
+		name   string
+		data   []string
+	)
+	reader := bufio.NewReader(body)
+	flush := func() {
+		if name == "" && len(data) == 0 {
+			return
+		}
+		frames = append(frames, sseFrame{Name: name, Data: strings.Join(data, "\n")})
+		name, data = "", nil
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if line != "" {
+			switch line = strings.TrimRight(line, "\r\n"); {
+			case line == "":
+				flush()
+			case strings.HasPrefix(line, "event: "):
+				name = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "data: "):
+				data = append(data, strings.TrimPrefix(line, "data: "))
+			}
+		}
+		if err != nil {
+			flush()
+			return frames
+		}
+		if stop(frames) {
+			return frames
+		}
+	}
+}
+
+// burstFrom returns the assistant reconciliation burst: the entry id the final
+// message.updated announced, and the literal part ids of the
+// message.part.updated frames that carry parts of that same message.
+func burstFrom(frames []sseFrame) (string, []string) {
+	entryID := ""
+	var parts []string
+	for _, f := range frames {
+		switch f.Name {
+		case "message.updated":
+			var payload struct {
+				Info messageInfoDTO `json:"info"`
+			}
+			if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+				continue
+			}
+			entryID, parts = payload.Info.ID, parts[:0]
+		case "message.part.updated":
+			if entryID == "" {
+				continue
+			}
+			var payload struct {
+				Part partDTO `json:"part"`
+			}
+			if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+				continue
+			}
+			if payload.Part.MessageID == entryID {
+				parts = append(parts, payload.Part.ID)
+			}
+		}
+	}
+	return entryID, parts
+}
+
+// readHead reads an HTTP response head up to and including its blank line.
+func readHead(t *testing.T, reader *bufio.Reader) string {
+	t.Helper()
+	var head strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		head.WriteString(line)
+		if line == "\r\n" || line == "\n" {
+			return head.String()
+		}
+		if err != nil {
+			t.Fatalf("reading the response head: %v (got %q)", err, head.String())
+		}
+	}
+}
+
+// summarize renders frames for a failure message.
+func summarize(frames []sseFrame) string {
+	lines := make([]string, 0, len(frames))
+	for _, f := range frames {
+		lines = append(lines, f.Name+" "+truncate(f.Data, 120))
+	}
+	return strings.Join(lines, " | ")
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

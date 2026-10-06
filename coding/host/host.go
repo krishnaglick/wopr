@@ -20,12 +20,35 @@ var ErrSessionBusy = errors.New("host: session already has a run in flight")
 // ErrNoModel is returned when StartOptions.Model is not set.
 var ErrNoModel = errors.New("host: StartOptions.Model is required")
 
+// Translator maps one session's agent events onto bus events. The wire
+// vocabulary and the part-ID helper live in the serve layer, so the mapper does
+// too; this package owns the call site and the entry-id resolution the mapper
+// needs and cannot compute.
+//
+// entryID is the transcript entry id for a MessageEndEvent's message, empty for
+// every other event. The agent persists a message before its message_end
+// reaches any listener, so the id exists by the time the forwarder looks. An
+// error reports an event the mapper could not represent; the forwarder counts
+// it and keeps the run going.
+type Translator func(ev agent.AgentEvent, entryID string) ([]Event, error)
+
+// TranslatorFactory builds one Translator per session. The mapper's provisional
+// message counter is per session and needs no lock, because a session's
+// forwarder is a single goroutine.
+type TranslatorFactory func(sessionID string) Translator
+
 // Host owns every session a served process runs.
 type Host struct {
 	svcs     *coding.Services
 	bus      *Bus
 	registry map[string]*Session
 	mu       sync.RWMutex
+
+	// Translate maps a session's agent events onto the bus. nil means the
+	// forwarder publishes nothing, which is what an RPC-only process wants: it
+	// drains Session.Events() itself. Set by the transport that owns the wire
+	// vocabulary before the first session starts.
+	Translate TranslatorFactory
 }
 
 // New returns a Host over svcs. sink, when non-nil, also receives every published
@@ -96,7 +119,61 @@ func (h *Host) Start(opts StartOptions) (*Session, error) {
 	}
 	h.registry[id] = wrapped
 	h.mu.Unlock()
+	go h.forwardEvents(wrapped)
 	return wrapped, nil
+}
+
+// Publish puts one event on the bus, marshalling Data once for every subscriber.
+func (h *Host) Publish(ev Event) error {
+	return h.bus.Publish(ev)
+}
+
+// Subscribe registers a stream that drains bus events, bounded to maxBytes of
+// queued payload plus event-name bytes.
+func (h *Host) Subscribe(maxBytes int) *Subscription {
+	return h.bus.Subscribe(maxBytes)
+}
+
+// forwardEvents drains one session's event channel onto the bus, one goroutine
+// per session, so the fan-out runs off the agent's path and no event of a run
+// is missed. It exits when the session closes, which closes the channel.
+//
+// Single-consumer invariant: Session.Events() is one channel. ServeRPC drains
+// the same channel for the session it builds itself, so a host-owned session
+// must never be handed to ServeRPC — two drains split the stream and messages
+// vanish with nothing to show for it. ServeRPC takes *coding.Services directly
+// and builds its own session, so the two never overlap today.
+//
+// AcknowledgeEvent releases the marker FlushEvents sends to wait for this
+// consumer. No barrier reaches this loop today, because sendContent — the path
+// PromptContent and PromptContentWait take — never calls FlushEvents; it is
+// acknowledged anyway because this is the only Events() consumer, it is one
+// line, and a barrier nobody acknowledges is a permanent block for the next
+// caller that reaches one.
+func (h *Host) forwardEvents(sess *Session) {
+	var translate Translator
+	if h.Translate != nil {
+		translate = h.Translate(sess.id)
+	}
+	for ev := range sess.Inner().Events() {
+		if coding.AcknowledgeEvent(ev) {
+			continue
+		}
+		if translate == nil {
+			continue
+		}
+		entryID := ""
+		if end, ok := ev.(agent.MessageEndEvent); ok && end.Message.Assistant != nil {
+			entryID, _ = sess.Inner().MessageEntryID(end.Message)
+		}
+		events, err := translate(ev, entryID)
+		if err != nil {
+			continue
+		}
+		for _, out := range events {
+			_ = h.Publish(out)
+		}
+	}
 }
 
 // Get returns a registered session by id, or nil if not found.

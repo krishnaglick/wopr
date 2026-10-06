@@ -190,7 +190,7 @@ func TestHostRejectsASecondConcurrentPromptPerSession(t *testing.T) {
 // safe to race, and that Publish after Close does not panic.
 func TestSubscriptionCloseIdempotent(t *testing.T) {
 	b := newBus(nil)
-	sub := b.Subscribe(1)
+	sub := b.Subscribe(1 << 20)
 
 	// Double close must not panic
 	sub.Close()
@@ -206,5 +206,119 @@ func TestSubscriptionCloseIdempotent(t *testing.T) {
 	wg.Wait()
 
 	// Publish after Close must not panic
-	b.Publish(Event{Type: "test", Session: "", Data: "payload"})
+	if err := b.Publish(Event{Type: "test", Session: "", Data: "payload"}); err != nil {
+		t.Fatalf("Publish after Close: %v", err)
+	}
+}
+
+// TestServeFanoutDropsStalledSubscribers is the assertion a benchmark cannot
+// make: four connections that stall are dropped at the byte bound, and each one
+// is told so. Without the terminal signal a dropped subscriber waits forever on
+// a connection that will never deliver again, and the client's view stops
+// without a marker of where it did.
+func TestServeFanoutDropsStalledSubscribers(t *testing.T) {
+	const bound = 1 << 10
+	b := newBus(nil)
+	subs := make([]*Subscription, 4)
+	for i := range subs {
+		subs[i] = b.Subscribe(bound)
+		defer subs[i].Close()
+	}
+
+	// Nobody calls Next, so every frame queues until the budget is gone. The
+	// payload is 30 bytes and so is the name, so the budget holds 17 frames.
+	payload := []byte(`{"sessionID":"s","delta":"x"}`)
+	dropped := 0
+	for range 200 {
+		for _, sub := range subs {
+			if sub.Push("message.part.delta", payload) {
+				dropped++
+			}
+		}
+		if dropped == len(subs) {
+			break
+		}
+	}
+	if dropped != len(subs) {
+		t.Fatalf("expected all %d stalled subscribers dropped, %d dropped", len(subs), dropped)
+	}
+
+	for i, sub := range subs {
+		delivered := 0
+		lastName := ""
+		for {
+			name, _, terminal, err := sub.Next(context.Background(), time.Second)
+			if err != nil {
+				t.Fatalf("subscriber %d: draining the queued prefix: %v", i, err)
+			}
+			if terminal {
+				break
+			}
+			delivered++
+			lastName = name
+		}
+		if delivered == 0 {
+			t.Errorf("subscriber %d: expected the already-queued prefix before the terminal frame", i)
+		}
+		if lastName != "message.part.delta" {
+			t.Errorf("subscriber %d: expected the event name beside the payload, got %q", i, lastName)
+		}
+		// The terminal signal is the end of the stream, so it must not repeat
+		// with a frame behind it or vanish on the next read.
+		name, body, terminal, err := sub.Next(context.Background(), time.Second)
+		if err != nil || !terminal || name != "" || body != nil {
+			t.Errorf("subscriber %d: expected terminal with no frame after the drain, got %q %q terminal=%v err=%v", i, name, body, terminal, err)
+		}
+	}
+
+	// A frame larger than the whole budget cannot be queued by any queue, so it
+	// drops the subscriber on its own. Unreachable at the SSE bound of 32 MiB
+	// against wopr's 17 MiB largest pinned entry; kept because it has teeth.
+	oversized := newBus(nil)
+	big := oversized.Subscribe(64)
+	defer big.Close()
+	if !big.Push("message.part.updated", make([]byte, 65)) {
+		t.Error("a frame larger than the whole budget must drop the subscriber")
+	}
+	if _, _, terminal, err := big.Next(context.Background(), time.Second); err != nil || !terminal {
+		t.Errorf("oversized frame: expected the terminal signal, got terminal=%v err=%v", terminal, err)
+	}
+}
+
+// BenchmarkServeFanout measures the fan-out and the drop path together, with
+// -benchmem. Four connections' readers stall for the whole iteration, so the
+// subscriber queue is the only place the fan-out can land: at 64 KiB a frame
+// over 8,000 entries an unbounded queue would hold 512 MiB per stream, 16x the
+// 32 MiB budget the SSE handler subscribes with.
+func BenchmarkServeFanout(b *testing.B) {
+	const (
+		entries = 8000
+		streams = 4
+		bound   = 32 << 20 // the serve layer's 2 × maxTailBytes
+		size    = 64 << 10
+	)
+	payload := make([]byte, size)
+	b.SetBytes(size)
+	bus := newBus(nil)
+	for range b.N {
+		subs := make([]*Subscription, streams)
+		for i := range subs {
+			subs[i] = bus.Subscribe(bound)
+		}
+		dropped := 0
+		for range entries {
+			for _, sub := range subs {
+				if sub.Push("message.part.delta", payload) {
+					dropped++
+				}
+			}
+		}
+		// The bound is the evidence: an unbounded queue would hold
+		// entries × size = 512 MiB per stream, this holds 32 MiB and stops.
+		b.ReportMetric(float64(dropped), "drops/op")
+		b.ReportMetric(float64(subs[0].queued), "queued-bytes/op")
+		for _, sub := range subs {
+			sub.Close()
+		}
+	}
 }

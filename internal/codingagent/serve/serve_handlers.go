@@ -307,7 +307,17 @@ func (s *Server) patchSession(w http.ResponseWriter, r *http.Request) {
 
 	// Re-read and return updated record.
 	newRec, _ := getSessionRecord(s.sessionDir, id, live)
-	s.writeJSON(w, http.StatusOK, s.buildSessionDTO(newRec, live))
+	info := s.buildSessionDTO(newRec, live)
+	// The PATCH's whole result is this session's info, and a connected client
+	// learns about a rename or an archive from the stream. The mutation is
+	// already durable at this point, so a marshal failure is a mapper bug and
+	// must not turn a successful 200 into an error.
+	_ = s.host.Publish(codinghost.Event{
+		Type:    eventSessionUpdated,
+		Session: id,
+		Data:    sseSessionUpdated{SessionID: id, Info: info},
+	})
+	s.writeJSON(w, http.StatusOK, info)
 }
 
 // DELETE /session/{id}, POST /session/{id}/fork, POST /session/{id}/revert, GET /session/{id}/diff

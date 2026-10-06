@@ -114,7 +114,12 @@ func (s *Session) findPersistedMessageEntryID(message agent.AgentMessage) (strin
 			}
 		}
 	}
-	messageIndex := slices.IndexFunc(s.agent.Messages(), func(candidate agent.AgentMessage) bool {
+	// One snapshot serves both reads below. Messages is unsynchronised and a
+	// run appends while this resolves, so a host resolving an entry id from its
+	// own goroutine races on it; taking the snapshot once also keeps
+	// messageIndex and the system-entry adjustment describing the same list.
+	messages := s.agent.MessagesSnapshot()
+	messageIndex := slices.IndexFunc(messages, func(candidate agent.AgentMessage) bool {
 		return messageIdentity(candidate) == key
 	})
 	if messageIndex < 0 {
@@ -123,7 +128,6 @@ func (s *Session) findPersistedMessageEntryID(message agent.AgentMessage) (strin
 	projection := s.inner.BuildSessionProjection()
 	// Restoring a transcript without a system entry prepends the current
 	// baseline. It has no persisted entry and shifts projected positions.
-	messages := s.agent.Messages()
 	if len(messages) > 0 && messages[0].System != nil && (len(projection.Messages) == 0 || projection.Messages[0].System == nil) {
 		messageIndex--
 	}
