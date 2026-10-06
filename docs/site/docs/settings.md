@@ -113,6 +113,13 @@ set it in `~/.wopr/agent/settings.json`:
 | `collapseChangelog` | boolean | `false` | Show a condensed changelog. |
 | `lastChangelogVersion` | string |  | Last changelog version shown. WOPR writes this. |
 
+## Server
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `server.port` | integer | `4096` | TCP port `wopr serve` binds. `0` means the default. `--port` overrides. |
+| `server.hostname` | string | `127.0.0.1` | Address `wopr serve` binds. `""` means the default. `--hostname` overrides. Binding a non-loopback address serves without authentication; see [server](server.md). |
+
 ## Images and terminal
 
 | Key | Type | Default | Meaning |
