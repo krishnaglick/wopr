@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Race + leak regression gate for the interactive TUI, serve, and host concurrency models.
+# Race regression gate for the interactive TUI, serve, and host concurrency models, plus a TUI-only goroutine-leak profile.
 #
 # The interactive TUI runs one main loop that owns all component-tree mutation
 # and rendering. Background goroutines must route UI work onto that loop
@@ -14,6 +14,14 @@
 #      off-loop pattern still races, gated behind WOPR_PROBE_RENDER_RACE=1.
 #   2. goroutineleak: Go 1.27's profile asserts runOnMain leaves zero
 #      goroutines blocked on uiTaskCh after its workload.
+#
+# The serve and host models are raced as whole packages rather than through one
+# main loop:
+#
+#   3. serve: ./internal/codingagent/serve races HTTP handlers against the tool
+#      goroutines those handlers dispatch.
+#   4. host: ./coding/host races the multi-session supervisor and its typed event
+#      bus.
 set -euo pipefail
 
 pkg=./internal/codingagent
