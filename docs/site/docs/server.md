@@ -1,0 +1,108 @@
+# WOPR server
+
+`wopr serve` exposes the session in the working directory over a local HTTP and SSE API that speaks the opencode client contract. The API is unauthenticated and has no TLS. This page is the contract it serves and the warning that comes with it.
+
+## Start the server
+
+```text
+wopr serve [--port N] [--hostname H]
+```
+
+`wopr serve` binds one address and serves the project in the working directory. Both flags are optional:
+
+- `--port` overrides `server.port`, whose default is `4096`.
+- `--hostname` overrides `server.hostname`, whose default is `127.0.0.1`.
+
+The process prints `wopr serve listening on http://<addr>` once it is up. Set the two values in [settings](settings.md#server) to make the choice persistent.
+
+## No authentication
+
+> A served session is a remote shell for anyone who can reach the port.
+
+The server has no authentication and no authorization. Every route that runs a tool or reads a file is reachable by anyone who can open the socket, and the process runs with your user's permissions. When the bind address is not loopback, the process prints:
+
+> wopr serve: no authentication. Anyone who can reach <addr> can run tools and read files as this user. Binding to a LAN is not a security control.
+
+The only confinement on file access is the resolved project root: `GET /file` and `GET /file/content` reject a path that leaves the root, including one that escapes through a symlink. That is a path check, not network isolation. See the [remote serve boundary](../../threat-model.md#remote-serve-boundary) in the threat model.
+
+## Client
+
+The endpoint table below was derived from `grapeot/opencode_ios_client` at commit `2d0e7bd`. It is a third-party build with no SLA; if the app moves, this table can drift, and the DTOs stay tolerant of added optional fields.
+
+## Endpoints
+
+The server registers 30 routes. Twenty-four are implemented; six answer `501` with `{"error":"not implemented"}` for a mutating operation the client can request but the server does not do yet. A `501` is a supported answer the client treats as not implemented.
+
+| Method | Path | Status | Behavior |
+|---|---|---|---|
+| `GET` | /global/health | 200 | `{healthy: true, version}`. The client's Test connection call. |
+| `GET` | /global/event | SSE | One event stream for every session: `server.connected` first, then `server.heartbeat` every 15 seconds, and a terminal `session.error` with `data: [DONE]` when the byte budget drops. Answers 503 past 16 concurrent streams. |
+| `GET` | /session | 200 | `sessionDTO[]` merged from disk and live sessions. Query `directory`; `limit` default 50, max 200; 400 on a directory mismatch. |
+| `POST` | /session | 200 | Starts a host session, installs the `ask_user` asker, and returns `sessionDTO`; 409 when no model is configured. No `directory` parameter. |
+| `GET` | /session/{id} | 200 | `sessionDTO`; 404 unknown. |
+| `PATCH` | /session/{id} | 200 | Body is exactly one of `{title}` or `{time:{archived}}`; renames or archives and publishes `session.updated`; 400, 404, or 500. |
+| `DELETE` | /session/{id} | **501 stub** | `{"error":"not implemented"}`. |
+| `POST` | /session/{id}/fork | **501 stub** | Not implemented. |
+| `POST` | /session/{id}/revert | **501 stub** | Not implemented. |
+| `GET` | /session/{id}/diff | **501 stub** | Not implemented. |
+| `GET` | /session/{id}/todo | 200 | `todos[]` from the newest `todowrite` result in the transcript, `[]` when there is none; 404 unknown. |
+| `GET` | /session/{id}/message | 200 | `MessageWithParts[]`; `limit` default 50, max 200; 404 unknown. |
+| `GET` | /session/status | 200 | `sessionStatusDTO[]` (`idle` or `busy`) for live sessions. |
+| `POST` | /session/{id}/prompt_async | 204 | Reserves the run slot and returns no body; 404 when the session was not started here, 409 busy, 400 bad directory or body, 413 over 16 MiB. Query `directory`. |
+| `POST` | /session/{id}/message | 200 | Runs to completion and returns `{info, parts}`; the same codes as `prompt_async` plus 400 for a bad model. Query `directory`. |
+| `POST` | /session/{id}/abort | 200 | Cancels a run; 200 whether it is running or idle, 404 when the session was not started here. |
+| `POST` | /session/{id}/permissions/{permissionID} | **501 stub** | Not implemented. The wildcard is `permissionID` because `{id}` is already used in the pattern. |
+| `GET` | /project | 200 | `[projectDTO{ID, Worktree}]` for the server root. |
+| `GET` | /project/current | 200 | `projectDTO`. |
+| `GET` | /config/providers | 200 | Map from provider ID to `{name, api, models}`. |
+| `GET` | /provider | 200 | `string[]` of authenticated provider names. |
+| `GET` | /agent | 200 | Static `agentInfoDTO[]`: `explore`, `general`, `propose`, `build`. |
+| `GET` | /permission | **501 stub** | Not implemented. |
+| `GET` | /question | 200 | Pending `questionDTO[]`, `[]` when there is none. Never 404; that status means the host is gone. |
+| `POST` | /question/{id}/reply | 200 | Body is exactly one of `choice` or `other`; 404 gone, 400 invalid, 413 over 16 MiB; publishes `question.replied`. |
+| `POST` | /question/{id}/reject | 200 | No body read; 404 gone; publishes `question.rejected`. |
+| `GET` | /file | 200 | `fileNodeDTO[]` directory listing inside the project root; 403 outside the root, 404 missing, 400 not a directory. Query `path` only. |
+| `GET` | /file/content | 200 | `{"content": …}` for a text file inside the root; 403 outside the root, including through a symlink, 404 missing, 400 directory or non-regular file, 413 over 8 MiB, 415 non-text, 500 read failure. Query `path`, `directory`. |
+| `GET` | /find/file | 200 | `fileNodeDTO[]` walk of the root, skipping dot-directories and `node_modules`; `query`, `limit` default 50, max 100. |
+| `GET` | /file/status | 200 | `fileStatusDTO[]` for the working tree, at most 500 entries. |
+
+## Events
+
+The stream on `GET /global/event` carries 12 of the 17 event names the client switches on.
+
+| Event | When |
+|---|---|
+| `server.connected` | First frame on each `GET /global/event` connection. |
+| `server.heartbeat` | Every 15 seconds while the stream is idle. |
+| `message.updated` | An assistant message ends, under its transcript ID. |
+| `message.part.updated` | A part starts or ends; tool snapshots and the reconciliation burst. |
+| `message.part.delta` | Streamed text, reasoning, or tool-argument deltas. |
+| `session.updated` | `PATCH /session/{id}` renames or archives a session. |
+| `session.error` | A run, assistant, compaction, or auto-retry failure, and the terminal byte-bound drop. |
+| `session.status` | `busy`, `idle`, or `retry` around a run. |
+| `todo.updated` | A successful `todowrite` result. |
+| `question.asked` | `ask_user` blocks; the server publishes a pending question. |
+| `question.replied` | `POST /question/{id}/reply` is accepted. |
+| `question.rejected` | `POST /question/{id}/reject`, or a run aborted while a question is pending. |
+
+Five names have no live trigger and are deliberately not emitted:
+
+- `permission.asked`, `permission.replied` — no approval policy or blocking hook exists.
+- `session.deleted` — deleting a session is a 501 stub.
+- `message.removed`, `message.part.removed` — nothing removes a message or a part; a failed tool sets `state.status` to `error` on a part that stays.
+
+## Limits
+
+| Bound | Value |
+|---|---|
+| Request body | 16 MiB |
+| `GET /file/content` file | 8 MiB |
+| `GET /file` directory listing | 500 entries |
+| `GET /file/status` | 500 entries |
+| `GET /find/file` walk | 20000 entries |
+| Concurrent `GET /global/event` streams | 16 (further connections answer 503) |
+| Heartbeat on an idle stream | 15 seconds |
+
+## What is not served
+
+The server is not a hardened network service. Accepted: no authentication, no TLS, no CORS policy, no rate limiting, no audit log, and no SSE replay, so a dropped stream does not resume with `Last-Event-ID`. One server process serves one working directory. These are recorded in the [threat model](../../threat-model.md#security-assumptions).
