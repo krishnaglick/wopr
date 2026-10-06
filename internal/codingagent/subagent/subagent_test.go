@@ -154,11 +154,14 @@ func answer(text string) aitest.Response {
 
 // fakeHost routes to "cheap" first and escalates to "strong".
 type fakeHost struct {
-	cwd       string
-	grep      *fakeTool
-	records   []Record
-	escalated int
-	mu        sync.Mutex
+	cwd        string
+	grep       *fakeTool
+	records    []Record
+	escalated  int
+	noEscalate bool
+	failoverTo string
+	failovers  int
+	mu         sync.Mutex
 }
 
 func model(name string) *ai.Model {
@@ -170,14 +173,25 @@ func (h *fakeHost) Route(context.Context, Request) (Route, error) {
 }
 
 func (h *fakeHost) Escalate(_ Request, prev Route) (Route, bool) {
-	if prev.Spec == "fake/strong" {
+	if h.noEscalate || prev.Spec == "fake/strong" {
 		return Route{}, false
 	}
 	h.escalated++
 	return Route{Model: model("strong"), Provider: "fake", Spec: "fake/strong", Tier: "subscription", Source: "rule"}, true
 }
 
-func (h *fakeHost) Failover(Route, string) (Route, bool) { return Route{}, false }
+// Failover advances to failoverTo once; a second call finds no target, so a
+// failing replacement terminates instead of looping.
+func (h *fakeHost) Failover(_ Route, _ string) (Route, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.failoverTo == "" || h.failovers > 0 {
+		return Route{}, false
+	}
+	h.failovers++
+	name := strings.TrimPrefix(h.failoverTo, "fake/")
+	return Route{Model: model(name), Provider: "fake", Spec: h.failoverTo, Tier: "subscription", Source: "rule"}, true
+}
 
 func (h *fakeHost) Tools() []agent.AgentTool { return []agent.AgentTool{h.grep} }
 
@@ -219,6 +233,11 @@ func runTask(t *testing.T, host *fakeHost, script *scripted) (string, Details) {
 }
 
 const goodAnswer = "STATUS: done\nCONFIDENCE: high\nANSWER: Route is in demo.go.\nEVIDENCE:\n- demo.go:3 \"func Route() string {\"\n- cmd: grep Route \"demo.go:3:func Route\"\nNOT_CHECKED: none"
+
+// goodFileAnswer cites only the file, so a fresh attempt can verify it
+// without the tool output of a prior attempt (a failover replacement starts
+// with an empty transcript and outputs).
+const goodFileAnswer = "STATUS: done\nCONFIDENCE: high\nANSWER: Route is in demo.go.\nEVIDENCE:\n- demo.go:3 \"func Route() string {\"\nNOT_CHECKED: none"
 
 func TestTaskReturnsVerifiedResult(t *testing.T) {
 	host := newFakeHost(t)
@@ -294,5 +313,38 @@ func TestBudgetClosesToolsAndAsksForTheAnswer(t *testing.T) {
 	res.Status = StatusPartial
 	if trigger := EscalationTrigger(res, 1, 1, out); !strings.HasPrefix(trigger, "budget exhausted") {
 		t.Fatalf("partial answer after budget: trigger %q", trigger)
+	}
+}
+
+func TestTaskAdvancesOnProviderFailover(t *testing.T) {
+	host := newFakeHost(t)
+	host.failoverTo = "fake/failover"
+	script := &scripted{replies: []aitest.Response{
+		toolCall("grep"),
+		{StopReason: "error", ErrorMessage: "free_tier_limit"},
+		answer(goodFileAnswer),
+	}}
+	text, d := runTask(t, host, script)
+	if d.Spec != "fake/failover" || d.State != StatusDone || d.ToolCalls != 1 || host.escalated != 0 {
+		t.Fatalf("details %+v\n%s", d, text)
+	}
+	if len(host.records) != 2 || host.records[0].Outcome != "failover" || host.records[0].EscalatedTo != "fake/failover" {
+		t.Fatalf("log: %+v", host.records)
+	}
+}
+
+func TestTaskProviderErrorWithoutLadderFailsBounded(t *testing.T) {
+	host := newFakeHost(t)
+	host.noEscalate = true
+	script := &scripted{replies: []aitest.Response{
+		toolCall("grep"),
+		{StopReason: "error", ErrorMessage: "free_tier_limit"},
+	}}
+	_, d := runTask(t, host, script)
+	if d.State != StatusFailed {
+		t.Fatalf("state = %q, want failed: %+v", d.State, d)
+	}
+	if len(host.records) > maxAttempts+maxFailovers {
+		t.Fatalf("attempts not bounded: %d", len(host.records))
 	}
 }
