@@ -55,6 +55,9 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 	mux.HandleFunc("GET /session/{id}/todo", s.sessionTodo)
 	mux.HandleFunc("GET /session/{id}/message", s.sessionMessages)
 	mux.HandleFunc("GET /session/status", s.sessionStatus)
+	mux.HandleFunc("POST /session/{id}/prompt_async", s.promptAsync)
+	mux.HandleFunc("POST /session/{id}/message", s.sessionMessage)
+	mux.HandleFunc("POST /session/{id}/abort", s.sessionAbort)
 
 	// Project
 	mux.HandleFunc("GET /project", s.listProjects)

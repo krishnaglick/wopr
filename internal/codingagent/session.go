@@ -563,17 +563,17 @@ func (s *Session) AppendEntry(entry any) error {
 }
 
 // appendSessionLine appends a single JSONL record, creating the file if
-// it does not exist (a resumed session always already exists).
+// it does not exist (a resumed session always already exists). O_RDWR is
+// required, not optional: appendJSONLine reads the file's last byte to
+// terminate an unterminated final line, and without read access the new
+// record would be glued onto a truncated one, destroying both.
 func appendSessionLine(path string, raw []byte) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return fmt.Errorf("session: open for append: %w", err)
+		return err
 	}
 	defer func() { _ = f.Close() }()
-	if _, err := fmt.Fprintf(f, "%s\n", sessionblob.Externalize(path, raw)); err != nil {
-		return fmt.Errorf("session: append write: %w", err)
-	}
-	return nil
+	return appendJSONLine(f, sessionblob.Externalize(path, raw))
 }
 
 // writeSessionLines writes header + all buffered entries as a fresh file,

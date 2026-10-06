@@ -146,6 +146,16 @@ func (s *Session) findPersistedMessageEntryID(message agent.AgentMessage) (strin
 	return "", false
 }
 
+// MessageEntryID resolves the Session entry that persisted message. It is the
+// exported seam for hosts that need a transcript entry id for a message the
+// agent has already emitted; serve resolves the assistant message this way
+// because TurnEndEvent.MessageEntryID never reaches Session.Events().
+//
+// A message not yet persisted resolves to false.
+func (s *Session) MessageEntryID(message agent.AgentMessage) (string, bool) {
+	return s.findPersistedMessageEntryID(message)
+}
+
 // isInAgentTranscript reports whether message is one of the agent's current
 // in-memory messages.
 func (s *Session) isInAgentTranscript(message agent.AgentMessage) bool {

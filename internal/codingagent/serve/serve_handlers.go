@@ -389,7 +389,7 @@ func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		if !ls.Inner().IsIdle() {
 			t = "busy"
 		}
-		dtos = append(dtos, sessionStatusDTO{Type: t})
+		dtos = append(dtos, sessionStatusDTO{SessionID: ls.ID(), Type: t})
 	}
 	s.writeJSON(w, http.StatusOK, dtos)
 }
@@ -686,17 +686,19 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 		}
 
 		msg := messageDTO{
-			ID:        e.Base.ID,
-			SessionID: sessionID,
-			Role:      role,
-			Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+			Info: messageInfoDTO{
+				ID:        e.Base.ID,
+				SessionID: sessionID,
+				Role:      role,
+				Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+			},
 		}
 
-		for _, block := range content {
+		for i, block := range content {
 			switch b := block.(type) {
 			case ai.TextContent:
 				msg.Parts = append(msg.Parts, partDTO{
-					ID:        e.Base.ID + "-text",
+					ID:        partID(e.Base.ID, "text", i, ""),
 					MessageID: e.Base.ID,
 					SessionID: sessionID,
 					Type:      "text",
@@ -704,7 +706,7 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 				})
 			case ai.ThinkingContent:
 				msg.Parts = append(msg.Parts, partDTO{
-					ID:        e.Base.ID + "-reasoning",
+					ID:        partID(e.Base.ID, "reasoning", i, ""),
 					MessageID: e.Base.ID,
 					SessionID: sessionID,
 					Type:      "reasoning",
@@ -723,7 +725,7 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 					}
 				}
 				msg.Parts = append(msg.Parts, partDTO{
-					ID:        e.Base.ID + "-image",
+					ID:        partID(e.Base.ID, "image", i, ""),
 					MessageID: e.Base.ID,
 					SessionID: sessionID,
 					Type:      "file",
@@ -733,7 +735,7 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 			case ai.ToolCall:
 				callID := b.ID
 				part := partDTO{
-					ID:        e.Base.ID + "-tool-" + callID,
+					ID:        partID(e.Base.ID, "tool", i, callID),
 					MessageID: e.Base.ID,
 					SessionID: sessionID,
 					Type:      "tool",
@@ -783,13 +785,15 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 						}
 					}
 					newMsg := messageDTO{
-						ID:        e.Base.ID,
-						SessionID: sessionID,
-						Role:      "assistant",
-						Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+						Info: messageInfoDTO{
+							ID:        e.Base.ID,
+							SessionID: sessionID,
+							Role:      "assistant",
+							Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+						},
 						Parts: []partDTO{
 							{
-								ID:        e.Base.ID + "-tool-" + callID,
+								ID:        partID(e.Base.ID, "tool", 0, callID),
 								MessageID: e.Base.ID,
 								SessionID: sessionID,
 								Type:      "tool",
@@ -810,13 +814,15 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 					}
 				}
 				newMsg := messageDTO{
-					ID:        e.Base.ID,
-					SessionID: sessionID,
-					Role:      "assistant",
-					Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+					Info: messageInfoDTO{
+						ID:        e.Base.ID,
+						SessionID: sessionID,
+						Role:      "assistant",
+						Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+					},
 					Parts: []partDTO{
 						{
-							ID:        e.Base.ID + "-tool-" + callID,
+							ID:        partID(e.Base.ID, "tool", 0, callID),
 							MessageID: e.Base.ID,
 							SessionID: sessionID,
 							Type:      "tool",
@@ -832,12 +838,18 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 
 		if role == "bashExecution" {
 			msg = messageDTO{
-				ID:        e.Base.ID,
-				SessionID: sessionID,
-				Role:      "assistant",
-				Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+				Info: messageInfoDTO{
+					ID:        e.Base.ID,
+					SessionID: sessionID,
+					Role:      "assistant",
+					Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
+				},
 				Parts: []partDTO{
 					{
+						// ponytail: the bash execution part keeps its own -bash
+						// spelling. It is a custom message the stream never emits,
+						// so it has no counterpart to drift from; fold it into the
+						// tool form when a stream-side bash part exists.
 						ID:        e.Base.ID + "-bash",
 						MessageID: e.Base.ID,
 						SessionID: sessionID,
@@ -850,7 +862,7 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 			}
 		}
 
-		if len(msg.Parts) > 0 || msg.Role != "" {
+		if len(msg.Parts) > 0 || msg.Info.Role != "" {
 			messages = append(messages, msg)
 		}
 	}

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/alexrudloff/wopr/agent"
+	"github.com/alexrudloff/wopr/ai"
 	"github.com/alexrudloff/wopr/coding"
 )
 
@@ -112,6 +114,13 @@ type Session struct {
 	id   string
 	sess *coding.Session
 	run  sync.Mutex
+
+	// cancel aborts the run this Session owns, from the reservation until the
+	// run settles. RequestAbort only reaches a run whose cancel coding has
+	// already stored, which happens after beginAgentRun — inside sendContent,
+	// not at the reservation.
+	cancelMu sync.Mutex
+	cancel   context.CancelFunc
 }
 
 func (s *Session) ID() string {
@@ -134,6 +143,74 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 	defer s.run.Unlock()
 	_, err := s.sess.Send(ctx, text)
 	return err
+}
+
+// PromptContent reserves the session's single run slot and starts the run on a
+// goroutine it owns, returning as soon as the reservation lands. It returns
+// ErrSessionBusy synchronously when the slot is taken. Everything after the
+// reservation is reported on the event bus.
+//
+// ctx is detached inside this method: an accepted run outlives its caller, and
+// an http.Request.Context is cancelled the moment the handler returns, which
+// would kill the run this just accepted while the caller still answered 204.
+func (s *Session) PromptContent(ctx context.Context, content []ai.UserContentBlock) error {
+	if !s.run.TryLock() {
+		return ErrSessionBusy
+	}
+	runCtx, cancel := s.ownRun(ctx)
+	go func() {
+		defer s.releaseRun(cancel)
+		_, _ = s.sess.SendContentWithPreflight(runCtx, content, nil)
+	}()
+	return nil
+}
+
+// PromptContentWait reserves the same single run slot and blocks until the run
+// settles, returning the messages it produced. It returns ErrSessionBusy when
+// the slot is taken. ctx is detached for the same reason as PromptContent's;
+// the caller abandons the wait on its own cancellation.
+func (s *Session) PromptContentWait(ctx context.Context, content []ai.UserContentBlock) ([]agent.AgentMessage, error) {
+	if !s.run.TryLock() {
+		return nil, ErrSessionBusy
+	}
+	runCtx, cancel := s.ownRun(ctx)
+	defer s.releaseRun(cancel)
+	return s.sess.SendContentWithPreflight(runCtx, content, nil)
+}
+
+// ownRun detaches ctx from its cancellation, makes it cancellable, and stores
+// the cancel for Abort. A cancel delivered before beginAgentRun still stops the
+// run, because context.WithCancel over an already-cancelled parent yields an
+// already-cancelled child.
+func (s *Session) ownRun(ctx context.Context) (context.Context, context.CancelFunc) {
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	s.cancelMu.Lock()
+	s.cancel = cancel
+	s.cancelMu.Unlock()
+	return runCtx, cancel
+}
+
+// releaseRun clears the stored cancel and returns the run slot.
+func (s *Session) releaseRun(cancel context.CancelFunc) {
+	s.cancelMu.Lock()
+	s.cancel = nil
+	s.cancelMu.Unlock()
+	cancel()
+	s.run.Unlock()
+}
+
+// Abort cancels the run this Session owns when the reservation is still
+// outstanding, then asks the session to abort whatever run it has. It does not
+// wait for the drain: the cancel has already been delivered, and a later
+// session.status reports idle. Aborting an idle session is success.
+func (s *Session) Abort() {
+	s.cancelMu.Lock()
+	cancel := s.cancel
+	s.cancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.sess.RequestAbort()
 }
 
 // Close deregisters the session before closing, so a closed session cannot be
