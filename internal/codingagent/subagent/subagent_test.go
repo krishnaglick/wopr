@@ -219,8 +219,13 @@ func newFakeHost(t *testing.T) *fakeHost {
 
 func runTask(t *testing.T, host *fakeHost, script *scripted) (string, Details) {
 	t.Helper()
+	return runTaskAs(t, host, TypeExplore, script)
+}
+
+func runTaskAs(t *testing.T, host *fakeHost, typ string, script *scripted) (string, Details) {
+	t.Helper()
 	tool := &Tool{Host: host, Limiter: NewLimiter(4, nil), SessionID: "s", StreamFn: script.stream}
-	params, _ := json.Marshal(map[string]any{"description": "find Route", "type": "explore", "brief": "Where is Route defined?", "effort": "quick"})
+	params, _ := json.Marshal(map[string]any{"description": "find Route", "type": typ, "brief": "Where is Route defined?", "effort": "quick"})
 	var updates int
 	res, err := tool.Execute(context.Background(), "call1", params, func(string, any) { updates++ })
 	if err != nil {
@@ -346,5 +351,27 @@ func TestTaskProviderErrorWithoutLadderFailsBounded(t *testing.T) {
 	}
 	if len(host.records) > maxAttempts+maxFailovers {
 		t.Fatalf("attempts not bounded: %d", len(host.records))
+	}
+}
+
+// A build child may already have changed files in its own worktree by the
+// time it hits a provider error, so neither failover nor escalation may rerun
+// it over those edits.
+func TestBuildWriterDoesNotAdvancePastProviderError(t *testing.T) {
+	host := newFakeHost(t)
+	host.failoverTo = "fake/failover"
+	script := &scripted{replies: []aitest.Response{
+		toolCall("grep"),
+		{StopReason: "error", ErrorMessage: "free_tier_limit"},
+	}}
+	_, d := runTaskAs(t, host, TypeBuild, script)
+	if host.failovers != 0 || host.escalated != 0 {
+		t.Fatalf("writer advanced: failovers=%d escalated=%d", host.failovers, host.escalated)
+	}
+	if d.Spec != "fake/cheap" || d.State != StatusFailed {
+		t.Fatalf("details %+v", d)
+	}
+	if len(host.records) != 1 || host.records[0].Outcome != "failed" {
+		t.Fatalf("log: %+v", host.records)
 	}
 }
