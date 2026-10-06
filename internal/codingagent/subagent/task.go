@@ -425,7 +425,10 @@ func (t *Tool) execute(ctx context.Context, req Request, route Route, progress f
 			details.Transcript = transcript
 		}
 		rec := t.record(req, attempt, route, out)
-		if out.ProviderError != "" && out.ToolCalls == 0 && ctx.Err() == nil && failovers < maxFailovers {
+		// A read-only child advances past a provider error even after tool
+		// calls; a writer may already have changed files and is never rerun
+		// over them (mirrors the escalation guard below).
+		if out.ProviderError != "" && ctx.Err() == nil && failovers < maxFailovers && (out.ToolCalls == 0 || req.Type != TypeGeneral) {
 			if next, ok := t.Host.Failover(route, out.ProviderError); ok {
 				failovers++
 				rec.Outcome, rec.Trigger, rec.EscalatedTo = "failover", out.ProviderError, next.Spec
