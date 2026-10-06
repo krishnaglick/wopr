@@ -538,16 +538,40 @@ func (s *Server) writeResolveError(w http.ResponseWriter, err error) {
 // applied: a truncated body served as a whole file is a lie the client cannot
 // detect, because the cap is the server's and not the file's.
 func (s *Server) fileContent(w http.ResponseWriter, r *http.Request) {
+	s.serveFileContent(w, r, nil)
+}
+
+// serveFileContent is fileContent with a test-only hook. beforeOpen, when
+// non-nil, runs in the window between resolving the request path and opening
+// it, so a test can swap a component for a symlink deterministically.
+// Production always passes nil.
+func (s *Server) serveFileContent(w http.ResponseWriter, r *http.Request, beforeOpen func()) {
 	if _, errDTO, status := s.directoryParam(r); errDTO != nil {
 		s.writeJSON(w, status, errDTO)
 		return
 	}
-	resolved, err := resolveInRoot(s.services.CWD(), r.URL.Query().Get("path"))
+	root := s.services.CWD()
+	want := r.URL.Query().Get("path")
+	resolved, err := resolveInRoot(root, want)
 	if err != nil {
 		s.writeResolveError(w, err)
 		return
 	}
+	// The same root/resolved pair resolveInRoot just validated, so this cannot
+	// escape; it reproduces the relative path that check already accepted.
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
+	}
 
+	if beforeOpen != nil {
+		beforeOpen()
+	}
+	// Type and size are checked on the resolved path before the open, so a
+	// statically-present FIFO or device is answered 400 without reaching
+	// openat. The open below is confined to the root, so a swap that slips
+	// past this stat cannot read outside it.
 	info, err := os.Stat(resolved)
 	if err != nil {
 		s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "path not found"})
@@ -566,9 +590,19 @@ func (s *Server) fileContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(resolved)
+	f, err := os.OpenInRoot(root, rel)
 	if err != nil {
-		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		// os.Root exports no escape sentinel, so classify by re-resolving: a
+		// fresh refusal is the same refusal (403, or 404 for a path deleted
+		// since the stat); a resolve that still succeeds means a genuine open
+		// failure, e.g. a mode-0000 file (500). A racer can only flip
+		// 403/404/500, never read outside: the descriptor is confined by
+		// os.Root regardless.
+		if _, rerr := resolveInRoot(root, want); rerr != nil {
+			s.writeResolveError(w, rerr)
+		} else {
+			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		}
 		return
 	}
 	defer func() { _ = f.Close() }()
