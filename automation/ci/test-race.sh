@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Race + leak regression gate for the interactive TUI and serve concurrency models.
+# Race + leak regression gate for the interactive TUI, serve, and host concurrency models.
 #
 # The interactive TUI runs one main loop that owns all component-tree mutation
 # and rendering. Background goroutines must route UI work onto that loop
@@ -25,6 +25,9 @@ go test -race -count=1 -run \
 
 echo "== race regressions (serve: HTTP handlers vs tool goroutines) =="
 go test -race -count=1 ./internal/codingagent/serve
+
+echo "== race regressions (host: multi-session supervisor vs typed event bus) =="
+go test -race -count=1 ./coding/host
 
 echo "== goroutineleak profile =="
 leak_output="$(go test -count=1 -v -run '^TestRunOnMain_NoGoroutineLeakProfile$' "$pkg")"
