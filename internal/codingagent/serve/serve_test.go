@@ -19,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alexrudloff/wopr/agent"
@@ -1522,6 +1523,63 @@ func TestAbortWhileAQuestionIsPendingRejectsIt(t *testing.T) {
 	waitForTranscriptText(t, env.baseURL, id, "question was aborted")
 }
 
+// TestAskHonoursAReplyThatClaimedTheEntryBeforeAbort pins the fallback at
+// serve_question.go:128-130. A reply claims the entry and returns 200 before the
+// run's abort is observed; the blocked ask must then return that answer rather
+// than ctx.Err(). synctest.Wait makes the interleaving deterministic: with the
+// answers slot empty, ctx.Done is the only ready select case, so the abort
+// branch is taken, and the second Wait returns only once ask is durably blocked
+// on the reply's answer.
+func TestAskHonoursAReplyThatClaimedTheEntryBeforeAbort(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &Server{host: codinghost.New(nil, nil)}
+		s.questions.seed()
+
+		want := askuser.Answer{Choice: "Postgres"}
+		q := askuser.Question{Question: "Which store should the service use?"}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		type outcome struct {
+			answer askuser.Answer
+			err    error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			answer, err := s.ask(ctx, "session-1", q)
+			done <- outcome{answer, err}
+		}()
+
+		// ask registers the question, publishes, then blocks in select.
+		synctest.Wait()
+
+		// A concurrent reply takes the entry and will return 200: take()
+		// succeeds exactly as replyQuestion's take does before its send.
+		dtos := s.questions.list()
+		if len(dtos) != 1 {
+			t.Fatalf("expected one pending question, got %d", len(dtos))
+		}
+		pending, ok := s.questions.take(dtos[0].ID)
+		if !ok {
+			t.Fatal("the reply could not claim the entry")
+		}
+
+		// Abort. The answers slot is empty, so ctx.Done is the only ready case
+		// and ask deterministically takes the abort branch; Wait returns only
+		// once ask is durably blocked on the reply's answer.
+		cancel()
+		synctest.Wait()
+
+		pending.answers <- want
+
+		got := <-done
+		if got.err != nil || got.answer != want {
+			t.Fatalf("a reply that already answered 200 was lost: answer=%+v err=%v", got.answer, got.err)
+		}
+	})
+}
+
 // TestTwoConcurrentRepliesToOneQuestionYieldOneWinner covers the answer-once
 // window: taking the entry and its channel has to happen under one lock, or the
 // loser's send blocks forever on a capacity-one slot the winner already filled.
@@ -1690,6 +1748,65 @@ func TestSessionTodoServesTheNewestTodowriteResult(t *testing.T) {
 		if after[i] != newest[i] {
 			t.Errorf("after the second write, todo[%d]: got %+v, want %+v", i, after[i], newest[i])
 		}
+	}
+}
+
+// TestRejectedTodowriteDoesNotBroadcastTodoUpdated pins the guard at
+// serve_sse.go:316: a todowrite the agent rejects carries nil Details, and a
+// client must not see an empty todo.updated for it. The run's own settle frame
+// bounds the read, and a protocol-level control proves the rejected call was
+// emitted, so the absence cannot pass vacuously.
+func TestRejectedTodowriteDoesNotBroadcastTodoUpdated(t *testing.T) {
+	env := promptEnvFor(t)
+	id := createPromptSession(t, env.baseURL)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stream := openSSE(t, env.baseURL, ctx)
+	defer func() { _ = stream.Body.Close() }()
+
+	promptAsyncOK(t, env.baseURL, id, "Run: failed todowrite")
+
+	frames := readSSEUntil(t, stream, func(f []sseFrame) bool {
+		if hasFrame(f, "todo.updated") {
+			return true
+		}
+		return slices.ContainsFunc(f, func(fr sseFrame) bool {
+			if fr.Name != "session.status" {
+				return false
+			}
+			var st sessionStatusDTO
+			return json.Unmarshal([]byte(fr.Data), &st) == nil && st.Type == "idle"
+		})
+	})
+
+	// Protocol-level positive control: the rejected call reached the wire as a
+	// tool part with status "error". partDTO/ssePartUpdated are the wire shapes
+	// the client decodes, so this asserts the event, not an error string.
+	rejected := slices.ContainsFunc(frames, func(fr sseFrame) bool {
+		if fr.Name != "message.part.updated" {
+			return false
+		}
+		var payload struct {
+			Part partDTO `json:"part"`
+		}
+		if json.Unmarshal([]byte(fr.Data), &payload) != nil {
+			return false
+		}
+		if payload.Part.Type != "tool" || payload.Part.Tool != tools.Name {
+			return false
+		}
+		var state struct {
+			Status string `json:"status"`
+		}
+		return json.Unmarshal(payload.Part.State, &state) == nil && state.Status == "error"
+	})
+	if !rejected {
+		t.Errorf("the rejected todowrite never reached the stream as an error tool part: %s", summarize(frames))
+	}
+
+	if hasFrame(frames, "todo.updated") {
+		t.Errorf("a rejected todowrite broadcast todo.updated: %s", summarize(frames))
 	}
 }
 
