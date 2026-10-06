@@ -121,10 +121,12 @@ func TestSessionDTODecode(t *testing.T) {
 // TestMessageDTODecode tests that messageDTO decodes correctly.
 func TestMessageDTODecode(t *testing.T) {
 	dto := messageDTO{
-		ID:        "msg-1",
-		SessionID: "sess-1",
-		Role:      "assistant",
-		Time:      messageTime{Created: 1700000000000},
+		Info: messageInfoDTO{
+			ID:        "msg-1",
+			SessionID: "sess-1",
+			Role:      "assistant",
+			Time:      messageTime{Created: 1700000000000},
+		},
 		Parts: []partDTO{
 			{ID: "p1", MessageID: "msg-1", SessionID: "sess-1", Type: "text", Text: "Hello"},
 			{ID: "p2", MessageID: "msg-1", SessionID: "sess-1", Type: "tool", Tool: "bash", CallID: "call-1", State: json.RawMessage(`{"status":"pending"}`)},
@@ -137,11 +139,13 @@ func TestMessageDTODecode(t *testing.T) {
 	}
 
 	var mirror struct {
-		ID        string                  `json:"id"`
-		SessionID string                  `json:"sessionID"`
-		Role      string                  `json:"role"`
-		Time      struct{ Created int64 } `json:"time"`
-		Parts     []struct {
+		Info struct {
+			ID        string                  `json:"id"`
+			SessionID string                  `json:"sessionID"`
+			Role      string                  `json:"role"`
+			Time      struct{ Created int64 } `json:"time"`
+		} `json:"info"`
+		Parts []struct {
 			ID        string          `json:"id"`
 			MessageID string          `json:"messageID"`
 			SessionID string          `json:"sessionID"`
@@ -157,11 +161,29 @@ func TestMessageDTODecode(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if mirror.ID != dto.ID {
-		t.Errorf("ID mismatch")
+	if mirror.Info.ID != dto.Info.ID {
+		t.Errorf("info.id: expected %q, got %q", dto.Info.ID, mirror.Info.ID)
+	}
+	if mirror.Info.SessionID != "sess-1" {
+		t.Errorf("info.sessionID: expected sess-1, got %q", mirror.Info.SessionID)
+	}
+	if mirror.Info.Role != "assistant" {
+		t.Errorf("info.role: expected assistant, got %q", mirror.Info.Role)
+	}
+	if mirror.Info.Time.Created != 1700000000000 {
+		t.Errorf("info.time.created: expected 1700000000000, got %d", mirror.Info.Time.Created)
 	}
 	if len(mirror.Parts) != 2 {
 		t.Errorf("expected 2 parts, got %d", len(mirror.Parts))
+	}
+	if mirror.Parts[0].ID != "p1" {
+		t.Errorf("parts[0].id: expected p1, got %q", mirror.Parts[0].ID)
+	}
+	if mirror.Parts[0].Text != "Hello" {
+		t.Errorf("parts[0].text: expected Hello, got %q", mirror.Parts[0].Text)
+	}
+	if mirror.Parts[1].CallID != "call-1" {
+		t.Errorf("parts[1].callID: expected call-1, got %q", mirror.Parts[1].CallID)
 	}
 }
 

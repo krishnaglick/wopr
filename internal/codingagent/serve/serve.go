@@ -3,6 +3,7 @@ package serve
 import (
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/alexrudloff/wopr/coding/host"
@@ -21,6 +22,9 @@ type Server struct {
 	modelSpec  string
 	srv        *http.Server
 	ln         net.Listener
+	// sseConnections counts the live /global/event streams, which is what the
+	// connection cap bounds.
+	sseConnections atomic.Int64
 }
 
 // New binds addr and returns the server and its listener, so a caller that
@@ -30,6 +34,11 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// The bus carries Event.Type from the producer to the frame writer as the
+	// SSE event name, and part identity is partID's, so the agent→opencode mapper
+	// belongs here rather than in coding/host.
+	h.Translate = newEventMapper
 
 	s := &Server{
 		services:   h.Services(),
@@ -42,6 +51,7 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 	mux := http.NewServeMux()
 	// Health
 	mux.HandleFunc("GET /global/health", s.health)
+	mux.HandleFunc("GET /global/event", s.globalEvent)
 
 	// Sessions
 	mux.HandleFunc("GET /session", s.listSessions)
@@ -55,6 +65,9 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 	mux.HandleFunc("GET /session/{id}/todo", s.sessionTodo)
 	mux.HandleFunc("GET /session/{id}/message", s.sessionMessages)
 	mux.HandleFunc("GET /session/status", s.sessionStatus)
+	mux.HandleFunc("POST /session/{id}/prompt_async", s.promptAsync)
+	mux.HandleFunc("POST /session/{id}/message", s.sessionMessage)
+	mux.HandleFunc("POST /session/{id}/abort", s.sessionAbort)
 
 	// Project
 	mux.HandleFunc("GET /project", s.listProjects)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -42,12 +43,19 @@ type tokenCache struct {
 	Write int `json:"write"`
 }
 
+// messageDTO is opencode's MessageWithParts: the four required Message fields
+// under info, and the parts beside it. The flat id/sessionID/role/time half is
+// gone because the client's decoder reads them from info.
 type messageDTO struct {
+	Info  messageInfoDTO `json:"info"`
+	Parts []partDTO      `json:"parts"`
+}
+
+type messageInfoDTO struct {
 	ID        string      `json:"id"`
 	SessionID string      `json:"sessionID"`
 	Role      string      `json:"role"`
 	Time      messageTime `json:"time"`
-	Parts     []partDTO   `json:"parts"`
 }
 
 type messageTime struct {
@@ -68,7 +76,8 @@ type partDTO struct {
 }
 
 type sessionStatusDTO struct {
-	Type string `json:"type"`
+	SessionID string `json:"sessionID"`
+	Type      string `json:"type"`
 }
 
 type agentInfoDTO struct {
@@ -126,6 +135,22 @@ const (
 )
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
+
+// partID is the single source of part identity. The SSE mapper and
+// entriesToMessages both call it, so a streamed part ID and a transcript part
+// ID cannot drift.
+//
+// index is the position in the message's full content slice, enumerated before
+// any block is filtered out. A block that yields no part still consumes its
+// index, so the transcript's index equals ai.*Event.ContentIndex even where
+// entriesToMessages has no case (ai.ServerToolContent) and the stream does.
+// callID is the tool form's identity and is ignored by the other kinds.
+func partID(messageID, kind string, index int, callID string) string {
+	if kind == "tool" {
+		return messageID + "-tool-" + callID
+	}
+	return messageID + "-" + kind + "-" + strconv.Itoa(index)
+}
 
 // projectID returns the first 12 hex chars of sha256(root).
 func projectID(root string) string {
