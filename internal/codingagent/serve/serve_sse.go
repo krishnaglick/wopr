@@ -308,7 +308,17 @@ func (m *eventMapper) messageUpdate(ev agent.MessageUpdateEvent) ([]codinghost.E
 	case ai.ThinkingDeltaEvent:
 		return m.one(m.delta(messageID, partID(messageID, "reasoning", stream.ContentIndex, ""), "reasoning", stream.Delta)), nil
 	case ai.ToolCallDeltaEvent:
-		return m.one(m.delta(messageID, toolPartID(messageID, stream.ContentIndex, stream.Partial), "arguments", stream.Delta)), nil
+		// The index is over the streamed message's content, so the call id has
+		// to come from there: a tool-call delta carries no id of its own.
+		callID := toolCallID(stream.Partial, stream.ContentIndex)
+		if callID == "" {
+			// Nothing to identify the part by. partID would end in "-tool-",
+			// matching neither the ToolCallEndEvent's part nor the transcript's,
+			// and nothing downstream rejects the mismatch — so the delta is
+			// dropped rather than emitted under an id nothing agrees with.
+			return nil, nil
+		}
+		return m.one(m.delta(messageID, partID(messageID, "tool", stream.ContentIndex, callID), "arguments", stream.Delta)), nil
 	case ai.TextEndEvent:
 		return m.one(m.part(textPart(messageID, m.sessionID, stream.ContentIndex, stream.Content))), nil
 	case ai.ThinkingEndEvent:
@@ -462,17 +472,17 @@ func toolPart(sessionID, messageID string, index int, callID, name string) partD
 	}
 }
 
-// toolPartID resolves the tool part id of a streamed tool call. The transcript
-// identifies a tool part by its call id, not its index, so the id has to be the
-// same one or the client cannot match the delta to the part it belongs to. The
-// index is read from the partial because a tool delta carries no call id of its
-// own.
-func toolPartID(messageID string, contentIndex int, partial *ai.AssistantMessage) string {
-	callID := ""
-	if partial != nil && contentIndex >= 0 && contentIndex < len(partial.Content) {
-		if call, ok := partial.Content[contentIndex].(ai.ToolCall); ok {
-			callID = call.ID
-		}
+// toolCallID resolves the call id of the tool call at contentIndex, or "" when
+// there is none to resolve: no streamed message, an index past what it carries,
+// or a block that is not a tool call. Empty is a real answer, not an error —
+// a provider can send a tool-call delta before it names the call.
+func toolCallID(partial *ai.AssistantMessage, contentIndex int) string {
+	if partial == nil || contentIndex < 0 || contentIndex >= len(partial.Content) {
+		return ""
 	}
-	return partID(messageID, "tool", contentIndex, callID)
+	call, ok := partial.Content[contentIndex].(ai.ToolCall)
+	if !ok {
+		return ""
+	}
+	return call.ID
 }

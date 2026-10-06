@@ -39,8 +39,8 @@ func newBus(sink func(Event, []byte)) *Bus {
 // Publish marshals Data once and queues the bytes beside Type for the sink and
 // for every subscriber, so fan-out is one pointer copy each, never a
 // per-subscriber marshal. It returns json.Marshal's error: an unmarshalable
-// payload is a mapper bug, and the caller counts it and keeps running rather
-// than tearing down every stream.
+// payload is a producer bug, and the caller drops that event and keeps running
+// rather than tearing down every stream.
 //
 // Publish never blocks. A subscriber whose byte budget is full is dropped, not
 // waited for: the producer is an agent goroutine, and one stalled reader must
@@ -136,14 +136,17 @@ func (s *Subscription) Push(name string, payload []byte) bool {
 	// place because one synthetic oversized frame tests it.
 	if n > s.bound || s.queued+n > s.bound {
 		s.dropped = true
-		s.mu.Unlock()
 		s.signal()
+		s.mu.Unlock()
 		return true
 	}
 	s.frames = append(s.frames, frame{name: name, payload: payload})
 	s.queued += n
-	s.mu.Unlock()
+	// Signalled under the mutex, not after releasing it: pop drains a token that
+	// outlived its frame while holding the same mutex, and it can only tell the
+	// two apart because an append and its token are one atomic step.
 	s.signal()
+	s.mu.Unlock()
 	return false
 }
 
@@ -163,9 +166,11 @@ func (s *Subscription) Next(ctx context.Context, timeout time.Duration) (string,
 	if err := s.wait(ctx, timeout); err != nil {
 		return "", nil, false, err
 	}
-	// A token implies a queued frame or a drop: Push queues before it signals,
-	// and one subscription has one consumer, so nothing can have taken the frame
-	// in between.
+	// A token implies a queued frame or a drop: Push appends and signals under
+	// the mutex, pop drains a token it finds with an empty queue under the same
+	// mutex, and one subscription has one consumer, so nothing can have taken
+	// the frame in between. The drain is what keeps a token from outliving the
+	// frame it announced and reporting a deadline that never elapsed.
 	f, terminal, ok = s.pop()
 	switch {
 	case ok:
@@ -178,14 +183,27 @@ func (s *Subscription) Next(ctx context.Context, timeout time.Duration) (string,
 }
 
 // pop removes the oldest frame under the lock. On an empty queue it reports
-// whether the subscription has been dropped, which is the terminal signal.
+// whether the subscription has been dropped, which is the terminal signal, and
+// it takes the stale token with it: an empty queue under the lock means every
+// frame this token announced has already been delivered, so leaving the token
+// behind would turn the next wait into a deadline that never elapsed — a
+// heartbeat after every drained burst.
 func (s *Subscription) pop() (f frame, terminal, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.frames) == 0 {
+		select {
+		case <-s.ready:
+		default:
+		}
 		return frame{}, s.dropped, false
 	}
 	f = s.frames[0]
+	// Clearing the popped slot releases the payload for the collector. Merely
+	// advancing the header leaves it reachable in the backing array, so a
+	// connection that drains — never dropped, never over its bound — retains
+	// every byte it ever queued and sixteen of them hold the whole 512 MiB.
+	s.frames[0] = frame{}
 	s.frames = s.frames[1:]
 	s.queued -= len(f.name) + len(f.payload)
 	return f, false, true

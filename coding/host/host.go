@@ -28,8 +28,8 @@ var ErrNoModel = errors.New("host: StartOptions.Model is required")
 // entryID is the transcript entry id for a MessageEndEvent's message, empty for
 // every other event. The agent persists a message before its message_end
 // reaches any listener, so the id exists by the time the forwarder looks. An
-// error reports an event the mapper could not represent; the forwarder counts
-// it and keeps the run going.
+// error reports an event the mapper could not represent; forwardEvents drops
+// that event and keeps the run going.
 type Translator func(ev agent.AgentEvent, entryID string) ([]Event, error)
 
 // TranslatorFactory builds one Translator per session. The mapper's provisional
@@ -246,9 +246,21 @@ func (s *Session) PromptContent(ctx context.Context, content []ai.UserContentBlo
 // settles, returning the messages it produced. It returns ErrSessionBusy when
 // the slot is taken. ctx is detached for the same reason as PromptContent's;
 // the caller abandons the wait on its own cancellation.
-func (s *Session) PromptContentWait(ctx context.Context, content []ai.UserContentBlock) ([]agent.AgentMessage, error) {
+//
+// before, when non-nil, runs once the slot is held and before the turn starts.
+// A caller that mutates session-wide state needs it there: a model swap applied
+// before the reservation swaps the model of a session that is about to be
+// refused. A before error aborts the turn, releases the slot, and is returned
+// as is.
+func (s *Session) PromptContentWait(ctx context.Context, content []ai.UserContentBlock, before func() error) ([]agent.AgentMessage, error) {
 	if !s.run.TryLock() {
 		return nil, ErrSessionBusy
+	}
+	if before != nil {
+		if err := before(); err != nil {
+			s.run.Unlock()
+			return nil, err
+		}
 	}
 	runCtx, cancel := s.ownRun(ctx)
 	defer s.releaseRun(cancel)

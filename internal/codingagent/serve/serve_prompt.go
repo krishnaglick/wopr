@@ -49,7 +49,7 @@ type modelRef struct {
 // directory that is not the server root or a malformed body; 413 for a body
 // over maxBodyBytes.
 func (s *Server) promptAsync(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.promptPreconditions(w, r)
+	sess, ok := s.sessionPreconditions(w, r)
 	if !ok {
 		return
 	}
@@ -74,21 +74,13 @@ func (s *Server) promptAsync(w http.ResponseWriter, r *http.Request) {
 // 200 with the finished assistant message as {info, parts}. 404, 409, 400 and
 // 413 as for prompt_async, plus 400 for a model this server does not offer.
 func (s *Server) sessionMessage(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.promptPreconditions(w, r)
+	sess, ok := s.sessionPreconditions(w, r)
 	if !ok {
 		return
 	}
 	var body promptBody
 	if !s.decodePromptBody(w, r, &body) {
 		return
-	}
-	// model is a session-wide mutation, applied before the reservation so a
-	// busy session is answered 409 without its model being swapped mid-run.
-	if body.Model != nil {
-		if errDTO, status := s.applyModel(sess, *body.Model); errDTO != nil {
-			s.writeJSON(w, status, errDTO)
-			return
-		}
 	}
 	content, errDTO := bodyContent(body.Parts)
 	if errDTO != nil {
@@ -99,11 +91,35 @@ func (s *Server) sessionMessage(w http.ResponseWriter, r *http.Request) {
 	type outcome struct {
 		entryID  string
 		runError error
+		// errDTO and status carry a refusal from before the turn started, which
+		// is a client's own bad model rather than a failure of the run.
+		errDTO *errorDTO
+		status int
 	}
 	settled := make(chan outcome, 1)
 	go func() {
-		msgs, runError := sess.PromptContentWait(r.Context(), content)
-		settled <- outcome{entryID: lastPersistedAssistantID(sess, msgs), runError: runError}
+		// The model is a session-wide mutation, so it is applied once the run
+		// slot is held and before the turn starts: a busy session is answered
+		// 409 with its model untouched, and a turn never runs on the model the
+		// previous request chose.
+		var errDTO *errorDTO
+		var status int
+		msgs, runError := sess.PromptContentWait(r.Context(), content, func() error {
+			if body.Model == nil {
+				return nil
+			}
+			errDTO, status = s.applyModel(sess, *body.Model)
+			if errDTO != nil {
+				return errRefused
+			}
+			return nil
+		})
+		settled <- outcome{
+			entryID:  lastPersistedAssistantID(sess, msgs),
+			runError: runError,
+			errDTO:   errDTO,
+			status:   status,
+		}
 	}()
 
 	select {
@@ -113,15 +129,23 @@ func (s *Server) sessionMessage(w http.ResponseWriter, r *http.Request) {
 		// run settles.
 		return
 	case got := <-settled:
-		if got.entryID == "" {
-			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: "run produced no persisted assistant message"})
+		if got.errDTO != nil {
+			s.writeJSON(w, got.status, got.errDTO)
 			return
 		}
 		if got.runError != nil {
 			// MessageWithParts has no error field and a failed run's assistant
 			// message does not say why it failed, so the reason reaches the
-			// client as a status instead of a 200 that hides it.
-			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: got.runError.Error()})
+			// client as a status instead of a 200 that hides it. A refused
+			// reservation is 409 and comes out of here too: it produced no
+			// assistant message, and reading the entry first would answer 500
+			// "run produced no persisted assistant message" for a request that
+			// was never accepted.
+			s.writePromptError(w, got.runError)
+			return
+		}
+		if got.entryID == "" {
+			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: "run produced no persisted assistant message"})
 			return
 		}
 		dto, found := s.assistantMessageDTO(sess, got.entryID)
@@ -133,29 +157,29 @@ func (s *Server) sessionMessage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// errRefused ends a PromptContentWait whose before hook declined the request.
+// It never reaches a client: the hook records the status to answer instead, and
+// the error only tells the handler not to report a run failure.
+var errRefused = errors.New("serve: the request was refused before the turn started")
+
 // POST /session/{id}/abort
 //
 // 200 with no body, whether the session was running or idle. The cancel is
 // delivered synchronously; the drain is reported by the next session.status.
 func (s *Server) sessionAbort(w http.ResponseWriter, r *http.Request) {
-	if _, errDTO, status := s.directoryParam(r); errDTO != nil {
-		s.writeJSON(w, status, errDTO)
-		return
-	}
-	sess, ok := s.host.Get(r.PathValue("id"))
+	sess, ok := s.sessionPreconditions(w, r)
 	if !ok {
-		s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "session not found"})
 		return
 	}
 	sess.Abort()
 	w.WriteHeader(http.StatusOK)
 }
 
-// promptPreconditions applies the checks both prompt endpoints share: the
+// sessionPreconditions applies the checks every session-scoped write shares: the
 // directory must be the server root, and the session must be one this server
 // started. A disk-only session is 404 here because Host.Start cannot adopt an
 // existing file, so a prompt to one could never run.
-func (s *Server) promptPreconditions(w http.ResponseWriter, r *http.Request) (*codinghost.Session, bool) {
+func (s *Server) sessionPreconditions(w http.ResponseWriter, r *http.Request) (*codinghost.Session, bool) {
 	if _, errDTO, status := s.directoryParam(r); errDTO != nil {
 		s.writeJSON(w, status, errDTO)
 		return nil, false

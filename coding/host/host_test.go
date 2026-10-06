@@ -211,6 +211,51 @@ func TestSubscriptionCloseIdempotent(t *testing.T) {
 	}
 }
 
+// TestDrainedBurstDoesNotFakeADeadline pins what the Next timeout means: the
+// heartbeat interval, not the gap between two frames. Push signals under the
+// mutex and pop takes a token it finds with an empty queue under the same mutex,
+// so the token the last drained frame left behind cannot wake the next wait.
+// Without that the wait returns at once with a deadline that never elapsed, and
+// a stream that has caught up reports one after every burst.
+func TestDrainedBurstDoesNotFakeADeadline(t *testing.T) {
+	b := newBus(nil)
+	sub := b.Subscribe(1 << 20)
+	defer sub.Close()
+
+	for range 8 {
+		if sub.Push("message.part.delta", []byte(`{"delta":"x"}`)) {
+			t.Fatal("a small burst must not drop the subscriber")
+		}
+	}
+	for range 8 {
+		if _, _, terminal, err := sub.Next(context.Background(), time.Second); err != nil || terminal {
+			t.Fatalf("draining the burst: err=%v terminal=%v", err, terminal)
+		}
+	}
+
+	// Nothing is queued, so the wait has to run out its timeout. Anything quicker
+	// means it woke on a token for a frame already delivered.
+	start := time.Now()
+	if _, _, terminal, err := sub.Next(context.Background(), 300*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) || terminal {
+		t.Fatalf("an empty subscription must report the deadline, got terminal=%v err=%v", terminal, err)
+	}
+	if elapsed := time.Since(start); elapsed < 250*time.Millisecond {
+		t.Errorf("the wait returned after %v, so it woke on a stale token instead of the timeout", elapsed)
+	}
+
+	// The other branch: a token that carries work is what wakes a wait early.
+	if sub.Push("message.part.delta", []byte(`{"delta":"y"}`)) {
+		t.Fatal("a small frame must not drop the subscriber")
+	}
+	name, body, terminal, err := sub.Next(context.Background(), time.Second)
+	if err != nil || terminal {
+		t.Fatalf("a push after the drain must wake the wait: err=%v terminal=%v", err, terminal)
+	}
+	if name != "message.part.delta" || string(body) != `{"delta":"y"}` {
+		t.Errorf("expected the pushed frame, got %q %q", name, body)
+	}
+}
+
 // TestServeFanoutDropsStalledSubscribers is the assertion a benchmark cannot
 // make: four connections that stall are dropped at the byte bound, and each one
 // is told so. Without the terminal signal a dropped subscriber waits forever on
@@ -226,7 +271,8 @@ func TestServeFanoutDropsStalledSubscribers(t *testing.T) {
 	}
 
 	// Nobody calls Next, so every frame queues until the budget is gone. The
-	// payload is 30 bytes and so is the name, so the budget holds 17 frames.
+	// payload is 29 bytes and the name 18, so 47 bytes a frame and the budget
+	// holds 21 frames.
 	payload := []byte(`{"sessionID":"s","delta":"x"}`)
 	dropped := 0
 	for range 200 {

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alexrudloff/wopr/agent"
 	"github.com/alexrudloff/wopr/ai"
 	"github.com/alexrudloff/wopr/ai/aitest"
 	"github.com/alexrudloff/wopr/coding"
@@ -351,6 +352,53 @@ func TestMessageAnswers400ForAnUnresolvableModel(t *testing.T) {
 		`{"parts":[{"type":"text","text":"hi"}],"model":{"providerID":"nope","modelID":"nope"}}`)
 	if status != http.StatusBadRequest {
 		t.Fatalf("POST /message unknown model: expected 400, got %d", status)
+	}
+}
+
+// TestMessageAnswers409WhileTheSessionIsBusy pins /message's half of the
+// one-run-per-session rule. The reservation is taken inside a goroutine, so its
+// ErrSessionBusy arrives with no transcript entry behind it: a handler that
+// inspects the entry id first answers 500 "run produced no persisted assistant
+// message" for a request that was never accepted, and the client retries a
+// refusal forever.
+//
+// The second request carries a model this server does not offer, which pins the
+// order as well as the status: the reservation is taken before the model is
+// resolved, so a busy session is refused without its session-wide model being
+// touched.
+func TestMessageAnswers409WhileTheSessionIsBusy(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	first, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"Run: sleep for a while"}]}`)
+	if first != http.StatusNoContent {
+		t.Fatalf("first prompt_async: expected 204, got %d", first)
+	}
+	waitForBusy(t, baseURL, id)
+
+	contended, body := postJSON(t, baseURL, "/session/"+id+"/message",
+		`{"parts":[{"type":"text","text":"reply with exactly: second"}]}`)
+	if contended != http.StatusConflict {
+		t.Fatalf("busy /message: expected 409, got %d with %s", contended, body)
+	}
+	if !strings.Contains(string(body), "session is busy") {
+		t.Errorf("a refused /message must name the busy session, got %q", body)
+	}
+
+	// The same refusal with a model this server does not offer: the other order
+	// answers 400 here, and on a request naming a model this server does offer it
+	// has already swapped the session's model.
+	withModel, modelBody := postJSON(t, baseURL, "/session/"+id+"/message",
+		`{"parts":[{"type":"text","text":"reply with exactly: third"}],"model":{"providerID":"nope","modelID":"nope"}}`)
+	if withModel != http.StatusConflict {
+		t.Errorf("busy /message carrying a model: expected 409, got %d with %s", withModel, modelBody)
+	}
+
+	// Abort so the 45s tool does not outlive the test.
+	abort, _ := postJSON(t, baseURL, "/session/"+id+"/abort", `{}`)
+	if abort != http.StatusOK {
+		t.Fatalf("abort: expected 200, got %d", abort)
 	}
 }
 
@@ -747,6 +795,16 @@ func TestSSEStreamDropsAStalledConnectionAtTheByteBound(t *testing.T) {
 	if terminal.SessionID != "" {
 		t.Errorf("the terminal frame is server-wide, got sessionID %q", terminal.SessionID)
 	}
+
+	// The prefix comes first: the connection was owed those frames before the
+	// byte bound said it would get no more, and a subscriber that discarded its
+	// queue on the drop would satisfy every assertion above.
+	if before := slices.IndexFunc(frames[:dropAt], func(f sseFrame) bool { return f.Name == eventMessagePartDelta }); before < 0 {
+		t.Errorf("the queued delta frames must arrive before the terminal frame; frames: %s", summarize(frames))
+	}
+	if after := slices.IndexFunc(frames[dropAt:], func(f sseFrame) bool { return f.Name == eventMessagePartDelta }); after >= 0 {
+		t.Errorf("a delta frame arrived behind the terminal frame; frames: %s", summarize(frames))
+	}
 }
 
 // TestStreamPartIDsMatchTranscriptPartIDs is the topology gate: the final burst
@@ -803,6 +861,136 @@ func TestStreamPartIDsMatchTranscriptPartIDs(t *testing.T) {
 	if !slices.Equal(persisted, want) {
 		t.Errorf("transcript part ids: expected %v, got %v", want, persisted)
 	}
+}
+
+// TestToolCallDeltaReachesTheStream drives a tool-call delta through a Host
+// forwarder, which is the only place the mapper reads a streamed tool call. It
+// is the test -race needs: no other committed test takes a host session through
+// a tool, so a mapper that read the stream builder's live partial instead of the
+// per-event copy went green on a path nothing exercised.
+//
+// The part id is the assertion that the two sources agree: a delta and the tool
+// part the transcript reports are only the same part if the call id came from
+// the message, because the id is built from it.
+func TestToolCallDeltaReachesTheStream(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resp := openSSE(t, baseURL, ctx)
+	defer func() { _ = resp.Body.Close() }()
+
+	status, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"Run: expr 20 + 22"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async: expected 204, got %d", status)
+	}
+
+	frames := readSSEUntil(t, resp, func(frames []sseFrame) bool {
+		return toolDeltaPartID(frames) != ""
+	})
+	cancel()
+
+	partID := toolDeltaPartID(frames)
+	if partID == "" {
+		t.Fatalf("a tool call streamed no arguments delta; frames: %s", summarize(frames))
+	}
+	// The literal shape, not partID's own output: the id has to name the streamed
+	// message and end in the call id, because a tool part is identified by its
+	// call and not by its index.
+	if !strings.HasPrefix(partID, "msg_"+id+"-") {
+		t.Errorf("a delta's partID must belong to the streamed message, got %q", partID)
+	}
+	_, callID, ok := strings.Cut(partID, "-tool-")
+	if !ok || callID == "" {
+		t.Fatalf("a tool delta's partID must carry the call id, got %q", partID)
+	}
+	for _, f := range frames {
+		if f.Name != eventMessagePartUpdated {
+			continue
+		}
+		var payload struct {
+			Part partDTO `json:"part"`
+		}
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Part.Type == "tool" && payload.Part.CallID == callID && payload.Part.ID != partID {
+			t.Errorf("the tool part and the delta must name one part: %q against %q", payload.Part.ID, partID)
+		}
+	}
+}
+
+// toolDeltaPartID returns the partID of the first streamed tool arguments delta.
+func toolDeltaPartID(frames []sseFrame) string {
+	for _, f := range frames {
+		if f.Name != eventMessagePartDelta {
+			continue
+		}
+		var payload ssePartDelta
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Field == "arguments" {
+			return payload.PartID
+		}
+	}
+	return ""
+}
+
+// TestToolCallDeltaWithoutACallIDEmitsNothing is the guard on a streamed tool
+// delta whose call id cannot be resolved: nothing is at that index, or what is
+// there is not a tool call. The alternative is an id ending in "-tool-", which
+// matches neither the ToolCallEndEvent's part nor the transcript's, and no
+// guard downstream rejects it.
+//
+// Both branches: the same event over a message whose copy does carry the call
+// is emitted, so a mapper that emitted nothing for every tool delta would fail
+// here rather than pass.
+func TestToolCallDeltaWithoutACallIDEmitsNothing(t *testing.T) {
+	mapper := &eventMapper{sessionID: "sess-guard"}
+	streamed := &ai.AssistantMessage{Content: []ai.AssistantContentBlock{ai.TextContent{Text: "no tool here"}}}
+	ev := agent.MessageUpdateEvent{
+		Message: agent.AgentMessage{Assistant: &agent.AssistantMessage{Role: "assistant"}},
+		AssistantMessageEvent: ai.ToolCallDeltaEvent{
+			ContentIndex: 0, Delta: `{"command":`, Partial: streamed,
+		},
+	}
+
+	got, err := mapper.translate(ev, "")
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("a delta with no resolvable call id must emit nothing, got %d event(s)", len(got))
+	}
+
+	streamed.Content = []ai.AssistantContentBlock{ai.ToolCall{ID: "call-9", Name: "bash"}}
+	got, err = mapper.translate(ev, "")
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if len(got) != 1 || got[0].Type != eventMessagePartDelta {
+		t.Fatalf("a delta with a resolvable call id must emit one message.part.delta, got %+v", got)
+	}
+	var payload ssePartDelta
+	if err := json.Unmarshal(mustMarshal(t, got[0].Data), &payload); err != nil {
+		t.Fatalf("decode the delta: %v", err)
+	}
+	if want := "msg_sess-guard-0-tool-call-9"; payload.PartID != want {
+		t.Errorf("partID: expected %q, got %q", want, payload.PartID)
+	}
+}
+
+// mustMarshal marshals v or fails the test.
+func mustMarshal(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal %+v: %v", v, err)
+	}
+	return b
 }
 
 // TestFailedRunEmitsSessionError covers the failure report. Without it a prompt
