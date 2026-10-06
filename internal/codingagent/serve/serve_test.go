@@ -1879,6 +1879,148 @@ func TestFileContentRefusesASymlinkSwappedInAfterResolution(t *testing.T) {
 	}
 }
 
+// TestListFilesRefusesASymlinkSwappedInAfterResolution drives the
+// resolve->open window directly: beforeOpen replaces a path component with a
+// symlink out of the root after the handler has resolved it, exactly what a
+// writer inside the root can do between resolveInRoot and the open. The kernel
+// walk inside os.Root refuses the swapped symlink; replace that confinement with
+// a plain os.ReadDir of the resolved string and this test serves the outside
+// directory's entries instead.
+//
+// Two cases swap different components — the requested directory itself, and an
+// intermediate directory. The second defeats a leaf-only check that would leave
+// an in-root intermediate component free to be replaced.
+func TestListFilesRefusesASymlinkSwappedInAfterResolution(t *testing.T) {
+	cases := []struct {
+		name    string
+		path    string
+		prepare func(t *testing.T, root, outsideDir string)
+	}{
+		{
+			name: "requested-directory",
+			path: "sub",
+			prepare: func(t *testing.T, root, outsideDir string) {
+				if err := os.Mkdir(filepath.Join(root, "sub"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(outsideDir, "outside-name"), []byte("not yours\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "parent-directory",
+			path: "sub/nested",
+			prepare: func(t *testing.T, root, outsideDir string) {
+				if err := os.MkdirAll(filepath.Join(root, "sub", "nested"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Join(outsideDir, "nested"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(outsideDir, "nested", "outside-name"), []byte("not yours\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Per-subtest root and outsideDir: case 1's leftover symlink cannot
+			// seed case 2.
+			root, outsideDir := t.TempDir(), t.TempDir()
+			tc.prepare(t, root, outsideDir)
+
+			services, err := coding.NewServices(coding.ServicesOptions{
+				CWD:            root,
+				AgentDir:       t.TempDir(),
+				ProjectTrusted: func() *bool { b := true; return &b }(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// The swapped component must be a real directory outside the root,
+			// or os.Stat follows the link, 404s, and the open is never reached.
+			swap := func() {
+				if err := os.RemoveAll(filepath.Join(root, "sub")); err != nil {
+					t.Fatal(err)
+				}
+				testenv.Symlink(t, outsideDir, filepath.Join(root, "sub"))
+			}
+
+			srv := &Server{services: services}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/file?path="+tc.path, nil)
+			// Runs on the handler's own goroutine (serveListFiles is
+			// synchronous), so t.Fatal is safe in the hook.
+			srv.serveListFiles(rec, req, swap)
+
+			// Inspect the body before the status so both assertions stay live:
+			// a leak is the more important failure, and a t.Fatalf on the
+			// status first would make the leak check unreachable.
+			if body := rec.Body.String(); strings.Contains(body, "outside-name") {
+				t.Fatalf("the outside directory's entries were served (%d): %s", rec.Code, body)
+			}
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("a path swapped for an outside symlink: expected 403, got %d (%s)", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+// TestListFilesEntryPathsAndFileRejection pins the DTO loop to the per-entry
+// relative path: if it used the directory's own rel instead, every Path would be
+// "." (or the directory's name) rather than the entry's, and a path that resolves
+// to a regular file would still be listed instead of answered 400.
+func TestListFilesEntryPathsAndFileRejection(t *testing.T) {
+	root := t.TempDir()
+	services, err := coding.NewServices(coding.ServicesOptions{
+		CWD:            root,
+		AgentDir:       t.TempDir(),
+		ProjectTrusted: func() *bool { b := true; return &b }(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"alpha.txt", "gamma.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(root, "beta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{services: services}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/file?path=.", nil)
+	srv.serveListFiles(rec, req, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("listing the root: expected 200, got %d (%s)", rec.Code, rec.Body)
+	}
+	var dtos []fileNodeDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &dtos); err != nil {
+		t.Fatalf("decode listing: %v (%s)", err, rec.Body)
+	}
+	if len(dtos) != 3 {
+		t.Fatalf("path=. returned %d entries, want 3: %+v", len(dtos), dtos)
+	}
+	for _, d := range dtos {
+		if d.Path != d.Name || d.Path == "." {
+			t.Fatalf("entry path shadowed by the directory's own rel: %+v", d)
+		}
+	}
+
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/file?path=gamma.txt", nil)
+	srv.serveListFiles(rec2, req2, nil)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("a regular file: expected 400, got %d (%s)", rec2.Code, rec2.Body)
+	}
+}
+
 // TestQuestionStoreTakesOneEntryUnderConcurrency covers the invariant the
 // answer-once window rests on: the lookup and the delete are one critical
 // section, so of many callers racing for one id exactly one gets the entry. Over
