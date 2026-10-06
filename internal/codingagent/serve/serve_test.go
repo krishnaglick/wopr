@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"os"
@@ -1781,6 +1782,100 @@ func TestFileContentServesTextInsideTheRootAndRefusesTheRest(t *testing.T) {
 		if status, body := getRaw(t, env.baseURL, "/file/content?path=unreadable.txt"); status != http.StatusInternalServerError {
 			t.Errorf("an unreadable file: expected 500, got %d (%s)", status, body)
 		}
+	}
+}
+
+// TestFileContentRefusesASymlinkSwappedInAfterResolution drives the
+// resolve->open window directly: beforeOpen replaces a path component with a
+// symlink out of the root after the handler has resolved it, exactly what a
+// writer inside the root can do between resolveInRoot and the open. The kernel
+// walk inside os.Root refuses the swapped symlink; replace that confinement
+// with a plain os.Open of the joined path and this test serves the outside
+// file instead.
+//
+// Two cases swap different components — the leaf file, and an intermediate
+// directory. The second defeats a leaf-only check that would leave an in-root
+// intermediate component free to be replaced.
+func TestFileContentRefusesASymlinkSwappedInAfterResolution(t *testing.T) {
+	root := t.TempDir()
+	services, err := coding.NewServices(coding.ServicesOptions{
+		CWD:            root,
+		AgentDir:       t.TempDir(),
+		ProjectTrusted: func() *bool { b := true; return &b }(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "notes.txt")
+	if err := os.WriteFile(outside, []byte("not yours\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		path    string
+		prepare func(t *testing.T)
+		swap    func(t *testing.T)
+	}{
+		{
+			name: "leaf-file",
+			path: "notes.txt",
+			prepare: func(t *testing.T) {
+				if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("inside\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			swap: func(t *testing.T) {
+				if err := os.Remove(filepath.Join(root, "notes.txt")); err != nil {
+					t.Fatal(err)
+				}
+				testenv.Symlink(t, outside, filepath.Join(root, "notes.txt"))
+			},
+		},
+		{
+			name: "intermediate-directory",
+			path: "sub/notes.txt",
+			prepare: func(t *testing.T) {
+				if err := os.Mkdir(filepath.Join(root, "sub"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "sub", "notes.txt"), []byte("inside\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			swap: func(t *testing.T) {
+				if err := os.RemoveAll(filepath.Join(root, "sub")); err != nil {
+					t.Fatal(err)
+				}
+				testenv.Symlink(t, outsideDir, filepath.Join(root, "sub"))
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.prepare(t)
+
+			// Runs on the handler's own goroutine (serveFileContent is
+			// synchronous), so t.Fatal is safe here.
+			beforeOpen := func() { tc.swap(t) }
+
+			srv := &Server{services: services}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/file/content?path="+tc.path, nil)
+			srv.serveFileContent(rec, req, beforeOpen)
+
+			// Inspect the body before the status so both assertions stay live:
+			// a leak is the more important failure, and a t.Fatalf on the
+			// status first would make the leak check unreachable.
+			if body := rec.Body.String(); strings.Contains(body, "not yours") {
+				t.Fatalf("the outside file's contents were served (%d): %s", rec.Code, body)
+			}
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("a path swapped for an outside symlink: expected 403, got %d (%s)", rec.Code, rec.Body)
+			}
+		})
 	}
 }
 
