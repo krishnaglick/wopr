@@ -9,10 +9,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,7 +26,10 @@ import (
 	"github.com/alexrudloff/wopr/coding"
 	codinghost "github.com/alexrudloff/wopr/coding/host"
 	"github.com/alexrudloff/wopr/coding/version"
+	"github.com/alexrudloff/wopr/internal/codingagent/askuser"
+	"github.com/alexrudloff/wopr/internal/codingagent/tools"
 	"github.com/alexrudloff/wopr/internal/codingagent/web"
+	"github.com/alexrudloff/wopr/internal/testenv"
 )
 
 // TestMain sets up hermetic test environment.
@@ -124,6 +131,20 @@ func TestHealthAnswersOverARealListener(t *testing.T) {
 // test-faux without it, so createSession would answer 500 instead of the code
 // under test.
 func promptServer(t *testing.T) (string, *codinghost.Host) {
+	env := promptEnvFor(t)
+	return env.baseURL, env.host
+}
+
+// promptEnv is promptServer's whole setup, kept so a restart test can start a
+// second server over the same files with a host that owns nothing.
+type promptEnv struct {
+	baseURL    string
+	host       *codinghost.Host
+	services   *coding.Services
+	sessionDir string
+}
+
+func promptEnvFor(t *testing.T) promptEnv {
 	t.Helper()
 	t.Setenv("WOPR_TEST_FAUX", "1")
 
@@ -148,7 +169,7 @@ func promptServer(t *testing.T) (string, *codinghost.Host) {
 	}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	return "http://" + ln.Addr().String(), host
+	return promptEnv{baseURL: "http://" + ln.Addr().String(), host: host, services: services, sessionDir: sessionDir}
 }
 
 // createPromptSession creates a live session and returns its id.
@@ -1248,4 +1269,713 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// ─── /permission, /question*, /session/{id}/todo, /file/content ─────────────
+
+// TestNewRegistersEveryRouteWithoutPanicking is the gate for the permission
+// route's wildcard name. ServeMux rejects a pattern that reuses one wildcard
+// name and HandleFunc panics on that error, so the wrong name aborts New and
+// takes all thirty routes with it. The wire path is byte-identical either way,
+// so a request cannot tell the two spellings apart; what this asserts is that
+// New survives and the mux it built answers.
+func TestNewRegistersEveryRouteWithoutPanicking(t *testing.T) {
+	env := promptEnvFor(t)
+
+	for _, path := range []string{"/permission", "/question"} {
+		resp, err := http.Get(env.baseURL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status := resp.StatusCode
+		_ = resp.Body.Close()
+		if status == http.StatusNotFound {
+			t.Errorf("%s: expected a registered route, got 404", path)
+		}
+	}
+}
+
+// TestPermissionRoutesAnswer501OnEveryMatchingPath verifies the two 501 routes
+// answer without reading a body, looking up a session, or parsing an id: an
+// unknown session is 501 here, not 404, because the client reads 404 as "host
+// gone" and this route is not implemented either way.
+func TestPermissionRoutesAnswer501OnEveryMatchingPath(t *testing.T) {
+	env := promptEnvFor(t)
+	id := createPromptSession(t, env.baseURL)
+
+	if status, body := getRaw(t, env.baseURL, "/permission"); status != http.StatusNotImplemented {
+		t.Errorf("GET /permission: expected 501, got %d (%s)", status, body)
+	}
+
+	for _, path := range []string{
+		"/session/" + id + "/permissions/per-1",
+		"/session/no-such-session/permissions/per-1",
+		"/session/anything/permissions/anything-else",
+	} {
+		status, body := postJSON(t, env.baseURL, path, `{}`)
+		if status != http.StatusNotImplemented {
+			t.Errorf("POST %s: expected 501, got %d (%s)", path, status, body)
+			continue
+		}
+		var dto errorDTO
+		if err := json.Unmarshal(body, &dto); err != nil {
+			t.Errorf("POST %s: body is not an error object: %v (%s)", path, err, body)
+			continue
+		}
+		if dto.Error != "not implemented" {
+			t.Errorf("POST %s: expected \"not implemented\", got %q", path, dto.Error)
+		}
+	}
+
+	// No catch-all is registered, so the one-segment form is ServeMux's own 404
+	// rather than a 501 for a route that was never registered.
+	if status, _ := postJSON(t, env.baseURL, "/session/"+id+"/permissions", `{}`); status != http.StatusNotFound {
+		t.Errorf("POST /session/{id}/permissions: expected 404, got %d", status)
+	}
+}
+
+// TestQuestionListAnswersAnEmptyArrayWithNothingPending verifies the empty case
+// is 200 with an array, never 404 and never null: the client polls this to fill
+// a list and spends 404 on "the host is gone".
+func TestQuestionListAnswersAnEmptyArrayWithNothingPending(t *testing.T) {
+	env := promptEnvFor(t)
+	resp, err := http.Get(env.baseURL + "/question")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /question: expected 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(body)); got != "[]" {
+		t.Errorf("GET /question: expected [], got %s", got)
+	}
+}
+
+// TestQuestionReplyRejectsUnknownIDsAndBadBodies covers every status the reply
+// route owes a client, without a pending question: the body is validated first,
+// so each of these is decided before any id is looked up.
+func TestQuestionReplyRejectsUnknownIDsAndBadBodies(t *testing.T) {
+	env := promptEnvFor(t)
+	oversize := `{"choice":"` + strings.Repeat("x", maxBodyBytes+1024) + `"}`
+
+	for name, tc := range map[string]struct {
+		path string
+		body string
+		want int
+	}{
+		"unknown id, reply":        {"/question/q-nope/reply", `{"choice":"Postgres"}`, http.StatusNotFound},
+		"unknown id, reject":       {"/question/q-nope/reject", `{"declined":true}`, http.StatusNotFound},
+		"unknown id, empty body":   {"/question/q-nope/reject", ``, http.StatusNotFound},
+		"neither choice nor other": {"/question/q-nope/reply", `{}`, http.StatusBadRequest},
+		"both choice and other":    {"/question/q-nope/reply", `{"choice":"a","other":"b"}`, http.StatusBadRequest},
+		"malformed body":           {"/question/q-nope/reply", `{"choice":`, http.StatusBadRequest},
+		"oversize body":            {"/question/q-nope/reply", oversize, http.StatusRequestEntityTooLarge},
+	} {
+		status, body := postJSON(t, env.baseURL, tc.path, tc.body)
+		if status != tc.want {
+			t.Errorf("%s: expected %d, got %d (%s)", name, tc.want, status, body)
+		}
+	}
+}
+
+// TestAskReplyRoundTrip drives the whole question path over a real listener: a
+// blocked ask_user appears on the stream and in GET /question, a reply answers
+// 200 with no body, the chosen option reaches the transcript, and the question
+// is gone afterwards so it cannot be answered twice.
+func TestAskReplyRoundTrip(t *testing.T) {
+	env := promptEnvFor(t)
+	id := createPromptSession(t, env.baseURL)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stream := openSSE(t, env.baseURL, ctx)
+	defer func() { _ = stream.Body.Close() }()
+
+	promptAsyncOK(t, env.baseURL, id, "Run: ask a question")
+
+	question := waitForQuestion(t, env.baseURL)
+	if got, want := question.Question, "Which store should the service use?"; got != want {
+		t.Errorf("question: expected %q, got %q", want, got)
+	}
+	if len(question.Options) != 2 {
+		t.Errorf("question: expected 2 options, got %d (%+v)", len(question.Options), question.Options)
+	}
+	if got, want := question.Options, []askuser.Option{
+		{Label: "Postgres", Description: "already deployed"},
+		{Label: "SQLite", Description: "simplest on one host"},
+	}; !slices.Equal(got, want) {
+		t.Errorf("question options: expected %+v, got %+v", want, got)
+	}
+	if question.SessionID != id {
+		t.Errorf("sessionID: expected %q, got %q", id, question.SessionID)
+	}
+	if question.ID == "" {
+		t.Fatal("question: the entry carries no id to reply to")
+	}
+
+	status, body := postJSON(t, env.baseURL, "/question/"+question.ID+"/reply", `{"choice":"Postgres"}`)
+	if status != http.StatusOK {
+		t.Fatalf("reply: expected 200, got %d (%s)", status, body)
+	}
+	if len(body) != 0 {
+		t.Errorf("reply: expected no body, got %q", body)
+	}
+
+	frames := readSSEUntil(t, stream, func(f []sseFrame) bool {
+		return hasFrame(f, "question.asked") && hasFrame(f, "question.replied")
+	})
+	if !hasFrame(frames, "question.asked") {
+		t.Errorf("question.asked never arrived on the stream: %s", summarize(frames))
+	}
+	if !hasFrame(frames, "question.replied") {
+		t.Errorf("question.replied never arrived on the stream: %s", summarize(frames))
+	}
+
+	waitForIdle(t, env.baseURL, id)
+	waitForTranscriptText(t, env.baseURL, id, "User chose: Postgres")
+	if got := readQuestions(t, env.baseURL); len(got) != 0 {
+		t.Errorf("GET /question after the answer: expected none pending, got %+v", got)
+	}
+}
+
+// TestAskRejectRoundTrip is the same path with the other answer: the declined
+// text is what the model reads, so it has to reach the transcript.
+func TestAskRejectRoundTrip(t *testing.T) {
+	env := promptEnvFor(t)
+	id := createPromptSession(t, env.baseURL)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stream := openSSE(t, env.baseURL, ctx)
+	defer func() { _ = stream.Body.Close() }()
+
+	promptAsyncOK(t, env.baseURL, id, "Run: ask a question")
+	question := waitForQuestion(t, env.baseURL)
+
+	status, body := postJSON(t, env.baseURL, "/question/"+question.ID+"/reject", `{"declined":true}`)
+	if status != http.StatusOK {
+		t.Fatalf("reject: expected 200, got %d (%s)", status, body)
+	}
+	if len(body) != 0 {
+		t.Errorf("reject: expected no body, got %q", body)
+	}
+
+	frames := readSSEUntil(t, stream, func(f []sseFrame) bool {
+		return hasFrame(f, "question.asked") && hasFrame(f, "question.rejected")
+	})
+	if !hasFrame(frames, "question.rejected") {
+		t.Errorf("question.rejected never arrived on the stream: %s", summarize(frames))
+	}
+
+	waitForIdle(t, env.baseURL, id)
+	waitForTranscriptText(t, env.baseURL, id, "User declined to answer")
+}
+
+// TestAbortWhileAQuestionIsPendingRejectsIt verifies the only cancel a client
+// can reach: the entry goes away, the card resolves, the tool fails with the
+// aborted error rather than a fabricated answer, and a late reply is 404 instead
+// of a silent success.
+func TestAbortWhileAQuestionIsPendingRejectsIt(t *testing.T) {
+	env := promptEnvFor(t)
+	id := createPromptSession(t, env.baseURL)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stream := openSSE(t, env.baseURL, ctx)
+	defer func() { _ = stream.Body.Close() }()
+
+	promptAsyncOK(t, env.baseURL, id, "Run: ask a question")
+	question := waitForQuestion(t, env.baseURL)
+
+	// A pending question holds the session's run slot, so a second prompt is
+	// refused for as long as the phone deliberates. This is the one-run-per-
+	// session invariant doing its job, not a bug.
+	if status, _ := postJSON(t, env.baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"hi"}]}`); status != http.StatusConflict {
+		t.Errorf("prompt_async while a question is pending: expected 409, got %d", status)
+	}
+
+	if status, _ := postJSON(t, env.baseURL, "/session/"+id+"/abort", `{}`); status != http.StatusOK {
+		t.Fatalf("abort: expected 200, got %d", status)
+	}
+
+	frames := readSSEUntil(t, stream, func(f []sseFrame) bool { return hasFrame(f, "question.rejected") })
+	if !hasFrame(frames, "question.rejected") {
+		t.Errorf("question.rejected never arrived on the stream: %s", summarize(frames))
+	}
+
+	if got := readQuestions(t, env.baseURL); len(got) != 0 {
+		t.Errorf("GET /question after the abort: expected none pending, got %+v", got)
+	}
+	if status, _ := postJSON(t, env.baseURL, "/question/"+question.ID+"/reply",
+		`{"choice":"Postgres"}`); status != http.StatusNotFound {
+		t.Errorf("reply after the abort: expected 404, got %d", status)
+	}
+
+	waitForIdle(t, env.baseURL, id)
+	waitForTranscriptText(t, env.baseURL, id, "question was aborted")
+}
+
+// TestTwoConcurrentRepliesToOneQuestionYieldOneWinner covers the answer-once
+// window: taking the entry and its channel has to happen under one lock, or the
+// loser's send blocks forever on a capacity-one slot the winner already filled.
+func TestTwoConcurrentRepliesToOneQuestionYieldOneWinner(t *testing.T) {
+	env := promptEnvFor(t)
+	id := createPromptSession(t, env.baseURL)
+
+	promptAsyncOK(t, env.baseURL, id, "Run: ask a question")
+	question := waitForQuestion(t, env.baseURL)
+
+	statuses := make(chan int, 2)
+	start := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-start
+			resp, err := http.Post(env.baseURL+"/question/"+question.ID+"/reply", "application/json", strings.NewReader(`{"choice":"Postgres"}`))
+			if err != nil {
+				statuses <- -1
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			statuses <- resp.StatusCode
+		}()
+	}
+	close(start)
+
+	var ok, notFound, other int
+	for range 2 {
+		switch status := <-statuses; status {
+		case http.StatusOK:
+			ok++
+		case http.StatusNotFound:
+			notFound++
+		default:
+			other++
+			t.Errorf("reply: unexpected status %d", status)
+		}
+	}
+	if ok != 1 || notFound != 1 || other != 0 {
+		t.Fatalf("two concurrent replies: expected one 200 and one 404, got %d 200s and %d 404s", ok, notFound)
+	}
+
+	// One delivery: the transcript carries the answer on the tool part once.
+	// If the loser's send were not blocked by the single-slot channel it would
+	// show up here as a second completed tool result.
+	waitForIdle(t, env.baseURL, id)
+	if got := countToolResults(t, env.baseURL, id, "User chose: Postgres"); got != 1 {
+		t.Errorf("the transcript carries the answer on %d tool parts, want exactly 1", got)
+	}
+}
+
+// TestSessionTodoServesTheNewestTodowriteResult verifies the list is read out
+// of the transcript rather than held in this process: it survives a server that
+// owns no session, it is empty before the first write, and the same items ride
+// the tool part's own metadata on the transcript route.
+func TestSessionTodoServesTheNewestTodowriteResult(t *testing.T) {
+	env := promptEnvFor(t)
+	id := createPromptSession(t, env.baseURL)
+
+	// No todowrite yet: 200 and an array, never null.
+	resp, err := http.Get(env.baseURL + "/session/" + id + "/todo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /todo before any write: expected 200, got %d", resp.StatusCode)
+	}
+	if got := strings.TrimSpace(string(empty)); got != "[]" {
+		t.Errorf("GET /todo before any write: expected [], got %s", got)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stream := openSSE(t, env.baseURL, ctx)
+	defer func() { _ = stream.Body.Close() }()
+
+	promptAsyncOK(t, env.baseURL, id, "Run: write todos")
+	waitForIdle(t, env.baseURL, id)
+
+	want := []tools.Todo{
+		{ID: "todo-1", Content: "read the spec", Status: "completed", Priority: "high"},
+		{ID: "todo-2", Content: "write the code", Status: "in_progress", Priority: "medium"},
+		{ID: "todo-3", Content: "cut the changelog", Status: "pending", Priority: "low"},
+	}
+	got := waitForTodos(t, env.baseURL, id, len(want))
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("todo[%d]: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	frames := readSSEUntil(t, stream, func(f []sseFrame) bool { return hasFrame(f, "todo.updated") })
+	if !hasFrame(frames, "todo.updated") {
+		t.Errorf("todo.updated never arrived on the stream: %s", summarize(frames))
+	}
+
+	// The recovery surface carries the same items, because a client with no
+	// replay rebuilds its todo panel from history rather than from the stream.
+	var state struct {
+		Metadata struct {
+			Todos []tools.Todo `json:"todos"`
+		} `json:"metadata"`
+	}
+	found := false
+	for _, m := range readTranscript(t, env.baseURL, id) {
+		for _, p := range m.Parts {
+			if p.Tool != tools.Name {
+				continue
+			}
+			found = true
+			if err := json.Unmarshal(p.State, &state); err != nil {
+				t.Fatalf("the todowrite part's state is not an object: %v (%s)", err, p.State)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no %s tool part in the transcript", tools.Name)
+	}
+	if len(state.Metadata.Todos) != len(want) {
+		t.Fatalf("metadata.todos: got %d items, want %d", len(state.Metadata.Todos), len(want))
+	}
+	for i := range want {
+		if state.Metadata.Todos[i] != want[i] {
+			t.Errorf("metadata.todos[%d]: got %+v, want %+v", i, state.Metadata.Todos[i], want[i])
+		}
+	}
+
+	// A session is a file and the server is not: the list must be there for a
+	// client that reconnects to a server which owns no live session.
+	got = readTodos(t, restartServer(t, env), id)
+	if len(got) != len(want) {
+		t.Fatalf("after a restart: got %d items, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("after a restart, todo[%d]: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	if status := getStatus(t, restartServer(t, env), "/session/no-such-session/todo"); status != http.StatusNotFound {
+		t.Errorf("GET /todo for an unknown session: expected 404, got %d", status)
+	}
+
+	// Newest wins. One write cannot tell the newest result from the first one
+	// found, so the same session writes twice: /todo is the second list, and a
+	// reader that stops at the first match sees the stale one.
+	promptAsyncOK(t, env.baseURL, id, "Run: rewrite todos")
+	waitForIdle(t, env.baseURL, id)
+	newest := []tools.Todo{
+		{ID: "todo-1", Content: "read the spec", Status: "completed", Priority: "high"},
+		{ID: "todo-2", Content: "write the code", Status: "in_progress", Priority: "medium"},
+		{ID: "todo-3", Content: "cut the changelog", Status: "completed", Priority: "low"},
+		{ID: "todo-4", Content: "ship the fix round", Status: "pending", Priority: "high"},
+	}
+	after := waitForTodos(t, env.baseURL, id, len(newest))
+	if len(after) != len(newest) {
+		t.Fatalf("after the second write: got %d items, want the newest list's %d", len(after), len(newest))
+	}
+	for i := range newest {
+		if after[i] != newest[i] {
+			t.Errorf("after the second write, todo[%d]: got %+v, want %+v", i, after[i], newest[i])
+		}
+	}
+}
+
+// TestFileContentServesTextInsideTheRootAndRefusesTheRest covers the allowlist
+// on the read path, including the control the client leans on this server for:
+// a symlink out of the project is a refusal, not a read.
+func TestFileContentServesTextInsideTheRootAndRefusesTheRest(t *testing.T) {
+	env := promptEnvFor(t)
+	root := env.services.CWD()
+
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("notes.txt", "hello from the project\n")
+
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("not yours\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testenv.Symlink(t, outside, filepath.Join(root, "escape-link"))
+	// A link whose target is gone: it resolves to nothing, which is a refusal
+	// and not a missing path, because the path the client named does exist.
+	testenv.Symlink(t, filepath.Join(root, "no-such-target.txt"), filepath.Join(root, "dangling-link"))
+	if err := os.WriteFile(filepath.Join(root, "binary.bin"), []byte{'a', 0, 'b'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "invalid.txt"), []byte{'a', 0xff, 0xfe, 'b'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A fixed size, deliberately not derived from the cap: a fixture sized off
+	// the constant it is testing passes whether the constant is 8 MiB or 32.
+	if err := os.WriteFile(filepath.Join(root, "huge.txt"), []byte(strings.Repeat("x", 9<<20)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	status, body := getRaw(t, env.baseURL, "/file/content?path=notes.txt")
+	if status != http.StatusOK {
+		t.Fatalf("a text file inside the root: expected 200, got %d (%s)", status, body)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("the 200 body is not an object: %v (%s)", err, body)
+	}
+	if len(payload) != 1 || payload["content"] != "hello from the project\n" {
+		t.Errorf("expected exactly {\"content\":\"hello from the project\\n\"}, got %s", body)
+	}
+
+	for name, path := range map[string]string{
+		"missing file":  "no-such-file.txt",
+		"escaping path": "../" + filepath.Base(filepath.Dir(outside)) + "/" + filepath.Base(outside),
+		"absolute path": outside,
+		"symlink out":   "escape-link",
+		"dangling link": "dangling-link",
+		"directory":     ".",
+		"binary (NUL)":  "binary.bin",
+		"invalid UTF-8": "invalid.txt",
+		"over the cap":  "huge.txt",
+	} {
+		status, body := getRaw(t, env.baseURL, "/file/content?path="+url.QueryEscape(path))
+		want := map[string]int{
+			"missing file":  http.StatusNotFound,
+			"escaping path": http.StatusForbidden,
+			"absolute path": http.StatusForbidden,
+			"symlink out":   http.StatusForbidden,
+			"dangling link": http.StatusForbidden,
+			"directory":     http.StatusBadRequest,
+			"binary (NUL)":  http.StatusUnsupportedMediaType,
+			"invalid UTF-8": http.StatusUnsupportedMediaType,
+			"over the cap":  http.StatusRequestEntityTooLarge,
+		}[name]
+		if status != want {
+			t.Errorf("%s (%s): expected %d, got %d (%s)", name, path, want, status, body)
+		}
+	}
+
+	// A file this process may stat but not open: the read fails after the size
+	// check already passed, so the handler must answer 500 rather than claim
+	// the file is missing. Root bypasses permission bits, and on Windows mode
+	// 0000 only sets the read-only attribute, which does not stop the owner
+	// reading it, so neither host can produce the failure.
+	if os.Geteuid() != 0 && runtime.GOOS != "windows" {
+		write("unreadable.txt", "you cannot read me\n")
+		if err := os.Chmod(filepath.Join(root, "unreadable.txt"), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "unreadable.txt"), 0o644) })
+		if status, body := getRaw(t, env.baseURL, "/file/content?path=unreadable.txt"); status != http.StatusInternalServerError {
+			t.Errorf("an unreadable file: expected 500, got %d (%s)", status, body)
+		}
+	}
+}
+
+// TestQuestionStoreTakesOneEntryUnderConcurrency covers the invariant the
+// answer-once window rests on: the lookup and the delete are one critical
+// section, so of many callers racing for one id exactly one gets the entry. Over
+// HTTP two replies are too far apart to overlap the window reliably, which is
+// why this drives the store itself.
+//
+// The window between the lookup and the delete is a few instructions wide, so a
+// single round of callers misses it most of the time and a green round proves
+// little. Many entries with all their callers released by one close keep the
+// whole shape in the millisecond range while making a missed window the
+// exception. Two oracles, because they fail for different reasons: a winner
+// count above the number of entries catches a second caller that landed in the
+// window, and the unsynchronized map access a delete outside the lock causes is
+// refused outright by the race detector and by the runtime's concurrent-map
+// guard.
+func TestQuestionStoreTakesOneEntryUnderConcurrency(t *testing.T) {
+	var store questionStore
+	store.seed()
+
+	const entries, callers = 64, 16
+	ids := make([]string, 0, entries)
+	start := make(chan struct{})
+	var won atomic.Int64
+	var wg sync.WaitGroup
+	for range entries {
+		id, _ := store.add("ses_1", askuser.Question{Question: "which?"})
+		ids = append(ids, id)
+		for range callers {
+			wg.Go(func() {
+				<-start
+				if _, ok := store.take(id); ok {
+					won.Add(1)
+				}
+			})
+		}
+	}
+	close(start)
+	wg.Wait()
+
+	if got := won.Load(); got != entries {
+		t.Errorf("%d takes succeeded over %d entries and %d callers, want exactly %d", got, entries, entries*callers, entries)
+	}
+	if got := len(store.list()); got != 0 {
+		t.Errorf("the store still holds %d entries after every winner took one", got)
+	}
+	if _, ok := store.take(ids[0]); ok {
+		t.Error("a second take after the entry was removed returned it")
+	}
+}
+
+// ─── helpers ───────────────────────────────────────────────────────────────
+
+func hasFrame(frames []sseFrame, name string) bool {
+	return slices.ContainsFunc(frames, func(f sseFrame) bool { return f.Name == name })
+}
+
+func promptAsyncOK(t *testing.T, baseURL, id, text string) {
+	t.Helper()
+	status, body := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"`+text+`"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async: expected 204, got %d (%s)", status, body)
+	}
+}
+
+func readQuestions(t *testing.T, baseURL string) []questionDTO {
+	t.Helper()
+	resp, err := http.Get(baseURL + "/question")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /question: expected 200, got %d", resp.StatusCode)
+	}
+	var dtos []questionDTO
+	if err := json.NewDecoder(resp.Body).Decode(&dtos); err != nil {
+		t.Fatal(err)
+	}
+	return dtos
+}
+
+func waitForQuestion(t *testing.T, baseURL string) questionDTO {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if dtos := readQuestions(t, baseURL); len(dtos) > 0 {
+			return dtos[0]
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("no question was ever pending")
+	return questionDTO{}
+}
+
+func readTodos(t *testing.T, baseURL, id string) []tools.Todo {
+	t.Helper()
+	status, body := getRaw(t, baseURL, "/session/"+id+"/todo")
+	if status != http.StatusOK {
+		t.Fatalf("GET /todo: expected 200, got %d (%s)", status, body)
+	}
+	var todos []tools.Todo
+	if err := json.Unmarshal(body, &todos); err != nil {
+		t.Fatalf("GET /todo: body is not a todo list: %v (%s)", err, body)
+	}
+	return todos
+}
+
+func waitForTodos(t *testing.T, baseURL, id string, want int) []tools.Todo {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if todos := readTodos(t, baseURL, id); len(todos) >= want {
+			return todos
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the todo list never reached %d items", want)
+	return nil
+}
+
+func waitForTranscriptText(t *testing.T, baseURL, id, want string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if countTranscriptText(t, baseURL, id, want) > 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the transcript never contained %q", want)
+}
+
+func countTranscriptText(t *testing.T, baseURL, id, want string) int {
+	t.Helper()
+	n := 0
+	for _, m := range readTranscript(t, baseURL, id) {
+		for _, p := range m.Parts {
+			if strings.Contains(p.Text, want) || strings.Contains(string(p.State), want) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// countToolResults counts finished tool parts whose state carries want. The
+// answer reaches the transcript twice — on the tool part's state and again on
+// the toolResult message's own text part — so a count that is about deliveries
+// has to look at tool parts only.
+func countToolResults(t *testing.T, baseURL, id, want string) int {
+	t.Helper()
+	n := 0
+	for _, m := range readTranscript(t, baseURL, id) {
+		for _, p := range m.Parts {
+			if p.Type == "tool" && strings.Contains(string(p.State), want) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+func getRaw(t *testing.T, baseURL, path string) (int, []byte) {
+	t.Helper()
+	resp, err := http.Get(baseURL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, body
+}
+
+func getStatus(t *testing.T, baseURL, path string) int {
+	t.Helper()
+	status, _ := getRaw(t, baseURL, path)
+	return status
+}
+
+// restartServer starts a second serve server over the same session files with a
+// host that owns no session: the state every session is in after a restart.
+func restartServer(t *testing.T, env promptEnv) string {
+	t.Helper()
+	srv, ln, err := New("127.0.0.1:0", codinghost.New(env.services, nil), env.sessionDir, "test-faux/faux-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return "http://" + ln.Addr().String()
 }

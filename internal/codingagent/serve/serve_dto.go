@@ -89,13 +89,6 @@ type projectDTO struct {
 	Worktree string `json:"worktree"`
 }
 
-type todoItemDTO struct {
-	ID       string `json:"id"`
-	Content  string `json:"content"`
-	Status   string `json:"status"`
-	Priority string `json:"priority"`
-}
-
 type fileNodeDTO struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
@@ -128,6 +121,7 @@ const (
 	metaProbeBytes       = 32 << 10
 	titleProbeBytes      = 8 << 10
 	maxBodyBytes         = 16 << 20
+	maxFileContentBytes  = 8 << 20
 	maxFileEntries       = 500
 	maxWalkEntries       = 20000
 	maxFileStatusEntries = 500

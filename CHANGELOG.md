@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- **`todowrite`**: the model can now keep a task list for a request — plan, work through it, and mark items done as it goes. It is active by default in every mode.
+
 ## [0.2.1] - 2026-09-30
 
 - **`/undo` covers shell edits**: when a command (`sed -i`, a Python script, `cat >`) changes files, they become normal undo changes, and the command's card shows their diff. The "before" comes from wopr's copies of files the model read, wrote, or named, or from git for clean tracked files; files a command created are removed on undo.

@@ -120,11 +120,12 @@ var stdinWait = 3 * time.Second
 // otherwise only if it starts within stdinWait. Cancelling ctx (SIGTERM)
 // stops the read.
 func readPipedStdin(ctx context.Context, args []string) (string, []string) {
+	stdin := os.Stdin
 	dash := slices.Index(args, "-")
 	if dash >= 0 {
 		args = slices.Delete(slices.Clone(args), dash, dash+1)
 	}
-	if term.IsTerminal(int(os.Stdin.Fd())) {
+	if term.IsTerminal(int(stdin.Fd())) {
 		return "", args
 	}
 	type chunk struct {
@@ -135,10 +136,10 @@ func readPipedStdin(ctx context.Context, args []string) (string, []string) {
 	rest := make(chan chunk, 1)
 	go func() {
 		buf := make([]byte, 64<<10)
-		n, err := os.Stdin.Read(buf)
+		n, err := stdin.Read(buf)
 		first <- chunk{buf[:n], err}
 		if err == nil {
-			data, err := io.ReadAll(os.Stdin)
+			data, err := io.ReadAll(stdin)
 			rest <- chunk{data, err}
 		}
 	}()
@@ -562,7 +563,7 @@ func main() {
 	// configured provider, the model provider's own search, or DuckDuckGo)
 	// and installs mcp only when a server is configured.
 	registryToolNames := tools.BuiltinToolNames()
-	agentToolNames := []string{"read", "bash", "edit", "write", "task", "web_fetch", "web_search", "mcp"}
+	agentToolNames := []string{"read", "bash", "edit", "write", "task", "web_fetch", "web_search", "mcp", "todowrite"}
 	// The defaultTools setting replaces the default active set.
 	if settings.DefaultTools != nil {
 		agentToolNames = append([]string(nil), settings.DefaultTools...)

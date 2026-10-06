@@ -12,19 +12,23 @@ import (
 	"github.com/alexrudloff/wopr/ai"
 	codinghost "github.com/alexrudloff/wopr/coding/host"
 	"github.com/alexrudloff/wopr/coding/version"
+	"github.com/alexrudloff/wopr/internal/codingagent/askuser"
+	"github.com/alexrudloff/wopr/internal/codingagent/tools"
 )
 
 // The opencode SSE event names this server emits. Event.Type IS the name: the
 // bus carries it from the producer to the frame writer, so no layer translates
 // between the agent's events and the client's vocabulary.
 //
-// Eight of the seventeen names the client switches on have a live trigger in
-// wopr. The other nine — todo.updated, permission.asked, permission.replied,
-// question.asked, question.replied, question.rejected, message.removed,
-// message.part.removed, session.deleted — have no origin in Go at all and are
-// justified by name in docs/plans/2026-10-04-serve-4.md (Q3). Emitting a
-// placeholder for one would render an empty permission prompt or a phantom todo
-// that nothing can ever answer.
+// Twelve of the seventeen names the client switches on have a live trigger in
+// wopr. The other five have none, and none is invented for them:
+// permission.asked and permission.replied need an approval policy and a
+// blocking hook, which do not exist and are not designed (serve-7);
+// session.deleted needs a session deletion, and DELETE /session/{id} is a 501
+// stub; message.removed and message.part.removed need a removal, and nothing in
+// wopr removes either — a failed tool is state.status = "error" on a part that
+// stays. Emitting a placeholder for one would render an empty permission prompt
+// or a phantom deletion the client cannot reconcile.
 const (
 	eventServerConnected    = "server.connected"
 	eventServerHeartbeat    = "server.heartbeat"
@@ -34,6 +38,10 @@ const (
 	eventSessionUpdated     = "session.updated"
 	eventSessionError       = "session.error"
 	eventSessionStatus      = "session.status"
+	eventTodoUpdated        = "todo.updated"
+	eventQuestionAsked      = "question.asked"
+	eventQuestionReplied    = "question.replied"
+	eventQuestionRejected   = "question.rejected"
 )
 
 const (
@@ -107,6 +115,21 @@ type sseSessionError struct {
 type sseSessionUpdated struct {
 	SessionID string     `json:"sessionID"`
 	Info      sessionDTO `json:"info"`
+}
+
+// sseTodoUpdated answers todo.updated.
+type sseTodoUpdated struct {
+	SessionID string       `json:"sessionID"`
+	Todos     []tools.Todo `json:"todos"`
+}
+
+// sseQuestion answers question.asked, question.replied and question.rejected.
+// The four question fields are the entry GET /question serves, so a card built
+// from the stream and one built from a poll cannot disagree; answer is nil on
+// the question and carries the choice, the free text, or the decline after it.
+type sseQuestion struct {
+	questionDTO
+	Answer *askuser.Answer `json:"answer,omitempty"`
 }
 
 // ─── Handler ───────────────────────────────────────────────────────────────
@@ -280,13 +303,20 @@ func (m *eventMapper) translate(ev agent.AgentEvent, entryID string) ([]codingho
 	case agent.ToolExecutionStartEvent:
 		return m.toolStart(e), nil
 	case agent.ToolExecutionUpdateEvent:
-		return m.one(m.toolSnapshot(e.ToolCallID, e.ToolName, "running", e.Content)), nil
+		return m.one(m.toolSnapshot(e.ToolCallID, e.ToolName, "running", e.Content, nil)), nil
 	case agent.ToolExecutionEndEvent:
 		status := "completed"
 		if e.Result.IsError {
 			status = "error"
 		}
-		return m.one(m.toolSnapshot(e.ToolCallID, e.ToolName, status, e.Result.Content)), nil
+		events := m.one(m.toolSnapshot(e.ToolCallID, e.ToolName, status, e.Result.Content, e.Result.Details))
+		// todo.updated rides the end of a todowrite call, which is the only
+		// event that changes the list. A rejected todowrite carries nil details
+		// and changes nothing, so it must not broadcast an empty list.
+		if todos := todosFromDetails(e.ToolName, e.Result.Details); todos != nil {
+			events = append(events, m.todoUpdated(m.sessionID, todos))
+		}
+		return events, nil
 	}
 	return nil, nil
 }
@@ -389,10 +419,41 @@ func (m *eventMapper) toolStart(ev agent.ToolExecutionStartEvent) []codinghost.E
 // toolSnapshot republishes a tool part with its complete-so-far output.
 // ToolExecutionUpdateEvent is a snapshot, never a delta, so it is a
 // message.part.updated and never a message.part.delta.
-func (m *eventMapper) toolSnapshot(callID, name, status, output string) codinghost.Event {
+func (m *eventMapper) toolSnapshot(callID, name, status, output string, details any) codinghost.Event {
 	part := toolPart(m.sessionID, m.provisionalID(), 0, callID, name)
-	part.State = json.RawMessage(`{"status":"` + status + `","output":` + strconv.Quote(output) + `}`)
+	state := map[string]any{"status": status, "output": output}
+	if todos := todosFromDetails(name, details); len(todos) > 0 {
+		state["metadata"] = map[string]any{"todos": todos}
+	}
+	stateBytes, _ := json.Marshal(state)
+	part.State = stateBytes
 	return m.part(part)
+}
+
+func (m *eventMapper) todoUpdated(sessionID string, todos []tools.Todo) codinghost.Event {
+	if todos == nil {
+		todos = []tools.Todo{}
+	}
+	return m.event(eventTodoUpdated, sseTodoUpdated{SessionID: sessionID, Todos: todos})
+}
+
+// todosFromDetails decodes the todos a tool result carries. Details is the
+// tool's own value on the live path and map[string]any after a JSON round trip,
+// so the decode goes through JSON rather than a type assertion; a result from
+// any other tool decodes to nothing.
+func todosFromDetails(tool string, details any) []tools.Todo {
+	if tool != tools.Name || details == nil {
+		return nil
+	}
+	raw, err := json.Marshal(details)
+	if err != nil {
+		return nil
+	}
+	var todos []tools.Todo
+	if err := json.Unmarshal(raw, &todos); err != nil {
+		return nil
+	}
+	return todos
 }
 
 // provisionalID is the streamed id of the message in flight.
