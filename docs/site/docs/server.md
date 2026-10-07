@@ -14,7 +14,7 @@ wopr serve [--port N] [--hostname H] [--dir PATH]
 - `--port` overrides `server.port`, whose default is `4096`.
 - `--hostname` overrides `server.hostname`, whose default is `127.0.0.1`.
 
-A client's `directory` query validates against the served root (400 on a mismatch); it does not select a directory. `server.allowedRoots` restricts which directories `wopr serve` may serve — a global-only launcher guardrail against misconfiguration, not a network boundary. See [settings](settings.md#server).
+A client's `directory` query validates against the served root (400 on a mismatch) on the session and file routes; it does not select a directory. The root-independent routes `GET /api/health`, `GET /config`, and `GET /api/command` ignore `directory`, so a stale or unnormalized value on those cannot break a connect. `server.allowedRoots` restricts which directories `wopr serve` may serve — a global-only launcher guardrail against misconfiguration, not a network boundary. See [settings](settings.md#server).
 
 The process prints `wopr serve listening on http://<addr>` once it is up. Set the values in [settings](settings.md#server) to make the choice persistent.
 
@@ -30,17 +30,19 @@ The only confinement on file access is the resolved project root: `GET /file` an
 
 ## Client
 
-The endpoint table below was derived from `grapeot/opencode_ios_client` at commit `2d0e7bd`. It is a third-party build with no SLA; if the app moves, this table can drift, and the DTOs stay tolerant of added optional fields.
+The endpoint table below was derived from `grapeot/opencode_ios_client` at commit `2d0e7bd`, except the `GET /api/health`, `GET /experimental/session`, `GET /config`, `GET /api/command`, and `GET /permission` rows, which come from a logging-proxy capture of KKCode against opencode 1.18.34 recorded in the `serve-kkcode-v1-compat` backlog item. It is a third-party build with no SLA; if the app moves, this table can drift, and the DTOs stay tolerant of added optional fields.
 
 ## Endpoints
 
-The server registers 30 routes. Twenty-four are implemented; six answer `501` with `{"error":"not implemented"}` for an operation the client can request but the server does not implement yet. A `501` is a supported answer the client treats as not implemented.
+The server registers 34 routes. Twenty-nine are implemented; five answer `501` with `{"error":"not implemented"}` for an operation the client can request but the server does not implement yet. A `501` is a supported answer the client treats as not implemented.
 
 | Method | Path | Status | Behavior |
 |---|---|---|---|
 | `GET` | /global/health | 200 | `{healthy: true, version}`. The client's Test connection call. |
+| `GET` | /api/health | 200 | `{healthy: true}`, no `version`. KKCode's first connect probe. `directory` ignored. |
 | `GET` | /global/event | SSE | One event stream for every session: `server.connected` first, then `server.heartbeat` every 15 seconds, and a terminal `session.error` with `data: [DONE]` when the byte budget drops. Answers 503 past 16 concurrent streams. |
 | `GET` | /session | 200 | `sessionDTO[]` merged from disk and live sessions. Query `directory`; `limit` default 50, max 200; 400 on a directory mismatch. |
+| `GET` | /experimental/session | 200 | Identical to `GET /session` by construction (same handler): `sessionDTO[]`, `directory` validated, `limit` default 50, max 200. |
 | `POST` | /session | 200 | Starts a host session, installs the `ask_user` asker, and returns `sessionDTO`; 500 when the server has no usable model. No `directory` parameter. |
 | `GET` | /session/{id} | 200 | `sessionDTO`; 404 unknown. |
 | `PATCH` | /session/{id} | 200 | Body is exactly one of `{title}` or `{time:{archived}}`; renames or archives and publishes `session.updated`; 400, 404, or 500. |
@@ -57,10 +59,12 @@ The server registers 30 routes. Twenty-four are implemented; six answer `501` wi
 | `POST` | /session/{id}/permissions/{permissionID} | **501 stub** | Not implemented. The wildcard is `permissionID` because `{id}` is already used in the pattern. |
 | `GET` | /project | 200 | `[projectDTO{ID, Worktree}]` for the server root. |
 | `GET` | /project/current | 200 | `projectDTO`. |
+| `GET` | /config | 200 | `{model}` when a model is configured, `{}` otherwise. wopr's honest subset; no credentials or secrets. `directory` ignored. |
 | `GET` | /config/providers | 200 | Map from provider ID to `{name, api, models}`. |
+| `GET` | /api/command | 200 | `{location: {directory, project: {id: "global", directory}}, data: []}`; both directories are the resolved served root, and `data` is always `[]` (no built-in slash commands). `directory` ignored. |
 | `GET` | /provider | 200 | `string[]` of authenticated provider names. |
 | `GET` | /agent | 200 | Static `agentInfoDTO[]`: `explore`, `general`, `propose`, `build`. |
-| `GET` | /permission | **501 stub** | Not implemented. |
+| `GET` | /permission | 200 | `[]`. Every tool is open by default, so there are never pending requests. |
 | `GET` | /question | 200 | Pending `questionDTO[]`, `[]` when there is none. Never 404; that status means the host is gone. |
 | `POST` | /question/{id}/reply | 200 | Body is exactly one of `choice` or `other`; 404 gone, 400 invalid, 413 over 16 MiB; publishes `question.replied`. |
 | `POST` | /question/{id}/reject | 200 | No body read; 404 gone; publishes `question.rejected`. |
