@@ -1,11 +1,18 @@
 # Resume point
 
-**Idle — no wave in progress.** 2026-10-07
+**Idle — no wave in progress; KKCode live-test loop paused awaiting a real-app retry.** 2026-10-07
 
-- **In flight:** nothing. `serve-kkcode-dto-shape-parity` shipped on
-  `wave-kkcode-dto-shape-parity` and merged into `main` (`--no-ff`, `b6b76e2`) as this wave.
-  Base was `main` at `3eb5c29`.
-- **Last green slice:** `70c78f4` on `wave-kkcode-dto-shape-parity`.
+- **In flight:** nothing uncommitted. KKCode compatibility is merged: `serve-kkcode-v1-compat`
+  (`e7569dc`), the `/file` entry shape (`78773a2`), and `serve-kkcode-dto-shape-parity` (`b6b76e2`).
+  The captured KKCode connect → prompt sequence passes against a live `wopr serve` (protocol replay,
+  66/66 assertions) and is codified as `internal/codingagent/serve/serve_kkcode_replay_test.go`
+  (`d3df1be`). **Next:** owner points the real KKCode app at the logging proxy and confirms
+  folder → session → prompt in the UI; on any error read `/tmp/wopr-proxy.log`.
+- **Live rig:** `wopr serve` (rebuilt, `make install`) on `100.109.237.16:4097` → `/tmp/wopr-serve.log`;
+  Node logging proxy `/tmp/wopr-proxy.js` on `:4098` → `:4097` → `/tmp/wopr-proxy.log`; real opencode on
+  `:4096`. An iOS emulator is NOT available (Linux host, no Mac on the tailnet, closed-source App Store
+  app is FairPlay-encrypted); the protocol-replay harness is the automated substitute.
+- **Last green slice:** `d3df1be` (KKCode replay test) on `main`.
 - **What shipped:** Aligned wopr's V1 DTOs to opencode 1.18.34's captured shapes so KKCode stops
   aborting with "cannot convert undefined value to object". `GET /config` is the full 12-key object;
   `GET /config/providers` is the structural `{providers:[{id,name,source,env,key,options,models}],
