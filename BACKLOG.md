@@ -1246,8 +1246,13 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-unknown-server-key-schema-drift — the known-key set duplicates ServerSettings' JSON tags
 
-- **Status:** READY (low priority) — surfaced by the `serve-allowed-roots-unknown-key-fail-open`
-  scope/hygiene verification.
+- **Status:** DONE — shipped on `wave-serve-unknown-server-key-schema-drift`, merged into `main`.
+  `checkServerRaw`'s known inner-key set is now derived at runtime from `ServerSettings`' fields via
+  the new `isServerSettingKey` helper, which mirrors `encoding/json` field resolution (JSON tag name,
+  or the Go field name for an untagged / `json:",opt"` field; unexported and `json:"-"` skipped), so
+  a future `ServerSettings` field — tagged or not — can never land in `serverUnknownKeys` or trip the
+  `allowedRoots` near-miss refusal. `allowedRoots` array validation and `port`/`hostname` behavior are
+  unchanged. No test added (the fix enforces the coupling structurally; spec `docs/plans/2026-10-07-serve-unknown-server-key-schema-drift.md`).
 - **Why:** `checkServerRaw` hard-codes the known `server` keys (`port`, `hostname`,
   `allowedRoots`). A future `ServerSettings` field added to the struct but not to that set is
   still applied by `decodeTolerant`, yet lands in the unknown-key list and prints a spurious
