@@ -442,8 +442,10 @@ above is conditional on which one the plan was diffed against.
 
 ### serve-7 — Permission approval substrate
 
-- **Status:** BLOCKED — needs a human product decision before it can be specced. Not
-  dispatchable as written.
+- **Status:** DONE — closed by decision 2026-10-06, nothing implemented. Policy is
+  **all tools open by default** in served mode: no approval gate, no `permission.asked`,
+  the two `GET/POST /permission*` routes stay 501. Reopen only if a concrete need for a
+  thumb appears; the `Blocked on` policy question below is then the spec's first input.
 - **Why:** `GET /permission` and `POST /session/{id}/permissions/{id}` are served as 501
   stubs by serve-5 (see serve-3's scope-reduction entry above). The endpoints are in the
   client contract (plan:142-143), the app renders a permission prompt, and wopr has no
@@ -759,20 +761,22 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-file-list-directory-param — `/file` ignores the `directory` query
 
-- **Status:** NEEDS-INPUT — does a foreign `?directory=` mean anything when the server exposes
-  a single configured root? Decide: reject with 400 to match the sibling handlers, or accept
-  and document the ignore. Unblocks into a one-handler change once answered.
+- **Status:** FOLDED into `session-directory` on 2026-10-06 — no longer a
+  separate dispatchable item. Decided: reject a foreign `?directory=` with 400,
+  matching the four sibling handlers (the API stays a validation against the
+  process root; see `session-directory` decision 4). Delivered by
+  `session-directory`'s `/file` directory-validation slice (`serveListFiles`
+  gains `directoryParam`; `server.md`'s `/file` row lists `directory`).
 - **Depends on:** serve-file-list-race
 - **Why:** `listFiles` reads only `path` and never calls `directoryParam`
   (`serve_handlers.go:64-77`), while every sibling handler including `serveFileContent`
   does. `/file?directory=<other>` lists the session CWD instead of validating or rejecting
   the foreign directory.
 - **Files:** `internal/codingagent/serve/serve_handlers.go` (`listFiles`).
-- **Gates:** a test asserting `/file?directory=<foreign>` answers the same 400 as the
-  sibling handlers, or a recorded decision to accept-and-ignore (then no code change).
+- **Gates:** delivered by `session-directory` — `serveListFiles` calls `directoryParam`
+  and `/file?directory=<foreign>` answers 400 like the sibling handlers (plan slice 2).
 - **Notes:** Left out of serve-file-list-race to keep that slice to the security fix.
-  Confirm the intended semantics first — serving a single configured root may make a
-  foreign `directory` deliberately meaningless.
+  Semantics decided 2026-10-06 (reject with 400); delivered by `session-directory`.
 
 ### coding-host-ci-race — `make check` does not race-test `coding/host`
 
@@ -1077,3 +1081,25 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   escalate over its worktree edits. `coding/session_council_build.go` needed no edit.
   Test: `TestBuildWriterDoesNotAdvancePastProviderError` (red pre-fix
   `failovers=1 escalated=1`). No failover eligibility was broadened.
+
+### session-directory — let a session work in a directory other than the process cwd
+
+- **Status:** READY — spec at `docs/plans/2026-10-06-session-directory.md`,
+  verified 2026-10-06 by three independent verifier fans (final pass 0 blockers;
+  the four residual warnings/nits corrected). The plan is the single source for
+  the decisions, files, slices, and gates; this entry records status and
+  dependencies only, to avoid the two drifting.
+- **Depends on:** —
+- **Why:** wopr pins every session to the process cwd. The CLI reads `os.Getwd()`
+  with no override (`cmd/wopr/main.go:349`; no directory flag in
+  `cmd/wopr/args.go`), and `wopr serve` builds one `host.Host` → one
+  `coding.Services` from the startup cwd (`cmd/wopr/serve.go`), so the API's
+  `directory` query only *validates* against that single root. opencode lets you
+  name the directory to work in; wopr requires `cd` first (CLI) and cannot serve a
+  second directory at all (server).
+- **Plan:** 3 slices, all launch-time — `--dir` for the CLI and `wopr serve` plus
+  the global-layer `server.allowedRoots` guardrail; the `/file` directory
+  validation; docs. One root per process; the API `directory` query stays a
+  validation against that root (400 on mismatch), not a per-request selector.
+  Consequence: `serve-file-list-directory-param` folds into the plan's `/file`
+  slice. See the plan for the decisions, files, and per-slice gates.
