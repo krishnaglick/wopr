@@ -71,3 +71,4 @@ auth.json
 
 # Agent worktrees.
 .claude/worktrees/
+.worktrees/
