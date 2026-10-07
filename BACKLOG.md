@@ -1107,7 +1107,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-allowed-roots-fail-open — a malformed global settings.json silently disables the allowlist
 
-- **Status:** READY — surfaced 2026-10-06 by the session-directory diff verification.
+- **Status:** DONE — shipped on `wave-serve-allowed-roots-fail-open` as `09bbd65`.
 - **Why:** `runServeCommand` reads `server.allowedRoots` from the global layer and
   warns on a settings parse error, then continues. A malformed global
   `settings.json` zeroes the layer, `GetServerAllowedRoots` returns `nil, nil`,
@@ -1118,6 +1118,18 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Files:** `cmd/wopr/serve.go` (the allowlist read), `internal/codingagent/settings.go`.
 - **Gates:** a test that a configured-but-unparsable global settings layer makes
   `wopr serve` refuse to start rather than serve unrestricted.
+- **What shipped:** `SettingsManager.GlobalLoadError()` exposes the recorded
+  global-layer load error; `globalServeAllowedRoots` in `cmd/wopr/serve.go`
+  returns that error instead of the zero layer, and `runServeCommand` exits via
+  `failf` before `resolveServeRoot`. An absent or parsed layer with an empty
+  allowlist still returns `nil, nil` (unrestricted). Tests:
+  `TestGlobalServeAllowedRootsFailsClosedOnMalformedGlobalSettings` and
+  `TestRunServeCommandRefusesOnMalformedGlobalSettings`.
+- **Known residual:** the guard covers JSON parse errors only. A wrong-typed
+  `server`/`allowedRoots` value is swallowed by the shared tolerant decoder
+  (`Settings.UnmarshalJSON` → `decodeTolerant`), so it still fails open — split
+  out as `serve-allowed-roots-type-mismatch-fail-open` below rather than widened
+  into this item.
 
 ### serve-allowed-roots-wiring-test — no test covers the global-layer read and the resolveServeRoot call
 
@@ -1129,5 +1141,30 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   project settings, or dropping the call, stays green. The plan calls the
   global-only rule load-bearing.
 - **Files:** `cmd/wopr/serve.go`.
-- **Gates:** extract the allowlist read/root resolution into a testable helper and
-  assert a project `settings.json` under the served root cannot widen the list.
+- **Gates:** assert a project `settings.json` under the served root cannot widen
+  the list, and that `runServeCommand` reads the allowlist from the global layer
+  (`projectTrusted` false). The testable helper now exists:
+  `globalServeAllowedRoots` (added by `serve-allowed-roots-fail-open`, commit
+  `09bbd65`), so the remaining work is the global-only/project-cannot-widen
+  assertion at that seam.
+
+### serve-allowed-roots-type-mismatch-fail-open — a wrong-typed server.allowedRoots still fails open
+
+- **Status:** READY — surfaced 2026-10-07 by the `serve-allowed-roots-fail-open`
+  verification fan (security angle).
+- **Why:** `Settings.UnmarshalJSON` routes through `decodeTolerant`
+  (`internal/codingagent/settings.go:298-354`), which drops a field whose JSON type
+  mismatches its key and retries. So `{"server":5}`,
+  `{"server":{"allowedRoots":"x"}}`, `{"server":{"allowedRoots":[5]}}` and
+  `{"server":{"allowedRoots":{}}}` all parse successfully: `GlobalLoadError()` is
+  `nil`, `Server` is nil or `AllowedRoots` empty, `GetServerAllowedRoots` returns
+  `nil, nil`, and `resolveServeRoot` treats the empty list as unrestricted. The
+  `serve-allowed-roots-fail-open` guard only catches JSON parse errors, so this
+  variant still silently disables the guardrail.
+- **Files:** `internal/codingagent/settings.go` (the decoder and the allowlist
+  read), `cmd/wopr/serve.go`. Likely needs a "dropped/undecodable key" signal out
+  of `decodeTolerant` scoped to `server`, since changing the tolerant decoder's
+  repo-wide semantics would affect every setting; design decision required.
+- **Gates:** a test that a wrong-typed `server` or `server.allowedRoots` in the
+  global layer makes `wopr serve` refuse to start rather than serve unrestricted,
+  without changing the tolerant behavior of unrelated settings.
