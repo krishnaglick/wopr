@@ -46,9 +46,8 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 
 	// The bus carries Event.Type from the producer to the frame writer as the
 	// SSE event name, and part identity is partID's, so the agent→opencode mapper
-	// belongs here rather than in coding/host.
-	h.Translate = newEventMapper
-
+	// belongs here rather than in coding/host. The mapper is a *Server method, so
+	// s must exist before the method value is taken.
 	s := &Server{
 		services:   h.Services(),
 		host:       h,
@@ -56,6 +55,7 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 		modelSpec:  modelSpec,
 		ln:         ln,
 	}
+	h.Translate = s.newEventMapper
 	s.questions.seed()
 
 	mux := http.NewServeMux()

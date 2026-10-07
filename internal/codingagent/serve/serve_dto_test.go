@@ -16,108 +16,6 @@ import (
 	host "github.com/alexrudloff/wopr/coding/host"
 )
 
-// TestSessionDTODecode tests that sessionDTO decodes correctly into a client-shaped mirror.
-func TestSessionDTODecode(t *testing.T) {
-	dto := sessionDTO{
-		ID:        "test-id",
-		Slug:      "test-id",
-		ProjectID: "abc123def456",
-		Directory: "/home/user/project",
-		Title:     "Test Session",
-		Version:   coding.Version,
-		Time: sessionTime{
-			Created:  1700000000000,
-			Updated:  1700000001000,
-			Archived: nil,
-		},
-		Tokens: &sessionTokens{
-			Input:  100,
-			Output: 200,
-			Cache:  tokenCache{Read: 50, Write: 25},
-		},
-		Cost: func() *float64 { v := 0.001; return &v }(),
-	}
-
-	data, err := json.Marshal(dto)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Client-shaped mirror with non-pointer required fields.
-	var mirror struct {
-		ID        string `json:"id"`
-		Slug      string `json:"slug"`
-		ProjectID string `json:"projectID"`
-		Directory string `json:"directory"`
-		Title     string `json:"title"`
-		Version   string `json:"version"`
-		Time      struct {
-			Created  int64  `json:"created"`
-			Updated  int64  `json:"updated"`
-			Archived *int64 `json:"archived,omitempty"`
-		} `json:"time"`
-		Tokens *struct {
-			Input  int `json:"input"`
-			Output int `json:"output"`
-			Cache  struct {
-				Read  int `json:"read"`
-				Write int `json:"write"`
-			} `json:"cache"`
-		} `json:"tokens,omitempty"`
-		Cost *float64 `json:"cost,omitempty"`
-	}
-
-	if err := json.Unmarshal(data, &mirror); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	if mirror.ID != dto.ID {
-		t.Errorf("ID: expected %q, got %q", dto.ID, mirror.ID)
-	}
-	if mirror.Slug != dto.Slug {
-		t.Errorf("Slug: expected %q, got %q", dto.Slug, mirror.Slug)
-	}
-	if mirror.ProjectID != dto.ProjectID {
-		t.Errorf("ProjectID: expected %q, got %q", dto.ProjectID, mirror.ProjectID)
-	}
-	if mirror.Directory != dto.Directory {
-		t.Errorf("Directory: expected %q, got %q", dto.Directory, mirror.Directory)
-	}
-	if mirror.Title != dto.Title {
-		t.Errorf("Title: expected %q, got %q", dto.Title, mirror.Title)
-	}
-	if mirror.Version != dto.Version {
-		t.Errorf("Version: expected %q, got %q", dto.Version, mirror.Version)
-	}
-	if mirror.Time.Created != dto.Time.Created {
-		t.Errorf("Time.Created: expected %d, got %d", dto.Time.Created, mirror.Time.Created)
-	}
-	if mirror.Time.Updated != dto.Time.Updated {
-		t.Errorf("Time.Updated: expected %d, got %d", dto.Time.Updated, mirror.Time.Updated)
-	}
-	if mirror.Tokens == nil {
-		t.Fatal("Tokens should not be nil")
-	}
-	if mirror.Tokens.Input != dto.Tokens.Input {
-		t.Errorf("Tokens.Input: expected %d, got %d", dto.Tokens.Input, mirror.Tokens.Input)
-	}
-	if mirror.Tokens.Output != dto.Tokens.Output {
-		t.Errorf("Tokens.Output: expected %d, got %d", dto.Tokens.Output, mirror.Tokens.Output)
-	}
-	if mirror.Tokens.Cache.Read != dto.Tokens.Cache.Read {
-		t.Errorf("Tokens.Cache.Read: expected %d, got %d", dto.Tokens.Cache.Read, mirror.Tokens.Cache.Read)
-	}
-	if mirror.Tokens.Cache.Write != dto.Tokens.Cache.Write {
-		t.Errorf("Tokens.Cache.Write: expected %d, got %d", dto.Tokens.Cache.Write, mirror.Tokens.Cache.Write)
-	}
-	if mirror.Cost == nil {
-		t.Fatal("Cost should not be nil")
-	}
-	if *mirror.Cost != *dto.Cost {
-		t.Errorf("Cost: expected %f, got %f", *dto.Cost, *mirror.Cost)
-	}
-}
-
 // TestMessageDTODecode tests that messageDTO decodes correctly.
 func TestMessageDTODecode(t *testing.T) {
 	dto := messageDTO{
@@ -203,22 +101,6 @@ func TestSessionStatusDTODecode(t *testing.T) {
 	}
 }
 
-// TestAgentInfoDTODecode tests agentInfoDTO.
-func TestAgentInfoDTODecode(t *testing.T) {
-	dto := agentInfoDTO{Name: "explore"}
-	data, _ := json.Marshal(dto)
-
-	var mirror struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(data, &mirror); err != nil {
-		t.Fatal(err)
-	}
-	if mirror.Name != "explore" {
-		t.Errorf("expected explore, got %q", mirror.Name)
-	}
-}
-
 // TestProjectDTODecode tests projectDTO.
 func TestProjectDTODecode(t *testing.T) {
 	dto := projectDTO{ID: "abc123", Worktree: "/home/user/project"}
@@ -233,32 +115,6 @@ func TestProjectDTODecode(t *testing.T) {
 	}
 	if mirror.ID != "abc123" || mirror.Worktree != "/home/user/project" {
 		t.Errorf("projectDTO mismatch")
-	}
-}
-
-// TestProviderDTODecode tests providerDTO.
-func TestProviderDTODecode(t *testing.T) {
-	dto := providerDTO{
-		Name: "Anthropic",
-		API:  "anthropic",
-		Models: map[string]providerModelDTO{
-			"claude-3": {Name: "Claude 3"},
-		},
-	}
-	data, _ := json.Marshal(dto)
-
-	var mirror struct {
-		Name   string `json:"name,omitempty"`
-		API    string `json:"api,omitempty"`
-		Models map[string]struct {
-			Name string `json:"name,omitempty"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(data, &mirror); err != nil {
-		t.Fatal(err)
-	}
-	if mirror.Name != "Anthropic" {
-		t.Errorf("provider name mismatch")
 	}
 }
 

@@ -98,7 +98,17 @@ func (s *Server) apiHealth(w http.ResponseWriter, r *http.Request) {
 
 // GET /config
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
-	s.writeJSON(w, http.StatusOK, configDTO{Model: s.modelSpec})
+	s.writeJSON(w, http.StatusOK, configDTO{
+		Command:      map[string]any{},
+		Plugin:       []any{},
+		Model:        s.modelSpec,
+		Mode:         map[string]any{},
+		Agent:        map[string]any{},
+		Provider:     map[string]any{},
+		MCP:          map[string]any{},
+		Instructions: []any{},
+		Permission:   map[string]any{},
+	})
 }
 
 // GET /api/command
@@ -394,17 +404,49 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 	byProvider := make(map[string]providerDTO)
 	for _, m := range models {
 		pid := codinghost.ModelProviderID(m)
-		pdto := byProvider[pid]
-		pdto.Name = pid
-		pdto.API = string(m.ProviderMeta.API)
-		if pdto.Models == nil {
-			pdto.Models = make(map[string]providerModelDTO)
+		pdto, ok := byProvider[pid]
+		if !ok {
+			pdto = providerDTO{
+				ID:      pid,
+				Name:    pid,
+				Source:  "api",
+				Env:     []string{},
+				Options: map[string]any{},
+				Models:  map[string]providerModelDTO{},
+			}
 		}
-		pdto.Models[m.ID] = providerModelDTO{Name: m.DisplayName}
+		pdto.Models[m.ID] = providerModelDTO{
+			ID:           m.ID,
+			ProviderID:   pid,
+			Name:         m.DisplayName,
+			API:          map[string]any{},
+			Capabilities: map[string]any{},
+			Cost:         map[string]any{},
+			Limit:        map[string]any{},
+			Options:      map[string]any{},
+			Headers:      map[string]any{},
+			Variants:     map[string]any{},
+		}
 		byProvider[pid] = pdto
 	}
 
-	s.writeJSON(w, http.StatusOK, byProvider)
+	ids := make([]string, 0, len(byProvider))
+	for pid := range byProvider {
+		ids = append(ids, pid)
+	}
+	slices.Sort(ids)
+
+	providers := make([]providerDTO, 0, len(ids))
+	for _, pid := range ids {
+		providers = append(providers, byProvider[pid])
+	}
+
+	// The default map has one entry per provider that answers the startup spec.
+	def := map[string]string{}
+	if providerID, modelID, ok := s.sessionModelParts(); ok {
+		def[providerID] = modelID
+	}
+	s.writeJSON(w, http.StatusOK, providersResponseDTO{Providers: providers, Default: def})
 }
 
 // GET /provider
@@ -422,11 +464,15 @@ func (s *Server) listProviderNames(w http.ResponseWriter, r *http.Request) {
 
 // GET /agent
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
-	agents := []agentInfoDTO{
-		{Name: "explore"},
-		{Name: "general"},
-		{Name: "propose"},
-		{Name: "build"},
+	names := []string{"explore", "general", "propose", "build"}
+	agents := make([]agentInfoDTO, 0, len(names))
+	for _, name := range names {
+		agents = append(agents, agentInfoDTO{
+			Name:       name,
+			Mode:       "primary",
+			Permission: []any{},
+			Options:    map[string]any{},
+		})
 	}
 	s.writeJSON(w, http.StatusOK, agents)
 }
@@ -821,7 +867,13 @@ func (s *Server) sessionMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dtos := s.entriesToMessages(entries, id)
+	root, _ := filepath.EvalSymlinks(s.services.CWD())
+	cwd := rec.Header.CWD
+	if cwd == "" {
+		cwd = root
+	}
+	providerID, modelID, _ := s.sessionModelParts()
+	dtos := entriesToMessages(entries, id, cwd, root, providerID, modelID)
 	s.writeJSON(w, http.StatusOK, dtos)
 }
 
@@ -853,6 +905,19 @@ func sessionEntries(rec sessionRecord, live *codinghost.Session, limit int) ([]i
 
 // ─── DTO Builders ────────────────────────────────────────────────────────
 
+// sessionModelParts splits the server's startup model spec "provider/model" on
+// the first "/". ok is false when modelSpec has no slash (including empty); the
+// returned ids are then "", "". It is the single source for the provider/model
+// pair used by /config/providers default, the session model, and the message
+// model fallback.
+func (s *Server) sessionModelParts() (providerID, modelID string, ok bool) {
+	providerID, modelID, ok = strings.Cut(s.modelSpec, "/")
+	if !ok {
+		return "", "", false
+	}
+	return providerID, modelID, true
+}
+
 func (s *Server) buildSessionDTO(rec sessionRecord, live *codinghost.Session) sessionDTO {
 	// Compute Updated time: if ModTime is zero (live session with no file yet),
 	// fall back to Created. This avoids emitting a negative epoch (year 1).
@@ -861,43 +926,52 @@ func (s *Server) buildSessionDTO(rec sessionRecord, live *codinghost.Session) se
 		updated = parseRFC3339NanoToMillis(rec.Header.Timestamp)
 	}
 
+	root, _ := filepath.EvalSymlinks(s.services.CWD())
+	pid := projectID(root)
+
 	dto := sessionDTO{
 		ID:        rec.ID,
 		Slug:      rec.ID, // slug = id
-		ProjectID: projectID(func() string { r, _ := filepath.EvalSymlinks(s.services.CWD()); return r }()),
+		ProjectID: pid,
 		Directory: rec.Header.CWD,
 		Title:     rec.Name,
 		Version:   version.Version,
+		Summary:   sessionSummary{},
 		Time: sessionTime{
 			Created:  parseRFC3339NanoToMillis(rec.Header.Timestamp),
 			Updated:  updated,
 			Archived: rec.Archived,
 		},
+		Project: projectDTO{ID: pid, Worktree: root},
 	}
 
-	// If live, add tokens and cost only when they have meaningful values.
-	// The backlog item forbids emitting zeros that read as real totals.
+	// Tokens and cost are always present: a disk-only session emits zeros,
+	// which is the honest "wopr does not know". This supersedes the serve-1
+	// omission rule for these V1 DTOs (the captured session has both keys).
 	if live != nil {
 		acc := live.Inner().Inner().Accounting()
-		hasTokens := acc.Tokens.Input != 0 || acc.Tokens.Output != 0 || acc.Tokens.CacheRead != 0 || acc.Tokens.CacheWrite != 0
-		if hasTokens {
-			dto.Tokens = &sessionTokens{
-				Input:  acc.Tokens.Input,
-				Output: acc.Tokens.Output,
-				Cache: tokenCache{
-					Read:  acc.Tokens.CacheRead,
-					Write: acc.Tokens.CacheWrite,
-				},
-			}
+		dto.Tokens = sessionTokens{
+			Input:  acc.Tokens.Input,
+			Output: acc.Tokens.Output,
+			Total:  acc.Tokens.Total,
+			Cache: tokenCache{
+				Read:  acc.Tokens.CacheRead,
+				Write: acc.Tokens.CacheWrite,
+			},
 		}
-		if !acc.Tokens.CostUnknown && acc.Tokens.Cost != 0 {
-			dto.Cost = &acc.Tokens.Cost
+		dto.Cost = acc.Tokens.Cost
+		if m := live.Inner().Model(); m != nil {
+			dto.Model = sessionModel{ID: m.ID, ProviderID: codinghost.ModelProviderID(m), Variant: "default"}
 		}
+	}
+	if dto.Model == (sessionModel{}) {
+		providerID, modelID, _ := s.sessionModelParts()
+		dto.Model = sessionModel{ID: modelID, ProviderID: providerID, Variant: "default"}
 	}
 
 	// Fallback: if directory is empty, use server root.
 	if dto.Directory == "" {
-		dto.Directory, _ = filepath.EvalSymlinks(s.services.CWD())
+		dto.Directory = root
 	}
 
 	// Fallback: if updated is zero (live with no file), use created.
@@ -908,7 +982,63 @@ func (s *Server) buildSessionDTO(rec sessionRecord, live *codinghost.Session) se
 	return dto
 }
 
-func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionID string) []messageDTO {
+// messageInfo builds messageInfoDTO for one message. assistant is the
+// streamed/persisted assistant message, or nil for a user/toolResult/system
+// entry (cost and tokens are then zero, finish is "", and the model falls back
+// to fallbackProvider/fallbackModel). created is the message's created time in
+// ms. It is called by entriesToMessages and by eventMapper.messageEnd so the
+// transcript and the SSE stream cannot drift on shape.
+func messageInfo(sessionID, cwd, root, entryID, role, parentID string, created int64,
+	assistant *agent.AssistantMessage, fallbackProvider, fallbackModel string) messageInfoDTO {
+	info := messageInfoDTO{
+		ID:         entryID,
+		SessionID:  sessionID,
+		Role:       role,
+		ParentID:   parentID,
+		Path:       messagePath{CWD: cwd, Root: root},
+		Time:       messageTime{Created: created},
+		ProviderID: fallbackProvider,
+		ModelID:    fallbackModel,
+	}
+	if assistant == nil {
+		return info
+	}
+	if u := assistant.Usage; u != nil {
+		info.Cost = u.Cost.Total
+		info.Tokens = messageTokens{
+			Total:  u.TotalTokens,
+			Input:  u.Input,
+			Output: u.Output,
+			Cache:  tokenCache{Read: u.CacheRead, Write: u.CacheWrite},
+		}
+		if u.Reasoning != nil {
+			info.Tokens.Reasoning = *u.Reasoning
+		}
+	}
+	if assistant.Provider != "" {
+		info.ProviderID = assistant.Provider
+	}
+	if assistant.ModelID != "" {
+		info.ModelID = assistant.ModelID
+	}
+	info.Finish = finishFromStopReason(assistant.StopReason)
+	return info
+}
+
+// finishFromStopReason maps wopr's stop reason onto the client's finish string.
+// toolUse is the one value spelled differently; every other reason passes
+// through raw, and an empty reason stays empty.
+func finishFromStopReason(reason ai.StopReason) string {
+	if reason == ai.StopReasonToolUse {
+		return "tool-calls"
+	}
+	return string(reason)
+}
+
+// entriesToMessages projects transcript entries into messageDTOs. It reads no
+// Server state: cwd/root and the model fallback are passed by the caller.
+func entriesToMessages(entries []icodingagent.SessionEntry, sessionID, cwd, root,
+	fallbackProvider, fallbackModel string) []messageDTO {
 	messages := make([]messageDTO, 0)
 	var pendingTool map[string]*messageDTO // callID -> messageDTO with pending tool part
 
@@ -921,9 +1051,13 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 			continue
 		}
 
-		// Extract role and content from AgentMessage union.
-		var role string
-		var content []ai.ContentBlock
+		// Extract role, content and the assistant message (nil for the others)
+		// from the AgentMessage union.
+		var (
+			role      string
+			content   []ai.ContentBlock
+			assistant *agent.AssistantMessage
+		)
 		switch {
 		case me.Message.User != nil:
 			role = me.Message.User.Role
@@ -933,6 +1067,7 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 			}
 		case me.Message.Assistant != nil:
 			role = me.Message.Assistant.Role
+			assistant = me.Message.Assistant
 			content = make([]ai.ContentBlock, len(me.Message.Assistant.Content))
 			for i, c := range me.Message.Assistant.Content {
 				content[i] = c
@@ -954,13 +1089,17 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 			content = nil
 		}
 
+		parentID := ""
+		if e.Base.ParentID != nil {
+			parentID = *e.Base.ParentID
+		}
+		created := parseRFC3339NanoToMillis(e.Base.Timestamp)
+
 		msg := messageDTO{
-			Info: messageInfoDTO{
-				ID:        e.Base.ID,
-				SessionID: sessionID,
-				Role:      role,
-				Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
-			},
+			// A message with no content still marshals parts as [], never null.
+			Parts: []partDTO{},
+			Info: messageInfo(sessionID, cwd, root, e.Base.ID, role, parentID, created,
+				assistant, fallbackProvider, fallbackModel),
 		}
 
 		for i, block := range content {
@@ -1036,12 +1175,8 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 				} else {
 					// Unmatched toolResult: create a new assistant message with one tool part.
 					newMsg := messageDTO{
-						Info: messageInfoDTO{
-							ID:        e.Base.ID,
-							SessionID: sessionID,
-							Role:      "assistant",
-							Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
-						},
+						Info: messageInfo(sessionID, cwd, root, e.Base.ID, "assistant", parentID, created,
+							nil, fallbackProvider, fallbackModel),
 						Parts: []partDTO{
 							{
 								ID:        partID(e.Base.ID, "tool", 0, callID),
@@ -1059,12 +1194,8 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 			} else {
 				// No pending tools at all.
 				newMsg := messageDTO{
-					Info: messageInfoDTO{
-						ID:        e.Base.ID,
-						SessionID: sessionID,
-						Role:      "assistant",
-						Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
-					},
+					Info: messageInfo(sessionID, cwd, root, e.Base.ID, "assistant", parentID, created,
+						nil, fallbackProvider, fallbackModel),
 					Parts: []partDTO{
 						{
 							ID:        partID(e.Base.ID, "tool", 0, callID),
@@ -1083,12 +1214,8 @@ func (s *Server) entriesToMessages(entries []icodingagent.SessionEntry, sessionI
 
 		if role == "bashExecution" {
 			msg = messageDTO{
-				Info: messageInfoDTO{
-					ID:        e.Base.ID,
-					SessionID: sessionID,
-					Role:      "assistant",
-					Time:      messageTime{Created: parseRFC3339NanoToMillis(e.Base.Timestamp)},
-				},
+				Info: messageInfo(sessionID, cwd, root, e.Base.ID, "assistant", parentID, created,
+					nil, fallbackProvider, fallbackModel),
 				Parts: []partDTO{
 					{
 						// ponytail: the bash execution part keeps its own -bash

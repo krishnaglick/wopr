@@ -1307,8 +1307,13 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-kkcode-dto-shape-parity — KKCode aborts with "cannot convert undefined value to object": wopr's V1 DTOs are skinnier than opencode's real ones
 
-- **Status:** READY — surfaced 2026-10-07 by driving KKCode against `wopr serve` through a logging proxy;
-  the `/file` entry-shape fix (commit `78773a2`) cleared the first such crash, this is the next.
+- **Status:** DONE — shipped on `wave-kkcode-dto-shape-parity`, merged into `main`; surfaced by driving KKCode against `wopr serve` through a logging proxy;
+  the `/file` entry-shape fix (commit `78773a2`) cleared the first such crash, this was the next.
+  `GET /config` now carries the 12 captured keys, `GET /config/providers` the structural
+  `{providers:[…],default:{}}` (never a real `key`), sessions gain `agent`/`model{…}` (never null)/
+  `path`/`project`/`summary`/`tokens{reasoning,total}`, `/agent` the 13-field item, and message info the
+  full key set with a `path` object and `parts[].snapshot`; the `message.updated` stream tracks the same
+  shape through one shared builder. Spec: `docs/plans/2026-10-07-serve-kkcode-dto-shape-parity.md`.
 - **Why:** KKCode decodes opencode's **actual** response objects, and wopr's DTOs omit objects/arrays the
   client then calls `Object.keys`/spread on, which throws. Captured exact shapes from opencode 1.18.34 into
   `/tmp/opencode-shapes/*.json` (regenerate with `/tmp/capture_shapes.py`, reading `OPENCODE_SERVER_PASSWORD`
@@ -1337,3 +1342,15 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Notes:** This is compatibility with opencode's real shapes, not the V2 `/api` surface. The old V1 client
   (`grapeot` @ 2d0e7bd) may not tolerate the `config/providers` structural change — flag it; KKCode is the
   target. `serve-test-faux-fallback-in-production` above is a prerequisite for a truthful `model` field.
+
+### serve-session-model-from-change-entry — disk-only session `model` reports the server default, not the session's own last model
+
+- **Status:** READY — surfaced 2026-10-07 by the `serve-kkcode-dto-shape-parity` wave.
+- **Why:** `buildSessionDTO` has no model in `sessionRecord` (`serve_read.go`), so a session with no live
+  counterpart reports the server's current `modelSpec` as `session.model`. A session last used with another
+  model, or created by another server run, is misreported. The transcript already records it in the newest
+  `model_change` entry (`internal/codingagent/session.go:64`, `ModelChangeEntry{Provider, ModelID}`).
+- **Files:** `internal/codingagent/serve/serve_handlers.go` (`buildSessionDTO`), possibly `serve_read.go`.
+- **Gates:** a test that a disk-only session whose `model_change` names another model reports that model;
+  `make check`. It must read from the transcript tail already parsed for the session list, not add a second
+  full-file read per session.

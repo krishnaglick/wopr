@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -301,7 +302,13 @@ func (s *Server) assistantMessageDTO(sess *codinghost.Session, entryID string) (
 	if start < 0 {
 		return messageDTO{}, false
 	}
-	for _, dto := range s.entriesToMessages(entries[start:], sess.ID()) {
+	root, _ := filepath.EvalSymlinks(s.services.CWD())
+	cwd := sess.Inner().CWD()
+	if cwd == "" {
+		cwd = root
+	}
+	providerID, modelID, _ := s.sessionModelParts()
+	for _, dto := range entriesToMessages(entries[start:], sess.ID(), cwd, root, providerID, modelID) {
 		if dto.Info.ID == entryID {
 			return dto, true
 		}
