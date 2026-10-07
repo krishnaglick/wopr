@@ -5,15 +5,18 @@
 ## Start the server
 
 ```text
-wopr serve [--port N] [--hostname H]
+wopr serve [--port N] [--hostname H] [--dir PATH]
 ```
 
-`wopr serve` binds one address and serves the project in the working directory. Both flags are optional:
+`wopr serve` binds one address and serves the launch directory (`--dir`, default the current directory). The flags are optional:
 
+- `--dir` sets the directory to serve; it defaults to the current directory.
 - `--port` overrides `server.port`, whose default is `4096`.
 - `--hostname` overrides `server.hostname`, whose default is `127.0.0.1`.
 
-The process prints `wopr serve listening on http://<addr>` once it is up. Set the two values in [settings](settings.md#server) to make the choice persistent.
+A client's `directory` query validates against the served root (400 on a mismatch); it does not select a directory. `server.allowedRoots` restricts which directories `wopr serve` may serve — a global-only launcher guardrail against misconfiguration, not a network boundary. See [settings](settings.md#server).
+
+The process prints `wopr serve listening on http://<addr>` once it is up. Set the values in [settings](settings.md#server) to make the choice persistent.
 
 ## No authentication
 
@@ -61,7 +64,7 @@ The server registers 30 routes. Twenty-four are implemented; six answer `501` wi
 | `GET` | /question | 200 | Pending `questionDTO[]`, `[]` when there is none. Never 404; that status means the host is gone. |
 | `POST` | /question/{id}/reply | 200 | Body is exactly one of `choice` or `other`; 404 gone, 400 invalid, 413 over 16 MiB; publishes `question.replied`. |
 | `POST` | /question/{id}/reject | 200 | No body read; 404 gone; publishes `question.rejected`. |
-| `GET` | /file | 200 | `fileNodeDTO[]` directory listing inside the project root; 403 outside the root, 404 missing, 400 not a directory. Query `path` only. |
+| `GET` | /file | 200 | `fileNodeDTO[]` directory listing inside the project root; 403 outside the root, 404 missing, 400 not a directory. Query `path`, `directory`. |
 | `GET` | /file/content | 200 | `{"content": …}` for a text file inside the root; 403 outside the root, including through a symlink, 404 missing, 400 directory or non-regular file, 413 over 8 MiB, 415 non-text, 500 read failure. Query `path`, `directory`. |
 | `GET` | /find/file | 200 | `fileNodeDTO[]` walk of the root, skipping dot-entries and `node_modules`; `query`, `limit` default 50, max 100. |
 | `GET` | /file/status | 200 | `fileStatusDTO[]` for the working tree, at most 500 entries. |

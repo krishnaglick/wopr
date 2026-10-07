@@ -474,6 +474,10 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 // test can swap a component for a symlink deterministically. Production always
 // passes nil.
 func (s *Server) serveListFiles(w http.ResponseWriter, r *http.Request, beforeOpen func()) {
+	if _, errDTO, status := s.directoryParam(r); errDTO != nil {
+		s.writeJSON(w, status, errDTO)
+		return
+	}
 	root := s.services.CWD()
 	q := r.URL.Query().Get("path")
 	if q == "" {

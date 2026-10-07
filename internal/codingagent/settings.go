@@ -173,6 +173,9 @@ type ServerSettings struct {
 	Port int `json:"port,omitempty"`
 	// Hostname is the address wopr serve binds. "" means the default.
 	Hostname string `json:"hostname,omitempty"`
+	// AllowedRoots restricts which directories wopr serve may serve. Empty
+	// means unrestricted. Read from the global settings layer only.
+	AllowedRoots []string `json:"allowedRoots,omitempty"`
 }
 
 // CompactionSettingsJSON is settings.compaction.
@@ -733,6 +736,24 @@ func (s Settings) GetServerHostname() string {
 		return defaultServerHostname
 	}
 	return s.Server.Hostname
+}
+
+// GetServerAllowedRoots returns the configured serve roots with ~ and file://
+// forms expanded. An invalid file URL is an error. It does not make paths
+// absolute or resolve symlinks; resolveServeRoot does that.
+func (s Settings) GetServerAllowedRoots() ([]string, error) {
+	if s.Server == nil || len(s.Server.AllowedRoots) == 0 {
+		return nil, nil
+	}
+	roots := make([]string, 0, len(s.Server.AllowedRoots))
+	for _, root := range s.Server.AllowedRoots {
+		expanded, err := normalizeSettingsPath(root)
+		if err != nil {
+			return nil, err
+		}
+		roots = append(roots, expanded)
+	}
+	return roots, nil
 }
 
 // CompactionConfig is the resolved compaction settings (compaction imports
