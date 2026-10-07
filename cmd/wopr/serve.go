@@ -78,7 +78,7 @@ func runServeCommand(args []string) int {
 	// The allowlist is a global-layer guardrail: a served project must not be
 	// able to widen it. The manager's cwd is irrelevant to global settings.
 	globalSettings := codingagent.NewSettingsManagerWithProjectTrust(".", agentDir, false)
-	allowedRoots, err := globalSettings.GetGlobalSettings().GetServerAllowedRoots()
+	allowedRoots, err := globalServeAllowedRoots(globalSettings)
 	if err != nil {
 		return failf("wopr serve: %v", err)
 	}
@@ -153,6 +153,18 @@ func runServeCommand(args []string) int {
 		return failf("wopr serve: %v", err)
 	}
 	return 0
+}
+
+// globalServeAllowedRoots returns the global-layer serve allowlist. A global
+// settings file that is present but cannot be parsed is an error, so wopr
+// serve fails closed rather than serving unrestricted. An absent or
+// successfully parsed layer with an empty server.allowedRoots stays
+// unrestricted (nil, nil).
+func globalServeAllowedRoots(sm *codingagent.SettingsManager) ([]string, error) {
+	if err := sm.GlobalLoadError(); err != nil {
+		return nil, fmt.Errorf("global settings: %w", err)
+	}
+	return sm.GetGlobalSettings().GetServerAllowedRoots()
 }
 
 // resolveServeRoot returns the directory wopr serve will serve: --dir when
