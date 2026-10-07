@@ -1304,3 +1304,36 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   message or omit the field.
 - **Files:** `cmd/wopr/serve.go`, possibly `cmd/wopr/startup_model.go`.
 - **Gates:** a behavioral test for the no-model state; `make check`.
+
+### serve-kkcode-dto-shape-parity — KKCode aborts with "cannot convert undefined value to object": wopr's V1 DTOs are skinnier than opencode's real ones
+
+- **Status:** READY — surfaced 2026-10-07 by driving KKCode against `wopr serve` through a logging proxy;
+  the `/file` entry-shape fix (commit `78773a2`) cleared the first such crash, this is the next.
+- **Why:** KKCode decodes opencode's **actual** response objects, and wopr's DTOs omit objects/arrays the
+  client then calls `Object.keys`/spread on, which throws. Captured exact shapes from opencode 1.18.34 into
+  `/tmp/opencode-shapes/*.json` (regenerate with `/tmp/capture_shapes.py`, reading `OPENCODE_SERVER_PASSWORD`
+  from the running server's `/proc/<pid>/environ`; do not commit those files). Deltas:
+  - `GET /config/providers` — wopr returns a **map** `{providerID:{name,api,models}}`; opencode returns
+    `{providers:[{id,name,source,env:[],key,options:{},models:{}}], default:{providerID:modelID}}`.
+    **Structural change** (breaks the old shape). Never emit a real provider `key` — use `""`.
+  - `GET /config` — wopr returns `{model}`; opencode returns `$schema,agent{},command{},instructions[],
+    mcp{},mode{},model,permission{},plugin[],provider{},subagent_depth,username`.
+  - session object (list/`experimental`/get/create) — wopr omits `agent`, `model` (currently `null`),
+    `path`, `project{id,worktree}`, `summary{additions,deletions,files}`; `tokens` misses `reasoning`/`total`.
+    opencode: `{id,slug,projectID,directory,path,title,agent,model{id,providerID,variant},version,
+    summary,cost,tokens{input,output,reasoning,cache{read,write}},time{created,updated},project}`.
+  - `GET /agent` — wopr returns `{name}`; opencode items are `{name,description,mode,native,hidden,topP,
+    temperature,color,permission[],variant,prompt,options{},steps}`.
+  - message info (`GET /session/{id}/message`) — wopr returns `{id,sessionID,role,time{created}}`; opencode
+    adds `agent,cost,finish,mode,modelID,parentID,path{cwd,root},providerID,tokens{total,input,output,
+    reasoning,cache}`; parts may carry `snapshot`.
+  - **Rule:** every object/array field the captured shape has must be present with the right JSON type even
+    when wopr has no data — an absent (undefined) object is what throws, a `{}`/`[]`/zero is safe.
+- **Files:** `internal/codingagent/serve/serve_dto.go`, `serve_handlers.go` (the affected handlers),
+  `docs/site/docs/server.md` (endpoint/response notes).
+- **Gates:** hermetic tests asserting each route's body decodes with the captured key set and correct JSON
+  types; the existing suite; `make check`. Live: KKCode completes connect → folder → session → streamed
+  prompt with no JS error.
+- **Notes:** This is compatibility with opencode's real shapes, not the V2 `/api` surface. The old V1 client
+  (`grapeot` @ 2d0e7bd) may not tolerate the `config/providers` structural change — flag it; KKCode is the
+  target. `serve-test-faux-fallback-in-production` above is a prerequisite for a truthful `model` field.
