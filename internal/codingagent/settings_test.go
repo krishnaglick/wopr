@@ -297,6 +297,12 @@ func TestUnmarshalJSONRejectsUndecodableServerGuardrail(t *testing.T) {
 		`{"server":{"allowedRoots":[5]}}`,
 		`{"server":{"allowedRoots":{}}}`,
 		`{"server":{"allowedRoots":["/a",5]}}`,
+		// encoding/json matches struct keys case-insensitively, so these must
+		// be classified the same as their lowercase forms.
+		`{"Server":{"allowedRoots":"x"}}`,
+		`{"SERVER":{"allowedRoots":[5]}}`,
+		`{"server":{"AllowedRoots":"x"}}`,
+		`{"Server":{"AllowedRoots":{}}}`,
 	}
 	for _, body := range reject {
 		var s Settings
@@ -314,6 +320,16 @@ func TestUnmarshalJSONRejectsUndecodableServerGuardrail(t *testing.T) {
 	}
 	if s.Server == nil || !slices.Equal(s.Server.AllowedRoots, []string{"/a"}) {
 		t.Fatalf("server = %+v, want allowedRoots [/a]", s.Server)
+	}
+
+	// encoding/json resolves the case variants, so the guard must not
+	// over-reject a valid case-variant list.
+	var caseVariant Settings
+	if err := json.Unmarshal([]byte(`{"Server":{"AllowedRoots":["/a"]}}`), &caseVariant); err != nil {
+		t.Fatalf("Unmarshal case-variant list = %v, want nil", err)
+	}
+	if caseVariant.Server == nil || !slices.Equal(caseVariant.Server.AllowedRoots, []string{"/a"}) {
+		t.Fatalf("server = %+v, want allowedRoots [/a]", caseVariant.Server)
 	}
 
 	if err := json.Unmarshal([]byte(`{"server":null}`), &s); err != nil {

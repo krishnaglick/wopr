@@ -35,32 +35,39 @@ Add an unexported helper in `internal/codingagent/settings.go` and call it from 
 ```go
 // checkServerRaw rejects a server/allowedRoots value that decodeTolerant would
 // otherwise silently drop, which would leave the serve allowlist guardrail off.
-// Scoped to the server key only; every other setting stays tolerant.
+// Keys are matched case-insensitively to mirror encoding/json, which resolves
+// the "server"/"allowedRoots" struct tags regardless of case; an exact lookup
+// would let a case-variant key bypass the check. Scoped to the server key only;
+// every other setting stays tolerant.
 func checkServerRaw(raw map[string]any) error {
-	v, ok := raw["server"]
-	if !ok || v == nil { // absent or null: treated as absent
-		return nil
-	}
-	obj, ok := v.(map[string]any)
-	if !ok {
-		return errors.New("server must be a JSON object")
-	}
-	roots, ok := obj["allowedRoots"]
-	if !ok || roots == nil {
-		return nil
-	}
-	items, ok := roots.([]any)
-	if !ok {
-		return errors.New("server.allowedRoots must be an array of strings")
-	}
-	for _, item := range items {
-		if _, ok := item.(string); !ok {
-			return errors.New("server.allowedRoots must be an array of strings")
+	for key, v := range raw {
+		if !strings.EqualFold(key, "server") || v == nil { // absent or null: treated as absent
+			continue
+		}
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return errors.New("server must be a JSON object")
+		}
+		for innerKey, roots := range obj {
+			if !strings.EqualFold(innerKey, "allowedRoots") || roots == nil {
+				continue
+			}
+			items, ok := roots.([]any)
+			if !ok {
+				return errors.New("server.allowedRoots must be an array of strings")
+			}
+			for _, item := range items {
+				if _, ok := item.(string); !ok {
+					return errors.New("server.allowedRoots must be an array of strings")
+				}
+			}
 		}
 	}
 	return nil
 }
 ```
+
+Key matching is case-insensitive (`strings.EqualFold`), because `encoding/json` matches struct keys case-insensitively: the `server` tag also matches `Server`, `SERVER`, `sErVeR`, and the `allowedRoots` tag also matches `AllowedRoots` and friends. An exact `raw["server"]` / `obj["allowedRoots"]` lookup does not see those variants, so the guard would be skipped while the decoder still resolves the variant into `Server.AllowedRoots` — the bypass this change closes. Iterating every matching key (rather than stopping at the first) also keeps the check fail-closed when both a good and a bad case-variant key are present.
 
 Call site in `UnmarshalJSON` (settings.go:266): immediately after the `json.Unmarshal(data, &raw)` guard's early `return err` (settings.go:268-270) and before the `skills` rewrite (settings.go:271), i.e. at ~line 270. Keep it before `decodeTolerant` because `decodeTolerant` mutates `raw` in place, so the check must see the original JSON. `skills`/`retry` rewrites never touch `server`, so placement relative to them is immaterial.
 
@@ -74,9 +81,11 @@ Why this is enough: `errors.New` from `UnmarshalJSON` is returned verbatim by `j
 |---|---|
 | `{"server":5}` | load **error** → serve refuses |
 | `{"server":{"allowedRoots":"x"}}` | load **error** → serve refuses |
+| `{"Server":{"allowedRoots":"x"}}` | load **error** → serve refuses (case-variant key) |
 | `{"server":{"allowedRoots":[5]}}` | load **error** → serve refuses |
 | `{"server":{"allowedRoots":{}}}` | load **error** → serve refuses |
 | `{"server":{"allowedRoots":["/a",5]}}` | load **error** → serve refuses |
+| `{"Server":{"AllowedRoots":["/a"]}}` | tolerated; `Server.AllowedRoots == ["/a"]` |
 | `{"server":{"port":7777}}` | tolerated; `roots == nil, err == nil` |
 | `{"server":{"port":"x","allowedRoots":["/a"]}}` | tolerated; `port` dropped, `allowedRoots==["/a"]` |
 | `{"theme":"dark","skills":["a",5,"b"]}` | tolerated; unrelated key dropped only |
@@ -107,6 +116,7 @@ Must stay green, unmodified: `TestSettingsDropsOnlyTheBadKey` (`internal/codinga
 No run-command test for `{"server":{"port":"x"}}` is added: that path stays tolerant and would start serving, which is the intended behavior, not a refusal.
 
 ## Root cause and propagation (verified file:line)
+- A first cut of `checkServerRaw` looked up `raw["server"]` / `obj["allowedRoots"]` exactly. `encoding/json` resolves struct tags case-insensitively, so `{"Server":{"allowedRoots":"x"}}`, `{"SERVER":{"allowedRoots":[5]}}`, and `{"server":{"AllowedRoots":"x"}}` skipped the exact-key check yet still decoded into `Server`, leaving the allowlist empty and `resolveServeRoot` serving unrestricted. An exact-key lookup is therefore a bypass, not a hardening; the check must match the same keys `encoding/json` resolves (`strings.EqualFold`).
 - `Settings.UnmarshalJSON` (settings.go:266) → `decodeTolerant` (settings.go:308): a `*json.UnmarshalTypeError` path is deleted (`deleteJSONPath`) and decoding retries, so the four listed inputs parse "successfully" with an empty allowlist.
 - `loadSettingsFile` (settings.go:1288) `json.Unmarshal`s into `Settings`; a custom error from `UnmarshalJSON` is returned verbatim.
 - `Load` (settings.go:942) sets `sm.globalLoadErr = sm.loadLayer(...)`; `loadLayer` (settings.go:956) records and returns it, leaving the layer at its zero value.
