@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -23,7 +24,7 @@ func runServeCommand(args []string) int {
 	if len(args) > 0 {
 		switch args[0] {
 		case "-h", "--help":
-			fmt.Println("Usage:\n  wopr serve [--port N] [--hostname H]\n\nStart the wopr serve daemon.")
+			fmt.Println("Usage:\n  wopr serve [--port N] [--hostname H] [--dir PATH]\n\nStart the wopr serve daemon.")
 			return 0
 		}
 	}
@@ -31,10 +32,11 @@ func runServeCommand(args []string) int {
 	flagPort := 0
 	flagHost := ""
 
-	var portVal, hostVal string
+	var portVal, hostVal, dirVal string
 	stringFlags := map[string]*string{
 		"--port":     &portVal,
 		"--hostname": &hostVal,
+		"--dir":      &dirVal,
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -42,7 +44,7 @@ func runServeCommand(args []string) int {
 		if p, ok := stringFlags[arg]; ok {
 			if i+1 >= len(args) || args[i+1] == "" {
 				fmt.Fprintf(os.Stderr, "wopr serve: %s requires a non-empty value\n", arg)
-				fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H]")
+				fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H] [--dir PATH]")
 				return 2
 			}
 			i++
@@ -52,11 +54,11 @@ func runServeCommand(args []string) int {
 		switch {
 		case strings.HasPrefix(arg, "-"):
 			fmt.Fprintf(os.Stderr, "wopr serve: unknown option: %s\n", arg)
-			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H]")
+			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H] [--dir PATH]")
 			return 2
 		default:
 			fmt.Fprintf(os.Stderr, "wopr serve: unexpected argument: %s\n", arg)
-			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H]")
+			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H] [--dir PATH]")
 			return 2
 		}
 	}
@@ -65,19 +67,25 @@ func runServeCommand(args []string) int {
 		p, err := strconv.Atoi(portVal)
 		if err != nil || p <= 0 {
 			fmt.Fprintf(os.Stderr, "wopr serve: --port requires a positive integer\n")
-			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H]")
+			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H] [--dir PATH]")
 			return 2
 		}
 		flagPort = p
 	}
 	flagHost = hostVal
 
-	cwd, err := os.Getwd()
+	agentDir := codingagent.AgentDir()
+	// The allowlist is a global-layer guardrail: a served project must not be
+	// able to widen it. The manager's cwd is irrelevant to global settings.
+	globalSettings := codingagent.NewSettingsManagerWithProjectTrust(".", agentDir, false)
+	allowedRoots, err := globalSettings.GetGlobalSettings().GetServerAllowedRoots()
 	if err != nil {
 		return failf("wopr serve: %v", err)
 	}
-	agentDir := codingagent.AgentDir()
-	globalSettings := codingagent.NewSettingsManagerWithProjectTrust(cwd, agentDir, false)
+	cwd, err := resolveServeRoot(dirVal, allowedRoots)
+	if err != nil {
+		return failf("wopr serve: %v", err)
+	}
 	projectTrusted, err := resolveProjectTrusted(context.Background(), projectTrustResolutionOptions{
 		CWD: cwd, Store: codingagent.NewProjectTrustStore(agentDir),
 		Default: globalSettings.GetDefaultProjectTrust(),
@@ -145,6 +153,40 @@ func runServeCommand(args []string) int {
 		return failf("wopr serve: %v", err)
 	}
 	return 0
+}
+
+// resolveServeRoot returns the directory wopr serve will serve: --dir when
+// given, else the invocation cwd. When allowedRoots is non-empty the resolved
+// root must be contained in one entry; the entries arrive already expanded
+// (~ / file://) from GetServerAllowedRoots. Containment is per path component,
+// never a raw string prefix. An unresolvable entry fails closed.
+func resolveServeRoot(dirFlag string, allowedRoots []string) (string, error) {
+	root, err := resolveWorkingDir(dirFlag)
+	if err != nil {
+		return "", err
+	}
+	if len(allowedRoots) == 0 {
+		return root, nil
+	}
+	for _, entry := range allowedRoots {
+		entryAbs, err := filepath.Abs(entry)
+		if err != nil {
+			return "", fmt.Errorf("server.allowedRoots: %q: %w", entry, err)
+		}
+		entryResolved, err := filepath.EvalSymlinks(entryAbs)
+		if err != nil {
+			return "", fmt.Errorf("server.allowedRoots: %q is not a valid directory: %w", entry, err)
+		}
+		info, err := os.Stat(entryResolved)
+		if err != nil || !info.IsDir() {
+			return "", fmt.Errorf("server.allowedRoots: %q is not a directory", entry)
+		}
+		rel, err := filepath.Rel(entryResolved, root)
+		if err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))) {
+			return root, nil
+		}
+	}
+	return "", fmt.Errorf("--dir %q is outside every server.allowedRoots entry", root)
 }
 
 func nonLoopbackBind(host string) bool {

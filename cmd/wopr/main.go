@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -345,9 +346,13 @@ func main() {
 	// timeout and ResponseHeaderTimeout explicitly disabled for long-lived SSE
 	// streams; provider-specific deadlines still come from context cancellation.
 
-	// Resolve directories.
-	// Working directory comes from os.Getwd() (no CLI override).
-	cwd := initialCWD
+	// Resolve the session directory. --dir picks it; otherwise the
+	// invocation cwd. A non-empty --dir must resolve to an existing
+	// directory; a bad value is a startup error, not a fallback.
+	cwd, err := resolveWorkingDir(flags.Dir)
+	if err != nil {
+		fatalf("error: %v", err)
+	}
 	agentDir := codingagent.AgentDir()
 
 	// Resolve the selected Session and its runtime cwd before constructing any
@@ -368,7 +373,7 @@ func main() {
 		if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
 			exitProcess(0)
 		}
-		manager := newSessionManagerWithDir(initialCWD, sessionDir)
+		manager := newSessionManagerWithDir(cwd, sessionDir)
 		selected, ok, selectErr := codingagent.SelectStartupSession(
 			manager.ListCurrentSessions,
 			manager.ListAllSessions,
@@ -389,7 +394,7 @@ func main() {
 		flags.ResumeAny = false
 		flags.Session = selected
 	}
-	startupSession, err := resolveStartupSessionSelection(flags, initialCWD, sessionDir)
+	startupSession, err := resolveStartupSessionSelection(flags, cwd, sessionDir)
 	if err != nil {
 		fatalf("error: %v", err)
 	}
@@ -429,7 +434,7 @@ func main() {
 		startupSession.missingCWD = nil
 	}
 	if flags.Continue && startupSession.resumePath == "" {
-		manager := newSessionManagerWithDir(initialCWD, sessionDir)
+		manager := newSessionManagerWithDir(cwd, sessionDir)
 		fmt.Fprintf(os.Stderr, "warning: no prior session in %s; starting fresh\n", manager.SessionDir())
 	}
 	cwd = startupSession.runtimeCWD
@@ -866,6 +871,41 @@ func resolveSessionDir(flagValue string, sm *codingagent.SettingsManager) (strin
 		return sm.GetSessionDir()
 	}
 	return "", nil
+}
+
+// resolveWorkingDir returns the session working directory: flagValue when
+// --dir was given, else the invocation cwd. A non-empty value resolves
+// against the invocation cwd, follows symlinks, and must be an existing
+// directory. Relative CLI paths (@file, --skill) deliberately still resolve
+// against the invocation cwd, not this directory.
+func resolveWorkingDir(flagValue string) (string, error) {
+	if flagValue == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("get cwd: %w", err)
+		}
+		abs, err := filepath.Abs(cwd)
+		if err != nil {
+			return "", fmt.Errorf("resolve cwd: %w", err)
+		}
+		return abs, nil
+	}
+	abs, err := filepath.Abs(flagValue)
+	if err != nil {
+		return "", fmt.Errorf("--dir %q: %w", flagValue, err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("--dir %q: %w", flagValue, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("--dir %q: %w", flagValue, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("--dir %q is not a directory", flagValue)
+	}
+	return resolved, nil
 }
 
 // configureHTTPTransportFromSettings applies the resolved provider request

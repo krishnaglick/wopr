@@ -4,8 +4,35 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
+
+func TestGetServerAllowedRoots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	s := Settings{Server: &ServerSettings{AllowedRoots: []string{"~/root", "file:///srv/data"}}}
+	got, err := s.GetServerAllowedRoots()
+	if err != nil {
+		t.Fatalf("GetServerAllowedRoots: %v", err)
+	}
+	want := []string{filepath.Join(home, "root"), "/srv/data"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("roots = %q, want %q", got, want)
+	}
+
+	// No server settings, or an empty list, is unrestricted.
+	if got, err := (Settings{}).GetServerAllowedRoots(); err != nil || got != nil {
+		t.Fatalf("empty = %q, %v; want nil, nil", got, err)
+	}
+
+	// An invalid file URL is an error.
+	s = Settings{Server: &ServerSettings{AllowedRoots: []string{"file://\x7f"}}}
+	if _, err := s.GetServerAllowedRoots(); err == nil {
+		t.Fatal("invalid file URL succeeded, want error")
+	}
+}
 
 func TestSettingsManagerUntrustedProjectIgnoresAndCannotWriteProjectSettings(t *testing.T) {
 	cwd := t.TempDir()

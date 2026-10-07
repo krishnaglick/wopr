@@ -1084,7 +1084,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### session-directory — let a session work in a directory other than the process cwd
 
-- **Status:** READY — spec at `docs/plans/2026-10-06-session-directory.md`,
+- **Status:** IN PROGRESS (wave-session-directory, claimed 2026-10-06) — spec at `docs/plans/2026-10-06-session-directory.md`,
   verified 2026-10-06 by three independent verifier fans (final pass 0 blockers;
   the four residual warnings/nits corrected). The plan is the single source for
   the decisions, files, slices, and gates; this entry records status and
