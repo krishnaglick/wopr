@@ -20,8 +20,8 @@
 #
 #   3. serve: ./internal/codingagent/serve races HTTP handlers against the tool
 #      goroutines those handlers dispatch.
-#   4. host: ./coding/host races the multi-session supervisor and its typed event
-#      bus.
+#   4. host: ./coding/host races concurrent prompts against the per-session run
+#      slot, plus the event bus's racing subscriber close.
 set -euo pipefail
 
 pkg=./internal/codingagent
@@ -34,7 +34,7 @@ go test -race -count=1 -run \
 echo "== race regressions (serve: HTTP handlers vs tool goroutines) =="
 go test -race -count=1 ./internal/codingagent/serve
 
-echo "== race regressions (host: multi-session supervisor vs typed event bus) =="
+echo "== race regressions (host: concurrent session prompts + racing subscriber close) =="
 go test -race -count=1 ./coding/host
 
 echo "== goroutineleak profile =="
