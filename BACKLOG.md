@@ -1084,7 +1084,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### session-directory — let a session work in a directory other than the process cwd
 
-- **Status:** DONE — shipped on `wave-session-directory` as `9e2c944` + `9062a52` (+ docs), merged `--no-ff` into `main`. Spec at `docs/plans/2026-10-06-session-directory.md`,
+- **Status:** DONE — shipped on `wave-session-directory` as `9e2c944` + `9062a52` + `b79bd06` + `5a9c2ff`, merged `--no-ff` into `main`. Spec at `docs/plans/2026-10-06-session-directory.md`,
   verified 2026-10-06 by three independent verifier fans (final pass 0 blockers;
   the four residual warnings/nits corrected). The plan is the single source for
   the decisions, files, slices, and gates; this entry records status and
@@ -1103,3 +1103,31 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   validation against that root (400 on mismatch), not a per-request selector.
   Consequence: `serve-file-list-directory-param` folds into the plan's `/file`
   slice. See the plan for the decisions, files, and per-slice gates.
+## Follow-ups surfaced by session-directory
+
+### serve-allowed-roots-fail-open — a malformed global settings.json silently disables the allowlist
+
+- **Status:** READY — surfaced 2026-10-06 by the session-directory diff verification.
+- **Why:** `runServeCommand` reads `server.allowedRoots` from the global layer and
+  warns on a settings parse error, then continues. A malformed global
+  `settings.json` zeroes the layer, `GetServerAllowedRoots` returns `nil, nil`,
+  and `resolveServeRoot` treats an empty list as unrestricted — the guardrail is
+  configured but off. Not attacker-triggerable unless the launcher can write
+  `~/.wopr/settings.json`, but it is a fail-open robustness gap in the control
+  that is supposed to fail closed.
+- **Files:** `cmd/wopr/serve.go` (the allowlist read), `internal/codingagent/settings.go`.
+- **Gates:** a test that a configured-but-unparsable global settings layer makes
+  `wopr serve` refuse to start rather than serve unrestricted.
+
+### serve-allowed-roots-wiring-test — no test covers the global-layer read and the resolveServeRoot call
+
+- **Status:** READY — surfaced 2026-10-06 by the session-directory diff verification.
+- **Why:** `TestResolveServeRoot` exercises the pure helper and
+  `TestGetServerAllowedRoots` the getter, but nothing asserts that
+  `runServeCommand` reads the allowlist from the global layer (projectTrusted
+  false) and actually calls `resolveServeRoot`. A regression reading merged
+  project settings, or dropping the call, stays green. The plan calls the
+  global-only rule load-bearing.
+- **Files:** `cmd/wopr/serve.go`.
+- **Gates:** extract the allowlist read/root resolution into a testable helper and
+  assert a project `settings.json` under the served root cannot widen the list.
