@@ -268,6 +268,9 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+	if err := checkServerRaw(raw); err != nil {
+		return err
+	}
 	if skills, ok := raw["skills"].(map[string]any); ok {
 		if _, exists := raw["enableSkillCommands"]; !exists {
 			if enabled, ok := skills["enableSkillCommands"]; ok {
@@ -299,6 +302,39 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*s = Settings(decoded)
+	return nil
+}
+
+// checkServerRaw rejects a server/allowedRoots value that decodeTolerant would
+// otherwise silently drop, which would leave the serve allowlist guardrail off.
+// Keys are matched case-insensitively to mirror encoding/json, which resolves
+// the "server"/"allowedRoots" struct tags regardless of case; an exact lookup
+// would let a case-variant key bypass the check. Scoped to the server key only;
+// every other setting stays tolerant.
+func checkServerRaw(raw map[string]any) error {
+	for key, v := range raw {
+		if !strings.EqualFold(key, "server") || v == nil { // absent or null: treated as absent
+			continue
+		}
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return errors.New("server must be a JSON object")
+		}
+		for innerKey, roots := range obj {
+			if !strings.EqualFold(innerKey, "allowedRoots") || roots == nil {
+				continue
+			}
+			items, ok := roots.([]any)
+			if !ok {
+				return errors.New("server.allowedRoots must be an array of strings")
+			}
+			for _, item := range items {
+				if _, ok := item.(string); !ok {
+					return errors.New("server.allowedRoots must be an array of strings")
+				}
+			}
+		}
+	}
 	return nil
 }
 

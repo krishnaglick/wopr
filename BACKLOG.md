@@ -1150,8 +1150,21 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-allowed-roots-type-mismatch-fail-open — a wrong-typed server.allowedRoots still fails open
 
-- **Status:** READY — surfaced 2026-10-07 by the `serve-allowed-roots-fail-open`
-  verification fan (security angle).
+- **Status:** DONE — shipped on `wave-serve-allowed-roots-type-mismatch-fail-open`
+  as `c7e9f0b` (+ `3c9904d` case-insensitive bypass fix); merged into `main`.
+- **What shipped:** `checkServerRaw` in `internal/codingagent/settings.go` runs in
+  `Settings.UnmarshalJSON` before `decodeTolerant` and returns a scoped error when a
+  `server` entry present in the raw JSON is not an object, or a `server.allowedRoots`
+  entry is present but not an array of strings. Keys are matched with
+  `strings.EqualFold` because `encoding/json` resolves struct keys case-insensitively
+  (`{"Server":...}`, `{"server":{"AllowedRoots":"x"}}`); an exact-key lookup was a
+  bypass. The error propagates through the existing `GlobalLoadError()` plumbing, so
+  `wopr serve` refuses to start; `cmd/wopr/serve.go` needed no change.
+  `decodeTolerant` and unrelated-key tolerance are untouched. Tests:
+  `TestUnmarshalJSONRejectsUndecodableServerGuardrail` (unit, incl. case variants),
+  the `wrong-typed-roots` subtest of
+  `TestGlobalServeAllowedRootsFailsClosedOnMalformedGlobalSettings`, and
+  `TestRunServeCommandRefusesOnUndecodableServerGuardrail`.
 - **Why:** `Settings.UnmarshalJSON` routes through `decodeTolerant`
   (`internal/codingagent/settings.go:298-354`), which drops a field whose JSON type
   mismatches its key and retries. So `{"server":5}`,
@@ -1168,3 +1181,22 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Gates:** a test that a wrong-typed `server` or `server.allowedRoots` in the
   global layer makes `wopr serve` refuse to start rather than serve unrestricted,
   without changing the tolerant behavior of unrelated settings.
+
+### serve-allowed-roots-unknown-key-fail-open — a misspelled server.allowedRoots key silently disables the allowlist
+
+- **Status:** READY — surfaced 2026-10-07 by the `serve-allowed-roots-type-mismatch-fail-open`
+  work verification (security angle, residual warning).
+- **Why:** the tolerant decoder ignores unknown keys, so `{"server":{"allowedRoot":"/srv"}}`
+  (typo) or `{"server":{"allowedRootsX":[...]}}` parses successfully with an empty
+  allowlist, `GetServerAllowedRoots` returns `nil, nil`, and `wopr serve` treats the
+  empty list as unrestricted — the configured guardrail is silently off. Same
+  fail-open class as the wrong-typed variant, but for a key the decoder never
+  matches; the type-mismatch fix deliberately did not widen to it.
+- **Files:** `internal/codingagent/settings.go` (the allowlist read and/or the
+  `server` pre-check).
+- **Gates:** a global `settings.json` whose `server` object contains a key that is
+  near-miss for `allowedRoots` and no valid `allowedRoots` makes `wopr serve` warn or
+  refuse rather than serve unrestricted; unrelated unknown keys stay tolerant.
+- **Note:** the item needs a design decision — the tolerant decoder ignores unknown
+  keys by design, so this may want a targeted nudge (warn on a `server` object with
+  unrecognized keys) rather than hard-failing every unknown key.

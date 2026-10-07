@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -283,5 +284,58 @@ func TestSettingsDefaults(t *testing.T) {
 	sm = &SettingsManager{global: Settings{DefaultProjectTrust: "always"}, merged: Settings{DefaultProjectTrust: "never"}}
 	if got := sm.GetDefaultProjectTrust(); got != "always" {
 		t.Fatalf("project trust override leaked: got %q, want global always", got)
+	}
+}
+
+// TestUnmarshalJSONRejectsUndecodableServerGuardrail covers a server value that
+// decodeTolerant would silently drop, which would leave the serve allowlist
+// guardrail off. Every other setting stays tolerant.
+func TestUnmarshalJSONRejectsUndecodableServerGuardrail(t *testing.T) {
+	reject := []string{
+		`{"server":5}`,
+		`{"server":{"allowedRoots":"x"}}`,
+		`{"server":{"allowedRoots":[5]}}`,
+		`{"server":{"allowedRoots":{}}}`,
+		`{"server":{"allowedRoots":["/a",5]}}`,
+		// encoding/json matches struct keys case-insensitively, so these must
+		// be classified the same as their lowercase forms.
+		`{"Server":{"allowedRoots":"x"}}`,
+		`{"SERVER":{"allowedRoots":[5]}}`,
+		`{"server":{"AllowedRoots":"x"}}`,
+		`{"Server":{"AllowedRoots":{}}}`,
+	}
+	for _, body := range reject {
+		var s Settings
+		err := json.Unmarshal([]byte(body), &s)
+		if err == nil || !strings.Contains(err.Error(), "server") {
+			t.Fatalf("Unmarshal(%s) error = %v, want it to name server", body, err)
+		}
+	}
+
+	// A wrong-typed port next to a valid list drops only port; the guardrail
+	// survives. This guards the decodeTolerant interaction.
+	var s Settings
+	if err := json.Unmarshal([]byte(`{"server":{"port":"x","allowedRoots":["/a"]}}`), &s); err != nil {
+		t.Fatalf("Unmarshal dropped only the bad port: %v", err)
+	}
+	if s.Server == nil || !slices.Equal(s.Server.AllowedRoots, []string{"/a"}) {
+		t.Fatalf("server = %+v, want allowedRoots [/a]", s.Server)
+	}
+
+	// encoding/json resolves the case variants, so the guard must not
+	// over-reject a valid case-variant list.
+	var caseVariant Settings
+	if err := json.Unmarshal([]byte(`{"Server":{"AllowedRoots":["/a"]}}`), &caseVariant); err != nil {
+		t.Fatalf("Unmarshal case-variant list = %v, want nil", err)
+	}
+	if caseVariant.Server == nil || !slices.Equal(caseVariant.Server.AllowedRoots, []string{"/a"}) {
+		t.Fatalf("server = %+v, want allowedRoots [/a]", caseVariant.Server)
+	}
+
+	if err := json.Unmarshal([]byte(`{"server":null}`), &s); err != nil {
+		t.Fatalf("Unmarshal(server:null) = %v, want nil", err)
+	}
+	if s.Server != nil {
+		t.Fatalf("server = %+v, want nil", s.Server)
 	}
 }
