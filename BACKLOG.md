@@ -1133,7 +1133,12 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-allowed-roots-wiring-test — no test covers the global-layer read and the resolveServeRoot call
 
-- **Status:** READY — surfaced 2026-10-06 by the session-directory diff verification.
+- **Status:** DONE — shipped on `wave-serve-allowed-roots-wiring-test` as
+  `06a850a`; merged into `main`. Added `TestGlobalServeAllowedRootsReadsGlobalLayerOnly`
+  (trusted project `settings.json` cannot widen the list) and
+  `TestRunServeCommandRefusesRootOutsideGlobalAllowlist` (wiring calls
+  `resolveServeRoot` with the global-derived list), both red-proofed against a
+  `sm.Get()` read and a dropped call. Test-only; no production change.
 - **Why:** `TestResolveServeRoot` exercises the pure helper and
   `TestGetServerAllowedRoots` the getter, but nothing asserts that
   `runServeCommand` reads the allowlist from the global layer (projectTrusted
