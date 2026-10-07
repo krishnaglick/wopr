@@ -1189,10 +1189,10 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-allowed-roots-unknown-key-fail-open — a misspelled server.allowedRoots key silently disables the allowlist
 
-- **Status:** READY — owner decision 2026-10-07: option (b) — fail closed (refuse to
-  start) when a `server` key is a near-miss for `allowedRoots` (a typo) and no valid
-  `allowedRoots` is present, but warn-and-continue on other unknown `server` keys so
-  genuinely new keys stay forward-compatible. Surfaced by the
+- **Status:** DONE — shipped on `wave-serve-allowed-roots-unknown-key-fail-open`, merged into
+  `main`. Owner decision option (b): a `server` key on the `allow…root` stem that is not the
+  exact (case-folded) `allowedRoots`, with no valid `allowedRoots` present, makes `wopr serve`
+  refuse to start; any other unrecognized `server` key warns and continues. Surfaced by the
   `serve-allowed-roots-type-mismatch-fail-open` verification (security angle).
 - **Why:** the tolerant decoder ignores unknown keys, so `{"server":{"allowedRoot":"/srv"}}`
   (typo) or `{"server":{"allowedRootsX":[...]}}` parses successfully with an empty
@@ -1205,6 +1205,42 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Gates:** a global `settings.json` whose `server` object contains a key that is
   near-miss for `allowedRoots` and no valid `allowedRoots` makes `wopr serve` warn or
   refuse rather than serve unrestricted; unrelated unknown keys stay tolerant.
-- **Note:** the item needs a design decision — the tolerant decoder ignores unknown
-  keys by design, so this may want a targeted nudge (warn on a `server` object with
-  unrecognized keys) rather than hard-failing every unknown key.
+- **Note:** the design decision is implemented as option (b). `serverKeyIsAllowedRootsNearMiss`
+  in `internal/codingagent/settings.go` flags keys on the `allow…root` stem that
+  `encoding/json` would not match (including whitespace and invisible `unicode.Cf` padding such as
+  a pasted U+200B); `checkServerRaw` fails closed only when a near-miss exists and no valid
+  `allowedRoots` was found. Other unrecognized `server` keys ride an unexported
+  `Settings.serverUnknownKeys` + `SettingsManager.GlobalUnknownServerKeys`, printed by
+  `cmd/wopr/serve.go` as `unrecognized server setting %q ignored`.
+- **Known residuals (accepted; spec Open Questions):** JSON `null` for a near-miss or
+  `allowedRoots` is treated as absent; an explicit empty `allowedRoots: []` beside a near-miss
+  does not fail (empty is the documented unrestricted value); typos with no shared stem
+  (`alowedRoots`, `allowedRots`, `roots`, `allowed`) are not caught.
+
+### serve-server-key-near-miss-fail-open — a misspelled outer `server` key still fails open
+
+- **Status:** READY — surfaced by the `serve-allowed-roots-unknown-key-fail-open` adversarial
+  verification.
+- **Why:** `checkServerRaw` matches the outer key with `strings.EqualFold(key, "server")` and no
+  trim, so `{"server ":{"allowedRoots":["/srv"]}}` (or an invisible-rune-padded `server`) is never
+  inspected; `encoding/json` also will not match it, the whole `server` object is dropped by
+  `decodeTolerant`, `GetServerAllowedRoots` returns `nil, nil`, and `wopr serve` serves
+  unrestricted. Same fail-open class as the inner-key item, one level up. Pre-existing, not
+  introduced by that item.
+- **Files:** `internal/codingagent/settings.go` (the `server` key match in `checkServerRaw`).
+- **Gates:** a global `settings.json` whose top-level `server` key is padded/misspelled and holds
+  a valid `allowedRoots` makes `wopr serve` refuse rather than serve unrestricted; a genuinely
+  unrelated top-level key stays tolerant.
+
+### serve-unknown-server-key-schema-drift — the known-key set duplicates ServerSettings' JSON tags
+
+- **Status:** READY (low priority) — surfaced by the `serve-allowed-roots-unknown-key-fail-open`
+  scope/hygiene verification.
+- **Why:** `checkServerRaw` hard-codes the known `server` keys (`port`, `hostname`,
+  `allowedRoots`). A future `ServerSettings` field added to the struct but not to that set is
+  still applied by `decodeTolerant`, yet lands in the unknown-key list and prints a spurious
+  "unrecognized server setting" warning — and, if its name matched the `allow…root` stem, would
+  refuse a valid config. A drift hazard, not a current bug.
+- **Files:** `internal/codingagent/settings.go`.
+- **Gates:** a `ServerSettings` field addition cannot silently produce a false unknown-key warning
+  (derive the known set from the struct tags, or add a test coupling the two).

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gofrs/flock"
 
@@ -101,6 +102,10 @@ type Settings struct {
 	Terminal *TerminalSettings `json:"terminal,omitempty"`
 	Images   *ImageSettings    `json:"images,omitempty"`
 	Server   *ServerSettings   `json:"server,omitempty"`
+	// serverUnknownKeys holds the unrecognized settings.server keys the layer
+	// carried, for a serve-time warning. Unexported so it is never marshaled;
+	// clone copies it by hand.
+	serverUnknownKeys []string
 
 	// DefaultTools is the initial built-in tool selection; nil means the
 	// default read, bash, edit and write.
@@ -268,7 +273,8 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	if err := checkServerRaw(raw); err != nil {
+	unknown, err := checkServerRaw(raw)
+	if err != nil {
 		return err
 	}
 	if skills, ok := raw["skills"].(map[string]any); ok {
@@ -301,7 +307,9 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 	if err := decodeTolerant(raw, &decoded); err != nil {
 		return err
 	}
-	*s = Settings(decoded)
+	d := Settings(decoded)
+	d.serverUnknownKeys = unknown
+	*s = d
 	return nil
 }
 
@@ -310,32 +318,71 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 // Keys are matched case-insensitively to mirror encoding/json, which resolves
 // the "server"/"allowedRoots" struct tags regardless of case; an exact lookup
 // would let a case-variant key bypass the check. Scoped to the server key only;
-// every other setting stays tolerant.
-func checkServerRaw(raw map[string]any) error {
+// every other setting stays tolerant. It also reports the unrecognized
+// settings.server keys it saw, so serve can warn and keep going; a near-miss
+// allowedRoots key with no valid allowedRoots present fails closed instead.
+func checkServerRaw(raw map[string]any) ([]string, error) {
+	var unknown []string
 	for key, v := range raw {
 		if !strings.EqualFold(key, "server") || v == nil { // absent or null: treated as absent
 			continue
 		}
 		obj, ok := v.(map[string]any)
 		if !ok {
-			return errors.New("server must be a JSON object")
+			return nil, errors.New("server must be a JSON object")
 		}
+		hasValidRoots := false
+		nearMiss := ""
 		for innerKey, roots := range obj {
-			if !strings.EqualFold(innerKey, "allowedRoots") || roots == nil {
+			if roots == nil {
 				continue
 			}
-			items, ok := roots.([]any)
-			if !ok {
-				return errors.New("server.allowedRoots must be an array of strings")
-			}
-			for _, item := range items {
-				if _, ok := item.(string); !ok {
-					return errors.New("server.allowedRoots must be an array of strings")
+			switch {
+			case strings.EqualFold(innerKey, "allowedRoots"):
+				items, ok := roots.([]any)
+				if !ok {
+					return nil, errors.New("server.allowedRoots must be an array of strings")
 				}
+				for _, item := range items {
+					if _, ok := item.(string); !ok {
+						return nil, errors.New("server.allowedRoots must be an array of strings")
+					}
+				}
+				hasValidRoots = true
+			case strings.EqualFold(innerKey, "port"), strings.EqualFold(innerKey, "hostname"):
+				// Known keys.
+			default:
+				if nearMiss == "" && serverKeyIsAllowedRootsNearMiss(innerKey) {
+					nearMiss = innerKey
+				}
+				unknown = append(unknown, innerKey)
 			}
 		}
+		if nearMiss != "" && !hasValidRoots {
+			return nil, fmt.Errorf("server.%s is not a known key; did you mean server.allowedRoots?", nearMiss)
+		}
 	}
-	return nil
+	return unknown, nil
+}
+
+// serverKeyIsAllowedRootsNearMiss reports whether a server key looks like a
+// misspelling of the allowedRoots stem, so a likely typo fails closed rather
+// than silently disabling the serve allowlist. It is intentionally narrow: it
+// catches keys on the "allow…root" stem, not every edit of allowedRoots.
+// encoding/json folds case but does not trim, so an exactly-matching key is the
+// only form that populates Server.AllowedRoots; a padded or mutated key is a
+// near-miss. Padding includes whitespace and invisible format runes (a
+// zero-width space pasted before the key), which TrimSpace alone would miss.
+// The stem tolerates the unrelated keys allowedHosts/allowedOrigins/allowedRoutes
+// (none contains "root").
+func serverKeyIsAllowedRootsNearMiss(key string) bool {
+	if strings.EqualFold(key, "allowedRoots") { // exactly what encoding/json matches
+		return false
+	}
+	k := strings.ToLower(strings.TrimFunc(key, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)
+	}))
+	return strings.HasPrefix(k, "allow") && strings.Contains(k, "root")
 }
 
 // decodeTolerant decodes raw into out. A field whose JSON type does not
@@ -422,6 +469,7 @@ func (s Settings) clone() Settings {
 	if err := json.Unmarshal(data, &out); err != nil {
 		return s
 	}
+	out.serverUnknownKeys = append([]string(nil), s.serverUnknownKeys...)
 	return out
 }
 
@@ -1046,6 +1094,15 @@ func (sm *SettingsManager) GlobalLoadError() error {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.globalLoadErr
+}
+
+// GlobalUnknownServerKeys returns the unrecognized settings.server keys in the
+// global layer, for a serve-time warning. Read before any merge, which drops
+// the field by design (it is not JSON).
+func (sm *SettingsManager) GlobalUnknownServerKeys() []string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return append([]string(nil), sm.global.serverUnknownKeys...)
 }
 
 // GetProjectSettings returns the persisted project settings layer.
