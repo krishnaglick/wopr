@@ -426,13 +426,18 @@ func TestMessageAnswers409WhileTheSessionIsBusy(t *testing.T) {
 	}
 }
 
-// TestAbortAnswers200ForAnIdleSession verifies "stop nothing" is success.
+// TestAbortAnswers200ForAnIdleSession verifies "stop nothing" is success, with
+// the JSON boolean opencode returns: the client decodes the body and rejects an
+// empty, content-type-less reply as "is this an opencode server?".
 func TestAbortAnswers200ForAnIdleSession(t *testing.T) {
 	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
-	status, _ := postJSON(t, baseURL, "/session/"+id+"/abort", `{}`)
+	status, body := postJSON(t, baseURL, "/session/"+id+"/abort", `{}`)
 	if status != http.StatusOK {
 		t.Fatalf("abort on idle session: expected 200, got %d", status)
+	}
+	if got := strings.TrimSpace(string(body)); got != "true" {
+		t.Fatalf("abort body = %q, want true", got)
 	}
 }
 

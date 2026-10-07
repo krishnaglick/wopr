@@ -165,15 +165,17 @@ var errRefused = errors.New("serve: the request was refused before the turn star
 
 // POST /session/{id}/abort
 //
-// 200 with no body, whether the session was running or idle. The cancel is
-// delivered synchronously; the drain is reported by the next session.status.
+// 200 with a JSON boolean, whether the session was running or idle, matching
+// opencode (the client decodes the body and rejects an empty non-JSON reply).
+// The cancel is delivered synchronously; the drain is reported by the next
+// session.status.
 func (s *Server) sessionAbort(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.sessionPreconditions(w, r)
 	if !ok {
 		return
 	}
 	sess.Abort()
-	w.WriteHeader(http.StatusOK)
+	s.writeJSON(w, http.StatusOK, true)
 }
 
 // sessionPreconditions applies the checks every session-scoped write shares: the
