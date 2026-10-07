@@ -87,7 +87,7 @@ The net effect: the same part id is used for `message.part.delta`, the intermedi
 
 ## Host change (`coding/host/host.go:165-168`)
 
-Broaden the resolver condition from `end.Message.Assistant != nil` to `end.Message.Assistant != nil || end.Message.User != nil`. `MessageEntryID` already indexes user messages by pointer (`coding/session_recovery.go:17-29`, `rememberMessageEntry` at `:32`), and the persisted user pointer is the same pointer the `MessageEndEvent` carries, so user resolution is O(1) and exact.
+Broaden the resolver condition from `end.Message.Assistant != nil` to `end.Message.Assistant != nil || end.Message.User != nil`. `MessageEntryID` (`coding/session_recovery.go:159`) already indexes user messages by pointer via `messageIdentity` (`coding/session_recovery.go:17-29`) and `rememberMessageEntry` (`:32`), and the persisted user pointer is the same pointer the `MessageEndEvent` carries, so user resolution is O(1) and exact.
 
 ## Persistence change (`internal/codingagent/session.go:597-618`)
 

@@ -32,9 +32,9 @@ var ErrNoModel = errors.New("host: StartOptions.Model is required")
 // that event and keeps the run going.
 type Translator func(ev agent.AgentEvent, entryID string) ([]Event, error)
 
-// TranslatorFactory builds one Translator per session. The mapper's provisional
-// message counter is per session and needs no lock, because a session's
-// forwarder is a single goroutine.
+// TranslatorFactory builds one Translator per session. The mapper's per-message
+// streamed state is per session and needs no lock, because a session's forwarder
+// is a single goroutine.
 type TranslatorFactory func(sessionID string) Translator
 
 // Host owns every session a served process runs.

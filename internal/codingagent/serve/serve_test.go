@@ -834,11 +834,10 @@ func TestSSEStreamDropsAStalledConnectionAtTheByteBound(t *testing.T) {
 
 // TestStreamPartIDsMatchTranscriptPartIDs is the topology gate: the final burst
 // and the persisted transcript must report the same literal part ids for the
-// same message. Deltas stream under a provisional id, because wopr allocates
-// the transcript entry at message_end; the reconciliation burst re-announces the
-// message under its real entry id, and both sides build the ids from that one
-// id. Elementwise, not as a set — a duplicate collapses in a set on both sides,
-// which is how serve-3's duplicate-part-id defect passed green.
+// same message. Deltas and the end burst both stream under the assistant entry
+// id the Session mints at message start, so both sides build the ids from that
+// one id. Elementwise, not as a set — a duplicate collapses in a set on both
+// sides, which is how serve-3's duplicate-part-id defect passed green.
 func TestStreamPartIDsMatchTranscriptPartIDs(t *testing.T) {
 	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
