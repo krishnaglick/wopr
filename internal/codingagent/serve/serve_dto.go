@@ -19,11 +19,30 @@ type sessionDTO struct {
 	Slug      string         `json:"slug"`
 	ProjectID string         `json:"projectID"`
 	Directory string         `json:"directory"`
+	Path      string         `json:"path"`
 	Title     string         `json:"title"`
+	Agent     string         `json:"agent"`
+	Model     sessionModel   `json:"model"`
 	Version   string         `json:"version"`
+	Summary   sessionSummary `json:"summary"`
+	Cost      float64        `json:"cost"`
+	Tokens    sessionTokens  `json:"tokens"`
 	Time      sessionTime    `json:"time"`
-	Tokens    *sessionTokens `json:"tokens,omitempty"`
-	Cost      *float64       `json:"cost,omitempty"`
+	Project   projectDTO     `json:"project"`
+}
+
+// sessionModel is the session's {id,providerID,variant} object. It is never
+// null: an unknown model marshals as empty strings, which the client can decode.
+type sessionModel struct {
+	ID         string `json:"id"`
+	ProviderID string `json:"providerID"`
+	Variant    string `json:"variant"`
+}
+
+type sessionSummary struct {
+	Additions int `json:"additions"`
+	Deletions int `json:"deletions"`
+	Files     int `json:"files"`
 }
 
 type sessionTime struct {
@@ -33,9 +52,11 @@ type sessionTime struct {
 }
 
 type sessionTokens struct {
-	Input  int        `json:"input"`
-	Output int        `json:"output"`
-	Cache  tokenCache `json:"cache"`
+	Input     int        `json:"input"`
+	Output    int        `json:"output"`
+	Reasoning int        `json:"reasoning"`
+	Total     int        `json:"total"`
+	Cache     tokenCache `json:"cache"`
 }
 
 type tokenCache struct {
@@ -52,10 +73,34 @@ type messageDTO struct {
 }
 
 type messageInfoDTO struct {
-	ID        string      `json:"id"`
-	SessionID string      `json:"sessionID"`
-	Role      string      `json:"role"`
-	Time      messageTime `json:"time"`
+	ID         string        `json:"id"`
+	SessionID  string        `json:"sessionID"`
+	Role       string        `json:"role"`
+	ParentID   string        `json:"parentID"`
+	Mode       string        `json:"mode"`
+	Agent      string        `json:"agent"`
+	Path       messagePath   `json:"path"`
+	Cost       float64       `json:"cost"`
+	Tokens     messageTokens `json:"tokens"`
+	ModelID    string        `json:"modelID"`
+	ProviderID string        `json:"providerID"`
+	Time       messageTime   `json:"time"`
+	Finish     string        `json:"finish"`
+}
+
+// messagePath is the message's {cwd,root} object. cwd is the session's own
+// working directory, or the resolved server root when the session has none.
+type messagePath struct {
+	CWD  string `json:"cwd"`
+	Root string `json:"root"`
+}
+
+type messageTokens struct {
+	Total     int        `json:"total"`
+	Input     int        `json:"input"`
+	Output    int        `json:"output"`
+	Reasoning int        `json:"reasoning"`
+	Cache     tokenCache `json:"cache"`
 }
 
 type messageTime struct {
@@ -73,6 +118,9 @@ type partDTO struct {
 	Mime      string          `json:"mime,omitempty"`
 	URL       string          `json:"url,omitempty"`
 	State     json.RawMessage `json:"state,omitempty"`
+	// Snapshot follows fileNodeDTO.Ignored: wopr has no snapshot, so it is
+	// always "", present so a strict client decoding the part finds it.
+	Snapshot string `json:"snapshot"`
 }
 
 type sessionStatusDTO struct {
@@ -80,8 +128,23 @@ type sessionStatusDTO struct {
 	Type      string `json:"type"`
 }
 
+// agentInfoDTO is the GET /agent item. The null scalars are pointer fields left
+// nil on purpose: opencode omits no key here, and a null scalar is safe for the
+// client to Object.keys. model is deliberately absent (see the spec §5).
 type agentInfoDTO struct {
-	Name string `json:"name"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Mode        string         `json:"mode"`
+	Native      bool           `json:"native"`
+	Hidden      *string        `json:"hidden"`
+	TopP        *float64       `json:"topP"`
+	Temperature *float64       `json:"temperature"`
+	Color       *string        `json:"color"`
+	Permission  []any          `json:"permission"`
+	Variant     *string        `json:"variant"`
+	Prompt      *string        `json:"prompt"`
+	Options     map[string]any `json:"options"`
+	Steps       *int           `json:"steps"`
 }
 
 type projectDTO struct {
@@ -105,24 +168,62 @@ type fileStatusDTO struct {
 	Path string `json:"path"`
 }
 
+// providerModelDTO is the full captured model object. wopr fills
+// id/providerID/name and leaves the rest an empty composite or zero scalar, so
+// no nested obj is undefined for a client that decodes it.
 type providerModelDTO struct {
-	Name string `json:"name,omitempty"`
+	ID           string         `json:"id"`
+	ProviderID   string         `json:"providerID"`
+	API          map[string]any `json:"api"`
+	Name         string         `json:"name"`
+	Family       string         `json:"family"`
+	Capabilities map[string]any `json:"capabilities"`
+	Cost         map[string]any `json:"cost"`
+	Limit        map[string]any `json:"limit"`
+	Status       string         `json:"status"`
+	Options      map[string]any `json:"options"`
+	Headers      map[string]any `json:"headers"`
+	ReleaseDate  string         `json:"release_date"`
+	Variants     map[string]any `json:"variants"`
 }
 
 type providerDTO struct {
-	Name   string                      `json:"name,omitempty"`
-	API    string                      `json:"api,omitempty"`
-	Models map[string]providerModelDTO `json:"models"`
+	ID      string                      `json:"id"`
+	Name    string                      `json:"name"`
+	Source  string                      `json:"source"`
+	Env     []string                    `json:"env"`
+	Key     string                      `json:"key"`
+	Options map[string]any              `json:"options"`
+	Models  map[string]providerModelDTO `json:"models"`
+}
+
+// providersResponseDTO is the GET /config/providers body. Providers is
+// allocated non-nil by the handler so it marshals [] and never null.
+type providersResponseDTO struct {
+	Providers []providerDTO     `json:"providers"`
+	Default   map[string]string `json:"default"`
 }
 
 type errorDTO struct {
 	Error string `json:"error"`
 }
 
-// configDTO is the GET /config subset wopr can honestly report. model is the
-// provider/model string the server starts sessions with; omitempty yields {}.
+// configDTO is opencode's GET /config object. Every obj/arr field is
+// initialized to an empty composite by the handler so it marshals {} or [],
+// never null. $schema/username/subagent_depth stay zero values.
 type configDTO struct {
-	Model string `json:"model,omitempty"`
+	Schema        string         `json:"$schema"`
+	Command       map[string]any `json:"command"`
+	Plugin        []any          `json:"plugin"`
+	Model         string         `json:"model"`
+	SubagentDepth int            `json:"subagent_depth"`
+	Username      string         `json:"username"`
+	Mode          map[string]any `json:"mode"`
+	Agent         map[string]any `json:"agent"`
+	Provider      map[string]any `json:"provider"`
+	MCP           map[string]any `json:"mcp"`
+	Instructions  []any          `json:"instructions"`
+	Permission    map[string]any `json:"permission"`
 }
 
 // apiCommandDTO is the GET /api/command body. Data is initialized to []any{} in

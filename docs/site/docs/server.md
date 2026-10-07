@@ -30,7 +30,7 @@ The only confinement on file access is the resolved project root: `GET /file` an
 
 ## Client
 
-The endpoint table below was derived from `grapeot/opencode_ios_client` at commit `2d0e7bd`, except the `GET /api/health`, `GET /experimental/session`, `GET /config`, `GET /api/command`, and `GET /permission` rows, which come from a logging-proxy capture of KKCode against opencode 1.18.34 recorded in the `serve-kkcode-v1-compat` backlog item. It is a third-party build with no SLA; if the app moves, this table can drift, and the DTOs stay tolerant of added optional fields.
+The endpoint table below was derived from `grapeot/opencode_ios_client` at commit `2d0e7bd`, except the `GET /api/health`, `GET /experimental/session`, `GET /config`, `GET /config/providers`, `GET /agent`, the session routes, the message routes, `GET /api/command`, and `GET /permission` rows, which come from logging-proxy captures of KKCode against opencode 1.18.34 recorded in the `serve-kkcode-v1-compat` and `serve-kkcode-dto-shape-parity` backlog items. It is a third-party build with no SLA; if the app moves, this table can drift, and the DTOs stay tolerant of added optional fields.
 
 ## Endpoints
 
@@ -41,29 +41,29 @@ The server registers 34 routes. Twenty-nine are implemented; five answer `501` w
 | `GET` | /global/health | 200 | `{healthy: true, version}`. The client's Test connection call. |
 | `GET` | /api/health | 200 | `{healthy: true}`, no `version`. KKCode's first connect probe. `directory` ignored. |
 | `GET` | /global/event | SSE | One event stream for every session: `server.connected` first, then `server.heartbeat` every 15 seconds, and a terminal `session.error` with `data: [DONE]` when the byte budget drops. Answers 503 past 16 concurrent streams. |
-| `GET` | /session | 200 | `sessionDTO[]` merged from disk and live sessions. Query `directory`; `limit` default 50, max 200; 400 on a directory mismatch. |
-| `GET` | /experimental/session | 200 | Identical to `GET /session` by construction (same handler): `sessionDTO[]`, `directory` validated, `limit` default 50, max 200. |
-| `POST` | /session | 200 | Starts a host session, installs the `ask_user` asker, and returns `sessionDTO`; 500 when the server has no usable model. No `directory` parameter. |
-| `GET` | /session/{id} | 200 | `sessionDTO`; 404 unknown. |
-| `PATCH` | /session/{id} | 200 | Body is exactly one of `{title}` or `{time:{archived}}`; renames or archives and publishes `session.updated`; 400, 404, or 500. |
+| `GET` | /session | 200 | `sessionDTO[]` merged from disk and live sessions. Each entry carries `{id, slug, projectID, directory, path, title, agent, model:{id,providerID,variant}, version, summary:{additions,deletions,files}, cost, tokens:{input,output,reasoning,total,cache:{read,write}}, time, project:{id,worktree}}`; `model`, `summary`, `tokens`, and `project` are objects even when unknown. Query `directory`; `limit` default 50, max 200; 400 on a directory mismatch. |
+| `GET` | /experimental/session | 200 | Identical to `GET /session` by construction (same handler): `sessionDTO[]` with the same expanded keys, `directory` validated, `limit` default 50, max 200. |
+| `POST` | /session | 200 | Starts a host session, installs the `ask_user` asker, and returns the expanded `sessionDTO`; 500 when the server has no usable model. No `directory` parameter. |
+| `GET` | /session/{id} | 200 | The expanded `sessionDTO`; 404 unknown. |
+| `PATCH` | /session/{id} | 200 | Body is exactly one of `{title}` or `{time:{archived}}`; renames or archives, returns the same expanded `sessionDTO`, and publishes `session.updated`; 400, 404, or 500. |
 | `DELETE` | /session/{id} | **501 stub** | `{"error":"not implemented"}`. |
 | `POST` | /session/{id}/fork | **501 stub** | Not implemented. |
 | `POST` | /session/{id}/revert | **501 stub** | Not implemented. |
 | `GET` | /session/{id}/diff | **501 stub** | Not implemented. |
 | `GET` | /session/{id}/todo | 200 | `todos[]` from the newest `todowrite` result in the transcript, `[]` when there is none; 404 unknown. |
-| `GET` | /session/{id}/message | 200 | `MessageWithParts[]`; `limit` default 50, max 200; 404 unknown. |
+| `GET` | /session/{id}/message | 200 | `MessageWithParts[]`; each item's `info` carries `{id, sessionID, role, parentID, mode, agent, path:{cwd,root}, cost, tokens:{total,input,output,reasoning,cache:{read,write}}, modelID, providerID, time:{created}, finish}` and each part carries `snapshot` (`""` when wopr has none); `limit` default 50, max 200; 404 unknown. |
 | `GET` | /session/status | 200 | `sessionStatusDTO[]` (`idle` or `busy`) for live sessions. |
 | `POST` | /session/{id}/prompt_async | 204 | Reserves the run slot and returns no body; 404 when the session was not started here, 409 busy, 400 bad directory or body, 413 over 16 MiB. Query `directory`. |
-| `POST` | /session/{id}/message | 200 | Runs to completion and returns `{info, parts}`; the same codes as `prompt_async` plus 400 for a bad model. Query `directory`. |
+| `POST` | /session/{id}/message | 200 | Runs to completion and returns the expanded `{info, parts}` (same info keys as `GET /session/{id}/message`); the same codes as `prompt_async` plus 400 for a bad model. Query `directory`. |
 | `POST` | /session/{id}/abort | 200 | Cancels a run; 200 whether it is running or idle, 400 on a directory mismatch, 404 when the session was not started here. Query `directory`. |
 | `POST` | /session/{id}/permissions/{permissionID} | **501 stub** | Not implemented. The wildcard is `permissionID` because `{id}` is already used in the pattern. |
 | `GET` | /project | 200 | `[projectDTO{ID, Worktree}]` for the server root. |
 | `GET` | /project/current | 200 | `projectDTO`. |
-| `GET` | /config | 200 | `{model}` when a model is configured, `{}` otherwise. wopr's honest subset; no credentials or secrets. `directory` ignored. |
-| `GET` | /config/providers | 200 | Map from provider ID to `{name, api, models}`. |
+| `GET` | /config | 200 | The captured 12-key object: `{$schema, command, plugin, model, subagent_depth, username, mode, agent, provider, mcp, instructions, permission}`; `model` is the server's spec verbatim, obj/arr fields are `{}`/`[]` when wopr has no data. No credentials or secrets. `directory` ignored. |
+| `GET` | /config/providers | 200 | `{providers: [{id, name, source, env, key, options, models}], default: {}}`; `providers` is sorted by `id` and always an array, `default` maps provider ID to the parsed model ID (or `{}`), and `key` is always `""` — never a real credential. Each model value carries the full nested key set (`{id, providerID, api, name, family, capabilities, cost, limit, status, options, headers, release_date, variants}`) so no nested object is `undefined`. |
 | `GET` | /api/command | 200 | `{location: {directory, project: {id: "global", directory}}, data: []}`; both directories are the resolved served root, and `data` is always `[]` (no built-in slash commands). `directory` ignored. |
 | `GET` | /provider | 200 | `string[]` of authenticated provider names. |
-| `GET` | /agent | 200 | Static `agentInfoDTO[]`: `explore`, `general`, `propose`, `build`. |
+| `GET` | /agent | 200 | Static `agentInfoDTO[]` for `explore`, `general`, `propose`, `build`; each item carries the captured 13 keys `{name, description, mode, native, hidden, topP, temperature, color, permission, variant, prompt, options, steps}` (obj/arr fields `{}`/`[]`, null scalars `null`) and deliberately no `model` key. |
 | `GET` | /permission | 200 | `[]`. Every tool is open by default, so there are never pending requests. |
 | `GET` | /question | 200 | Pending `questionDTO[]`, `[]` when there is none. Never 404; that status means the host is gone. |
 | `POST` | /question/{id}/reply | 200 | Body is exactly one of `choice` or `other`; 404 gone, 400 invalid, 413 over 16 MiB; publishes `question.replied`. |

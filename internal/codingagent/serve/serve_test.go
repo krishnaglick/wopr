@@ -583,7 +583,8 @@ func readTranscript(t *testing.T, baseURL, id string) []messageDTO {
 }
 
 // readTranscriptFrom runs entriesToMessages over a written session file, which
-// is the same projection GET /session/{id}/message serves.
+// is the same projection GET /session/{id}/message serves. The written header's
+// cwd and root are "/test"; only the two model-fallback arguments are "".
 func readTranscriptFrom(t *testing.T, sessionDir, id string) []messageDTO {
 	t.Helper()
 	path := filepath.Join(sessionDir, time.Now().UTC().Format("2006-01-02T15-04-05")+"_"+id+".jsonl")
@@ -591,8 +592,7 @@ func readTranscriptFrom(t *testing.T, sessionDir, id string) []messageDTO {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &Server{}
-	return srv.entriesToMessages(entries, id)
+	return entriesToMessages(entries, id, "/test", "/test", "", "")
 }
 
 func waitForBusy(t *testing.T, baseURL, id string) {
@@ -1391,23 +1391,6 @@ func TestExperimentalSessionMatchesSessionList(t *testing.T) {
 	}
 	if status, _ := getRaw(t, env.baseURL, "/experimental/session?directory=/somewhere/else"); status != http.StatusBadRequest {
 		t.Errorf("GET /experimental/session foreign directory: expected 400, got %d", status)
-	}
-}
-
-// TestConfigAnswersAnObject pins the honest subset: 200 and model equal to the
-// spec promptEnvFor starts the server with. A {} or null body would fail here.
-func TestConfigAnswersAnObject(t *testing.T) {
-	env := promptEnvFor(t)
-	status, body := getRaw(t, env.baseURL, "/config")
-	if status != http.StatusOK {
-		t.Fatalf("GET /config: expected 200, got %d (%s)", status, body)
-	}
-	var cfg configDTO
-	if err := json.Unmarshal(body, &cfg); err != nil {
-		t.Fatalf("GET /config: decode: %v (%s)", err, body)
-	}
-	if cfg.Model != "test-faux/faux-1" {
-		t.Errorf("GET /config: expected model=test-faux/faux-1, got %q (%s)", cfg.Model, body)
 	}
 }
 
@@ -2370,6 +2353,407 @@ func TestQuestionStoreTakesOneEntryUnderConcurrency(t *testing.T) {
 	}
 	if _, ok := store.take(ids[0]); ok {
 		t.Error("a second take after the entry was removed returned it")
+	}
+}
+
+// ─── DTO shape parity with opencode ────────────────────────────────────────
+
+// objKeys decodes a JSON object body into its keys mapped to raw values, so a
+// test can assert presence and JSON kind without a typed mirror going stale.
+func objKeys(t *testing.T, body []byte) map[string]json.RawMessage {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatalf("body is not a JSON object: %v (%s)", err, body)
+	}
+	return m
+}
+
+// jsonKind names a raw value's JSON kind: object, array, string, number, bool,
+// null, or missing for an absent value.
+func jsonKind(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return "missing"
+	}
+	switch trimmed[0] {
+	case '{':
+		return "object"
+	case '[':
+		return "array"
+	case '"':
+		return "string"
+	case 't', 'f':
+		return "bool"
+	case 'n':
+		return "null"
+	default:
+		return "number"
+	}
+}
+
+// assertKind fails unless m[key] is present with JSON kind want, and returns
+// the raw value for further inspection.
+func assertKind(t *testing.T, m map[string]json.RawMessage, key, want string) json.RawMessage {
+	t.Helper()
+	raw, ok := m[key]
+	if !ok {
+		t.Errorf("missing key %q", key)
+		return nil
+	}
+	if got := jsonKind(raw); got != want {
+		t.Errorf("key %q: kind %s, want %s (%s)", key, got, want, raw)
+	}
+	return raw
+}
+
+// assertObject asserts m[key] is a JSON object and returns its keys.
+func assertObject(t *testing.T, m map[string]json.RawMessage, key string) map[string]json.RawMessage {
+	t.Helper()
+	raw := assertKind(t, m, key, "object")
+	if raw == nil {
+		return nil
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("%s: object decode: %v (%s)", key, err, raw)
+	}
+	return out
+}
+
+// assertArray asserts m[key] is a JSON array and returns its raw items.
+func assertArray(t *testing.T, m map[string]json.RawMessage, key string) []json.RawMessage {
+	t.Helper()
+	raw := assertKind(t, m, key, "array")
+	if raw == nil {
+		return nil
+	}
+	var out []json.RawMessage
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("%s: array decode: %v (%s)", key, err, raw)
+	}
+	return out
+}
+
+// assertStringEqual asserts m[key] is a JSON string equal to want.
+func assertStringEqual(t *testing.T, m map[string]json.RawMessage, key, want string) {
+	t.Helper()
+	raw := assertKind(t, m, key, "string")
+	if raw == nil {
+		return
+	}
+	var got string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("%s: string decode: %v", key, err)
+	}
+	if got != want {
+		t.Errorf("%s = %q, want %q", key, got, want)
+	}
+}
+
+// assertSessionShape asserts every key and JSON kind of sidecar section 3.
+func assertSessionShape(t *testing.T, body []byte) {
+	t.Helper()
+	s := objKeys(t, body)
+	for _, key := range []string{"id", "slug", "projectID", "directory", "path", "title", "agent", "version"} {
+		assertKind(t, s, key, "string")
+	}
+	model := assertObject(t, s, "model")
+	for _, key := range []string{"id", "providerID", "variant"} {
+		assertKind(t, model, key, "string")
+	}
+	summary := assertObject(t, s, "summary")
+	for _, key := range []string{"additions", "deletions", "files"} {
+		assertKind(t, summary, key, "number")
+	}
+	assertKind(t, s, "cost", "number")
+	tokens := assertObject(t, s, "tokens")
+	for _, key := range []string{"input", "output", "reasoning", "total"} {
+		assertKind(t, tokens, key, "number")
+	}
+	cache := assertObject(t, tokens, "cache")
+	assertKind(t, cache, "read", "number")
+	assertKind(t, cache, "write", "number")
+	tm := assertObject(t, s, "time")
+	assertKind(t, tm, "created", "number")
+	assertKind(t, tm, "updated", "number")
+	project := assertObject(t, s, "project")
+	assertKind(t, project, "id", "string")
+	assertKind(t, project, "worktree", "string")
+}
+
+// assertInfoShape asserts every key and JSON kind of message info (sidecar
+// section 5) on an already-decoded info object.
+func assertInfoShape(t *testing.T, info map[string]json.RawMessage) {
+	t.Helper()
+	for _, key := range []string{"id", "sessionID", "role", "parentID", "mode", "agent", "modelID", "providerID", "finish"} {
+		assertKind(t, info, key, "string")
+	}
+	path := assertObject(t, info, "path")
+	assertKind(t, path, "cwd", "string")
+	assertKind(t, path, "root", "string")
+	assertKind(t, info, "cost", "number")
+	tokens := assertObject(t, info, "tokens")
+	for _, key := range []string{"total", "input", "output", "reasoning"} {
+		assertKind(t, tokens, key, "number")
+	}
+	cache := assertObject(t, tokens, "cache")
+	assertKind(t, cache, "read", "number")
+	assertKind(t, cache, "write", "number")
+	tm := assertObject(t, info, "time")
+	assertKind(t, tm, "created", "number")
+}
+
+// assertMessageShape asserts one {info, parts} message and every part's keys.
+func assertMessageShape(t *testing.T, body []byte) int {
+	t.Helper()
+	m := objKeys(t, body)
+	assertInfoShape(t, assertObject(t, m, "info"))
+	parts := assertArray(t, m, "parts")
+	for i, raw := range parts {
+		var p map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("parts[%d] is not an object: %v (%s)", i, err, raw)
+		}
+		for _, key := range []string{"id", "sessionID", "messageID", "type", "snapshot"} {
+			assertKind(t, p, key, "string")
+		}
+	}
+	return len(parts)
+}
+
+// TestConfigShapeMatchesOpencode asserts GET /config carries the captured 12-key
+// object with the right JSON kinds, and the server's model spec verbatim.
+func TestConfigShapeMatchesOpencode(t *testing.T) {
+	env := promptEnvFor(t)
+	status, body := getRaw(t, env.baseURL, "/config")
+	if status != http.StatusOK {
+		t.Fatalf("GET /config: expected 200, got %d (%s)", status, body)
+	}
+	cfg := objKeys(t, body)
+	assertKind(t, cfg, "$schema", "string")
+	assertKind(t, cfg, "command", "object")
+	assertKind(t, cfg, "plugin", "array")
+	assertStringEqual(t, cfg, "model", "test-faux/faux-1")
+	assertKind(t, cfg, "subagent_depth", "number")
+	assertKind(t, cfg, "username", "string")
+	assertKind(t, cfg, "mode", "object")
+	assertKind(t, cfg, "agent", "object")
+	assertKind(t, cfg, "provider", "object")
+	assertKind(t, cfg, "mcp", "object")
+	assertKind(t, cfg, "instructions", "array")
+	assertKind(t, cfg, "permission", "object")
+}
+
+// TestConfigProvidersShapeMatchesOpencode asserts the array-of-providers shape,
+// the full nested model key set, and that key is always empty.
+func TestConfigProvidersShapeMatchesOpencode(t *testing.T) {
+	env := promptEnvFor(t)
+	createPromptSession(t, env.baseURL)
+
+	status, body := getRaw(t, env.baseURL, "/config/providers")
+	if status != http.StatusOK {
+		t.Fatalf("GET /config/providers: expected 200, got %d (%s)", status, body)
+	}
+	top := objKeys(t, body)
+	providers := assertArray(t, top, "providers")
+	assertKind(t, top, "default", "object")
+	if len(providers) == 0 {
+		t.Fatal("providers is empty; the shape assertions would be vacuous")
+	}
+	for i, raw := range providers {
+		var p map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("providers[%d] is not an object: %v (%s)", i, err, raw)
+		}
+		assertKind(t, p, "id", "string")
+		assertKind(t, p, "name", "string")
+		assertKind(t, p, "source", "string")
+		assertKind(t, p, "env", "array")
+		assertStringEqual(t, p, "key", "")
+		assertKind(t, p, "options", "object")
+		models := assertObject(t, p, "models")
+		if len(models) == 0 {
+			t.Errorf("providers[%d].models is empty; no model shape to assert", i)
+		}
+		for id, mraw := range models {
+			var model map[string]json.RawMessage
+			if err := json.Unmarshal(mraw, &model); err != nil {
+				t.Fatalf("providers[%d].models[%s] is not an object: %v (%s)", i, id, err, mraw)
+			}
+			for _, key := range []string{"id", "providerID", "name", "family", "status", "release_date"} {
+				assertKind(t, model, key, "string")
+			}
+			for _, key := range []string{"api", "capabilities", "cost", "limit", "options", "headers", "variants"} {
+				assertKind(t, model, key, "object")
+			}
+		}
+	}
+}
+
+// TestAgentShapeMatchesOpencode asserts each /agent item carries the captured 13
+// keys and no model key.
+func TestAgentShapeMatchesOpencode(t *testing.T) {
+	env := promptEnvFor(t)
+	status, body := getRaw(t, env.baseURL, "/agent")
+	if status != http.StatusOK {
+		t.Fatalf("GET /agent: expected 200, got %d (%s)", status, body)
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(body, &items); err != nil {
+		t.Fatalf("GET /agent body is not an array: %v (%s)", err, body)
+	}
+	if len(items) == 0 {
+		t.Fatal("GET /agent returned no agents")
+	}
+	for i, raw := range items {
+		var a map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &a); err != nil {
+			t.Fatalf("agent[%d] is not an object: %v (%s)", i, err, raw)
+		}
+		for _, key := range []string{"name", "description", "mode"} {
+			assertKind(t, a, key, "string")
+		}
+		assertKind(t, a, "native", "bool")
+		for _, key := range []string{"hidden", "topP", "temperature", "color", "variant", "prompt", "steps"} {
+			assertKind(t, a, key, "null")
+		}
+		assertKind(t, a, "permission", "array")
+		assertKind(t, a, "options", "object")
+		if _, ok := a["model"]; ok {
+			t.Errorf("agent[%d] carries a model key; the captured delta omits it", i)
+		}
+	}
+}
+
+// TestSessionShapeMatchesOpencode drives every route that reaches
+// buildSessionDTO plus a disk-only session (restart), so both model sources are
+// covered.
+func TestSessionShapeMatchesOpencode(t *testing.T) {
+	env := promptEnvFor(t)
+
+	// POST /session: a live session, model from the live Model().
+	status, createBody := postJSON(t, env.baseURL, "/session", "{}")
+	if status != http.StatusOK {
+		t.Fatalf("POST /session: expected 200, got %d (%s)", status, createBody)
+	}
+	assertSessionShape(t, createBody)
+	var created sessionDTO
+	if err := json.Unmarshal(createBody, &created); err != nil {
+		t.Fatalf("decode POST /session: %v", err)
+	}
+	id := created.ID
+	if id == "" {
+		t.Fatal("POST /session returned an empty id")
+	}
+
+	// GET /session/{id}
+	status, body := getRaw(t, env.baseURL, "/session/"+id)
+	if status != http.StatusOK {
+		t.Fatalf("GET /session/{id}: expected 200, got %d (%s)", status, body)
+	}
+	assertSessionShape(t, body)
+
+	// PATCH /session/{id} returns the same expanded DTO.
+	status, body = sessionRequest(t, "PATCH", env.baseURL, id, `{"title":"shape parity"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH /session/{id}: expected 200, got %d (%s)", status, body)
+	}
+	assertSessionShape(t, body)
+
+	// GET /session and /experimental/session: the list elements share the shape.
+	for _, path := range []string{"/session", "/experimental/session"} {
+		status, body = getRaw(t, env.baseURL, path)
+		if status != http.StatusOK {
+			t.Fatalf("GET %s: expected 200, got %d (%s)", path, status, body)
+		}
+		var list []json.RawMessage
+		if err := json.Unmarshal(body, &list); err != nil {
+			t.Fatalf("GET %s: body is not an array: %v (%s)", path, err, body)
+		}
+		if len(list) == 0 {
+			t.Fatalf("GET %s: no sessions to assert", path)
+		}
+		for _, raw := range list {
+			assertSessionShape(t, raw)
+		}
+	}
+
+	// Disk-only session: no live host owns it, so the model comes from the
+	// parsed server spec. The restart reproduces post-restart state.
+	diskID := "disk-only-shape"
+	writeTestSession(t, env.sessionDir, diskID, []string{userEntry("disk-entry-1", "hi")})
+	diskBase := restartServer(t, env)
+	status, body = getRaw(t, diskBase, "/session/"+diskID)
+	if status != http.StatusOK {
+		t.Fatalf("GET /session/{disk}: expected 200, got %d (%s)", status, body)
+	}
+	assertSessionShape(t, body)
+}
+
+// TestMessageInfoShapeMatchesOpencode drives a prompt and asserts both the POST
+// and GET message bodies carry the captured info shape and the snapshot part key.
+func TestMessageInfoShapeMatchesOpencode(t *testing.T) {
+	env := promptEnvFor(t)
+	id := createPromptSession(t, env.baseURL)
+
+	status, body := postJSON(t, env.baseURL, "/session/"+id+"/message",
+		`{"parts":[{"type":"text","text":"reply with exactly: shape-ok"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("POST /session/{id}/message: expected 200, got %d (%s)", status, body)
+	}
+	parts := assertMessageShape(t, body)
+
+	status, body = getRaw(t, env.baseURL, "/session/"+id+"/message")
+	if status != http.StatusOK {
+		t.Fatalf("GET /session/{id}/message: expected 200, got %d (%s)", status, body)
+	}
+	var list []json.RawMessage
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatalf("GET /session/{id}/message: body is not an array: %v (%s)", err, body)
+	}
+	if len(list) == 0 {
+		t.Fatal("GET /session/{id}/message returned no messages")
+	}
+	for _, raw := range list {
+		parts += assertMessageShape(t, raw)
+	}
+	if parts == 0 {
+		t.Fatal("no message parts across POST and GET; the snapshot assertion was vacuous")
+	}
+}
+
+// TestSSEMessageUpdatedShapeMatchesOpencode proves the streamed message.updated
+// info tracks the polled shape.
+func TestSSEMessageUpdatedShapeMatchesOpencode(t *testing.T) {
+	env := promptEnvFor(t)
+	id := createPromptSession(t, env.baseURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resp := openSSE(t, env.baseURL, ctx)
+	defer func() { _ = resp.Body.Close() }()
+
+	promptAsyncOK(t, env.baseURL, id, "reply with exactly: sse-shape-ok")
+	frames := readSSEUntil(t, resp, func(frames []sseFrame) bool {
+		return hasFrame(frames, eventMessageUpdated)
+	})
+	cancel()
+
+	found := false
+	for _, f := range frames {
+		if f.Name != eventMessageUpdated {
+			continue
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		assertInfoShape(t, assertObject(t, payload, "info"))
+		found = true
+	}
+	if !found {
+		t.Fatalf("no message.updated frame carried an info object; frames: %s", summarize(frames))
 	}
 }
 

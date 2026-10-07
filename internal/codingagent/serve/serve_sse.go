@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -260,6 +261,14 @@ func sseDone(w http.ResponseWriter) bool {
 // session's forwarder is a single goroutine and calls Translate only from it.
 type eventMapper struct {
 	sessionID string
+	// cwd is the session's own working directory, or the resolved server root
+	// when the session has none. root is always the resolved server root.
+	cwd  string
+	root string
+	// providerID/modelID are the server spec fallback for a streamed assistant
+	// message that omits its own provider/model.
+	providerID string
+	modelID    string
 	// next is the number of messages that have started in this session's life.
 	next int
 	// current is the index of the message being streamed, set at its
@@ -268,9 +277,25 @@ type eventMapper struct {
 	current int
 }
 
-// newEventMapper returns the Translator the host runs for one session.
-func newEventMapper(sessionID string) codinghost.Translator {
-	mapper := &eventMapper{sessionID: sessionID}
+// newEventMapper returns the Translator the host runs for one session. It is a
+// *Server method because the mapper carries the server's resolved root and
+// model spec alongside the session's own cwd, read once at construction.
+func (s *Server) newEventMapper(sessionID string) codinghost.Translator {
+	root, _ := filepath.EvalSymlinks(s.services.CWD())
+	cwd := root
+	if ls, ok := s.host.Get(sessionID); ok {
+		if got := ls.Inner().CWD(); got != "" {
+			cwd = got
+		}
+	}
+	providerID, modelID, _ := s.sessionModelParts()
+	mapper := &eventMapper{
+		sessionID:  sessionID,
+		cwd:        cwd,
+		root:       root,
+		providerID: providerID,
+		modelID:    modelID,
+	}
 	return mapper.translate
 }
 
@@ -375,12 +400,8 @@ func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]co
 	blocks := ev.Message.Assistant.Content
 	events := []codinghost.Event{m.event(eventMessageUpdated, sseMessageUpdated{
 		SessionID: m.sessionID,
-		Info: messageInfoDTO{
-			ID:        entryID,
-			SessionID: m.sessionID,
-			Role:      "assistant",
-			Time:      messageTime{Created: now},
-		},
+		Info: messageInfo(m.sessionID, m.cwd, m.root, entryID, "assistant", "", now,
+			ev.Message.Assistant, m.providerID, m.modelID),
 	})}
 	// The index runs over the full content slice, enumerated before any block is
 	// filtered out, so it equals ai.*Event.ContentIndex even where a block yields
