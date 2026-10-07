@@ -1292,3 +1292,15 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   KKCode (superseded for this client by the capture above); keep it as future work for genuinely V2
   clients. Auth: wopr ignores the client's Basic `Authorization` header and never emits 401, by owner
   decision 2026-10-07.
+
+### serve-test-faux-fallback-in-production — `wopr serve` reports a fake model when startup resolution yields none
+
+- **Status:** READY — surfaced 2026-10-07 during the `serve-kkcode-v1-compat` wave.
+- **Why:** `cmd/wopr/serve.go:142-147` sets `modelSpec = "test-faux/faux-1"` (comment "fallback for tests")
+  whenever `selectStartupModel` returns no model, which it can do with a nil error when no provider is
+  authenticated and no default resolves (`cmd/wopr/startup_model.go:134-137`). In that state `GET /config`
+  would return `{"model":"test-faux/faux-1"}` and sessions would start against a nonexistent provider rather
+  than failing loudly. Confirm whether that state is reachable in production and either fail with a clear
+  message or omit the field.
+- **Files:** `cmd/wopr/serve.go`, possibly `cmd/wopr/startup_model.go`.
+- **Gates:** a behavioral test for the no-model state; `make check`.
