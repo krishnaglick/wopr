@@ -765,8 +765,8 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   separate dispatchable item. Decided: reject a foreign `?directory=` with 400,
   matching the four sibling handlers (the API stays a validation against the
   process root; see `session-directory` decision 4). Delivered by
-  `session-directory`'s `/file` directory-validation slice (`serveListFiles`
-  gains `directoryParam`; `server.md`'s `/file` row lists `directory`).
+  `session-directory` slice 2 (`9062a52`): `serveListFiles` gains
+  `directoryParam`; `server.md`'s `/file` row lists `directory`.
 - **Depends on:** serve-file-list-race
 - **Why:** `listFiles` reads only `path` and never calls `directoryParam`
   (`serve_handlers.go:64-77`), while every sibling handler including `serveFileContent`
@@ -1084,7 +1084,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### session-directory — let a session work in a directory other than the process cwd
 
-- **Status:** IN PROGRESS (wave-session-directory, claimed 2026-10-06) — spec at `docs/plans/2026-10-06-session-directory.md`,
+- **Status:** DONE — shipped on `wave-session-directory` as `9e2c944` + `9062a52` (+ docs), merged `--no-ff` into `main`. Spec at `docs/plans/2026-10-06-session-directory.md`,
   verified 2026-10-06 by three independent verifier fans (final pass 0 blockers;
   the four residual warnings/nits corrected). The plan is the single source for
   the decisions, files, slices, and gates; this entry records status and

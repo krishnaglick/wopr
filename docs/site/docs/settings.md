@@ -119,6 +119,7 @@ set it in `~/.wopr/agent/settings.json`:
 |---|---|---|---|
 | `server.port` | integer | `4096` | TCP port `wopr serve` binds. `0` means the default. `--port` overrides. |
 | `server.hostname` | string | `127.0.0.1` | Address `wopr serve` binds. `""` means the default. `--hostname` overrides. Binding a non-loopback address serves without authentication; see [server](server.md). |
+| `server.allowedRoots` | string[] |  | Directories `wopr serve` may serve. Empty means unrestricted. Entries support `~` and `file://`. Read from the global settings layer only, so a served project cannot widen it. When non-empty, the served root must be inside an entry. This is a launcher guardrail against misconfiguration, not a network boundary. |
 
 ## Images and terminal
 
