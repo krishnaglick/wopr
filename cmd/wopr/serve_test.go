@@ -34,6 +34,18 @@ func TestResolveServeRoot(t *testing.T) {
 		t.Fatalf("empty list = %q, %v; want %q", got, err, wantSub)
 	}
 
+	// A sibling sharing the entry's prefix must not be treated as inside it.
+	baseDir := filepath.Join(base, "base")
+	sibling := filepath.Join(base, "baseX")
+	for _, d := range []string{baseDir, sibling} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := resolveServeRoot(sibling, []string{baseDir}); err == nil {
+		t.Fatal("prefix sibling succeeded, want error")
+	}
+
 	// A symlinked entry is resolved before containment.
 	real := t.TempDir()
 	wantReal, err := filepath.EvalSymlinks(real)
@@ -53,5 +65,17 @@ func TestResolveServeRoot(t *testing.T) {
 	}
 	if _, err := resolveServeRoot(sub, []string{file}); err == nil {
 		t.Fatal("file entry succeeded, want error")
+	}
+
+	// The default root is os.Getwd(). A cwd that reaches the outside through a
+	// symlink inside an allowed entry must be rejected: the root is resolved
+	// before the containment check, like the entries.
+	allowed := t.TempDir()
+	outside := t.TempDir()
+	escapeLink := filepath.Join(allowed, "escape")
+	testenv.Symlink(t, outside, escapeLink)
+	t.Chdir(escapeLink)
+	if _, err = resolveServeRoot("", []string{allowed}); err == nil {
+		t.Fatal("symlinked cwd escaping its allowed entry succeeded, want error")
 	}
 }

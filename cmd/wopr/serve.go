@@ -168,6 +168,12 @@ func resolveServeRoot(dirFlag string, allowedRoots []string) (string, error) {
 	if len(allowedRoots) == 0 {
 		return root, nil
 	}
+	// The default root is os.Getwd(), which can be a symlinked path. Resolve it
+	// before comparing, or a cwd reached through a symlink escapes containment.
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("--dir %q: %w", root, err)
+	}
 	for _, entry := range allowedRoots {
 		entryAbs, err := filepath.Abs(entry)
 		if err != nil {
