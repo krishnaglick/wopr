@@ -1,18 +1,25 @@
 # Resume point
 
-**Idle — no wave in progress; KKCode live-test loop paused awaiting a real-app retry.** 2026-10-07
+**KKCode phone test in progress — server side fixed, awaiting a real-app retry.** 2026-10-07
 
-- **In flight:** nothing uncommitted. KKCode compatibility is merged: `serve-kkcode-v1-compat`
-  (`e7569dc`), the `/file` entry shape (`78773a2`), and `serve-kkcode-dto-shape-parity` (`b6b76e2`).
-  The captured KKCode connect → prompt sequence passes against a live `wopr serve` (protocol replay,
-  66/66 assertions) and is codified as `internal/codingagent/serve/serve_kkcode_replay_test.go`
-  (`d3df1be`). **Next:** owner points the real KKCode app at the logging proxy and confirms
-  folder → session → prompt in the UI; on any error read `/tmp/wopr-proxy.log`.
+- **In flight:** nothing uncommitted. On top of the KKCode compatibility work
+  (`e7569dc` routes, `78773a2` `/file` shape, `b6b76e2` DTO-shape parity, `d3df1be` replay test),
+  two more fixes landed: `a0777d5` adds `/project` `time`/`sandboxes` and `/config.permission`
+  keys, and `4642887` fixes `AuthenticatedProviders` — it only named a hard-coded provider list,
+  so a provider authed solely via `auth.json` (`opencode-go`) had *no* models in the picker or
+  `wopr --list-models`. `GET /config/providers` now lists all 36 opencode-go models.
+  **Next:** owner retests KKCode (folder → session → prompt → stop) at `http://100.109.237.16:4098`;
+  on any error read `/tmp/wopr-proxy.log`.
+- **Owner config changed (backed up):** `~/.wopr/agent/settings.json` and `router.json` were edited
+  to default to the working `opencode-go/deepseek-v4.1-flash` (the prior default `space-bunny-free`
+  is dead upstream — `"Model is unavailable"`). Backups: `settings.json.bak-2026-10-07`,
+  `router.json.bak-2026-10-07`. The proper interface is the interactive `wopr setup`; the edit is a
+  stopgap. Verified: `/session/{id}/message` replies, `abort` → `session/status` `idle`.
 - **Live rig:** `wopr serve` (rebuilt, `make install`) on `100.109.237.16:4097` → `/tmp/wopr-serve.log`;
   Node logging proxy `/tmp/wopr-proxy.js` on `:4098` → `:4097` → `/tmp/wopr-proxy.log`; real opencode on
   `:4096`. An iOS emulator is NOT available (Linux host, no Mac on the tailnet, closed-source App Store
   app is FairPlay-encrypted); the protocol-replay harness is the automated substitute.
-- **Last green slice:** `d3df1be` (KKCode replay test) on `main`.
+- **Last green slice:** `4642887` (auth.json-only provider listing fix) on `main`; `make check` green.
 - **What shipped:** Aligned wopr's V1 DTOs to opencode 1.18.34's captured shapes so KKCode stops
   aborting with "cannot convert undefined value to object". `GET /config` is the full 12-key object;
   `GET /config/providers` is the structural `{providers:[{id,name,source,env,key,options,models}],
