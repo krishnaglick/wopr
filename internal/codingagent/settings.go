@@ -1002,6 +1002,16 @@ func (sm *SettingsManager) GetGlobalSettings() Settings {
 	return sm.global.clone()
 }
 
+// GlobalLoadError returns the error from the last global settings load; nil
+// when the global layer is absent or parsed. A configured-but-unparsable layer
+// reports an error here so callers can fail closed instead of reading the
+// zero layer that loadLayer leaves behind.
+func (sm *SettingsManager) GlobalLoadError() error {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.globalLoadErr
+}
+
 // GetProjectSettings returns the persisted project settings layer.
 func (sm *SettingsManager) GetProjectSettings() Settings {
 	sm.mu.RLock()
