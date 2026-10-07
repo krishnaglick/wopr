@@ -1189,8 +1189,12 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-allowed-roots-unknown-key-fail-open — a misspelled server.allowedRoots key silently disables the allowlist
 
-- **Status:** READY — surfaced 2026-10-07 by the `serve-allowed-roots-type-mismatch-fail-open`
-  work verification (security angle, residual warning).
+- **Status:** NEEDS-INPUT — owner decision 2026-10-07: on a `server` key that is a
+  near-miss for `allowedRoots` (a typo) but no valid `allowedRoots`, does `wopr
+  serve` (a) refuse to start, (b) refuse only when the key is a near-miss and warn
+  on other unknown `server` keys, or (c) warn and continue? (b) is fail-closed for
+  typos without breaking forward-compatibility for genuinely new keys. Surfaced by
+  the `serve-allowed-roots-type-mismatch-fail-open` verification (security angle).
 - **Why:** the tolerant decoder ignores unknown keys, so `{"server":{"allowedRoot":"/srv"}}`
   (typo) or `{"server":{"allowedRootsX":[...]}}` parses successfully with an empty
   allowlist, `GetServerAllowedRoots` returns `nil, nil`, and `wopr serve` treats the

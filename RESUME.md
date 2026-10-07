@@ -1,65 +1,44 @@
 # Resume point
 
-**Idle — no wave in progress. `session-directory` plan verified; awaiting an
-implementation decision.** 2026-10-06
+**Idle — ocean loop stopped: no dispatchable item left. One owner decision open.** 2026-10-07
 
-- **In flight:** `docs/plans/2026-10-06-session-directory.md` (untracked) —
-  launch-time directory selection (`--dir` for the CLI and `wopr serve`), a
-  global-layer `server.allowedRoots` guardrail, and the `/file` 400 fix, in 3
-  slices. Three independent verifier fans ran; the final pass reported 0 blockers
-  and the four residual warnings/nits were corrected inline. **Next:** dispatch a
-  wave to implement it (it is the only READY item), unless the owner first wants to
-  review Q2 (relative CLI paths vs `--dir`) and Q3 (`--dir` + `--resume`
-  precedence), which the plan records as assumed defaults.
-- **Tracker:** `session-directory` READY; `serve-file-list-directory-param` FOLDED
-  into it; `serve-7` DONE by decision (all tools open by default).
-- **Last green slice:** `router-clock-seam` committed on `wave-router-clock-seam`
-  as `198e2da` (+ `861cfa5` spec-citation fix), merged into `main` as `57a2230`
-  (`--no-ff`). Branch and worktree pruned after a verified merge. Base was `main`
-  at `e1f4ac2`.
-- **What shipped:** Added `Router.SetClockForTest(func() time.Time)` — a
-  mutex-guarded, test-only clock seam; `New` still defaults to `time.Now` and no
-  production cooldown behavior changed. `TestSessionFailoverRestsTheFailedModelForQuotaBackoff`
-  (`coding/session_router_failover_test.go`) drives a `free_tier_limit` failover
-  through the real session (`faux-1`→`faux-2`), asserts the post-failover decision
-  is `faux-2` and `At` is the fake clock (anti-vacuous-pass guards), advances 61s,
-  and asserts `faux-1` is not re-offered — i.e. it rested `quotaBackoffMinutes`
-  (15m), not the generic 60s. **Divergence flagged:** the test lives in
-  `coding/session_router_failover_test.go`, not the item's named
-  `coding/session_retry_classify_test.go`; the backlog `Files:` line was
-  reconciled on ship. Spec: `docs/plans/2026-10-06-router-clock-seam.md`.
-- **Verification:** spec fan 2 angles (runtime-seam, leanness/test-oracle), both
-  CLEAN, 0 blockers; accepted findings (seam renamed `SetClockForTest`, comment
-  states the unlocked-read concurrency fact, spec-prose accuracy) corrected before
-  dispatch. Diff fan 2 angles (gate-integrity/scope-fit, test-oracle/seam),
-  both CLEAN; both flagged the spec's stale mutation line citation, fixed in
-  `861cfa5`. RED: compile-red (`SetClockForTest undefined`) before the seam;
-  mutation-red (`Next`'s RateLimited cooldown → `time.Minute`) fails with
-  `faux-1 re-offered after 61s`, reproduced and reverted by the orchestrator and
-  independently by both verifiers. Gates on branch and re-run on merged `main`:
-  `go build ./...`, `go vet ./...`, `go fix -diff` (clean), `golangci-lint` (0
-  issues), touched-package tests + `-race`, new test `-count=3`, `go test ./...`,
-  docs-drift, and **`make check` fully green — tmux IS installed (3.5+)**, contrary
-  to earlier resume notes.
-- **Prior shipped:** `serve-ci-host-race-echo` committed `369fa93`, merged
-  `e1f4ac2`; `docs-drift-link-syntax-ceiling` committed `ac00a15`, merged
-  `1d41da1`; `docs-drift-docs-json` committed `2625071`, merged `494fa4d`;
-  `serve-cli-doc` committed `8186386`, merged `d2842ec`.
-- **Owner decisions taken 2026-10-06:** `serve-7` — all tools open by default, no
-  approval gate (the `/permission*` 501 stubs stay). `serve-file-list-directory-param`
-  — reject a foreign `?directory=` with 400; folded into `session-directory`.
-  `session-directory` — both CLI and serve, operator allowlist, one root per
-  process, launch-time root. See `BACKLOG.md`.
-- **tmux PATH nuance:** `tmux` 3.4 lives at `/home/kc/bin/tmux` and is on PATH only
-  for login shells (`bash -lc`). Non-login tool shells miss it, which is why some
-  waves reported `make check` blocked at `test-prereqs` and later ones ran it green.
-  Both are honest; the difference is shell init. Do not read the earlier "tmux
-  absent" notes as a contradiction of the later green `make check`.
-- **Tracker note:** `BACKLOG.md` and `RESUME.md` were brought under version control
-  at `7452fce`; the directory-work edits since are uncommitted in the working tree.
-  `.worktrees/` is now gitignored (`43717b5`) and `.agents/skills/ocean/` was
-  deleted. The new plan `docs/plans/2026-10-06-session-directory.md` is untracked.
-  `main` is ahead of `origin/main`; nothing has been pushed.
+- **In flight:** nothing. The session-directory plan is implemented; its three
+  serve-allowlist follow-ups also landed. The only non-DONE item is NEEDS-INPUT:
+  `serve-allowed-roots-unknown-key-fail-open` (on a misspelled `server.allowedRoots`
+  key — refuse to start or warn). Ocean stopped rather than pick a favourite.
+- **Last green slice:** `serve-allowed-roots-wiring-test` committed on
+  `wave-serve-allowed-roots-wiring-test` as `06a850a`, merged into `main`
+  (`--no-ff`). Base was `main` at `d57d826`.
+- **What shipped:** Test-only. `TestGlobalServeAllowedRootsReadsGlobalLayerOnly`
+  (`cmd/wopr/serve_test.go`) proves a `projectTrusted=true` project
+  `.wopr/settings.json` with a broader `server.allowedRoots` cannot widen what
+  `globalServeAllowedRoots` returns — a guard asserts the merged `sm.Get()` view
+  genuinely contains the project root, so the assertion fails if the helper ever
+  reads merged settings. `TestRunServeCommandRefusesRootOutsideGlobalAllowlist`
+  pins `runServeCommand` to the global-derived list: a `--dir` outside it is
+  refused with `is outside every server.allowedRoots entry`, catching a dropped
+  `resolveServeRoot` call. No production file changed. Spec:
+  `docs/plans/2026-10-07-serve-allowed-roots-wiring-test.md`.
+- **Verification:** spec fan 3 angles (runtime-seam/falsifiability,
+  convention-feasibility, completeness), all CLEAN with no blockers; accepted
+  findings corrected the spec (Test 2's project fixture was inert under
+  `projectTrusted=false`, so it was removed and the test renamed; its dropped-call
+  red-proof was made a required gate). Implementer red-proofed both tests. The
+  orchestrator independently reproduced both FAILs and gates: `go build ./...`,
+  `go vet ./...`, `go test ./cmd/wopr ./internal/codingagent` (247 passed),
+  `go tool golangci-lint run ./cmd/wopr/...` (0 issues), `bash -lc 'make check'`
+  all green. Diff fan 2 angles (falsifiability; scope/hygiene), both CLEAN, 0
+  findings. Note: the `rtk` proxy reported exit 7 for the lint run while printing
+  "No issues found"; the direct `go tool golangci-lint` run exited 0.
+- **Prior shipped:** `serve-allowed-roots-type-mismatch-fail-open` (`c7e9f0b`,
+  merged `d57d826`); `serve-allowed-roots-fail-open` (`09bbd65`, `c0e8624`);
+  `router-clock-seam` (`198e2da` + `861cfa5`, merged `57a2230`).
+- **Tracker:** all items DONE except `serve-allowed-roots-unknown-key-fail-open`
+  (NEEDS-INPUT); `serve-file-list-directory-param` FOLDED; `serve-7` DONE by
+  decision.
+- **tmux PATH nuance:** `tmux` lives on PATH only for login shells (`bash -lc`);
+  run `make check` via `bash -lc` or it can fail at `test-prereqs`.
+- **Remote:** `main` is ahead of `origin/main`; nothing has been pushed.
 
 This file lives at the primary checkout on purpose. `wave` runs inside
 `.worktrees/wave-<id>/`, which merge prunes; a resume point written inside a
