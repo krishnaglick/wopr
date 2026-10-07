@@ -339,3 +339,64 @@ func TestUnmarshalJSONRejectsUndecodableServerGuardrail(t *testing.T) {
 		t.Fatalf("server = %+v, want nil", s.Server)
 	}
 }
+
+// TestUnmarshalJSONRejectsNearMissAllowedRootsKey covers the fail-closed
+// guardrail: a settings.server key that looks like a misspelled allowedRoots
+// and no valid allowedRoots present is an error, while an unrelated unknown key
+// and a near-miss beside a valid allowedRoots stay tolerated.
+func TestUnmarshalJSONRejectsNearMissAllowedRootsKey(t *testing.T) {
+	reject := []string{
+		`{"server":{"allowedRoot":"/srv"}}`,
+		`{"server":{"allowedRoots ":["/srv"]}}`,
+		`{"server":{" allowedRoots":["/srv"]}}`,
+		// A leading zero-width space (U+200B) is padding TrimSpace would miss.
+		"{\"server\":{\"\u200ballowedRoots\":[\"/srv\"]}}",
+	}
+	for _, body := range reject {
+		var s Settings
+		err := json.Unmarshal([]byte(body), &s)
+		if err == nil || !strings.Contains(err.Error(), "did you mean server.allowedRoots") {
+			t.Fatalf("Unmarshal(%s) error = %v, want a near-miss allowedRoots error", body, err)
+		}
+	}
+
+	// An unrelated unknown server key is tolerated, not a near-miss.
+	var tolerant Settings
+	if err := json.Unmarshal([]byte(`{"server":{"allowedHosts":["x"]}}`), &tolerant); err != nil {
+		t.Fatalf("Unmarshal(allowedHosts) = %v, want nil", err)
+	}
+	if tolerant.Server == nil || len(tolerant.Server.AllowedRoots) != 0 {
+		t.Fatalf("server = %+v, want empty allowedRoots", tolerant.Server)
+	}
+
+	// A valid allowedRoots wins over a near-miss key beside it.
+	var validWins Settings
+	if err := json.Unmarshal([]byte(`{"server":{"allowedRoots":["/a"],"allowedRoot":["/b"]}}`), &validWins); err != nil {
+		t.Fatalf("Unmarshal(valid beside near-miss) = %v, want nil", err)
+	}
+	if validWins.Server == nil || !slices.Equal(validWins.Server.AllowedRoots, []string{"/a"}) {
+		t.Fatalf("server = %+v, want allowedRoots [/a]", validWins.Server)
+	}
+
+	// An empty array is present-and-valid (unrestricted), so it wins too.
+	var emptyValid Settings
+	if err := json.Unmarshal([]byte(`{"server":{"allowedRoots":[],"allowedRoot":["/b"]}}`), &emptyValid); err != nil {
+		t.Fatalf("Unmarshal(empty allowedRoots beside near-miss) = %v, want nil", err)
+	}
+}
+
+// TestLoadWarnsOnUnknownServerKey checks an unrelated unknown settings.server
+// key neither fails the load nor hides: it reaches the warning accessor.
+func TestLoadWarnsOnUnknownServerKey(t *testing.T) {
+	agentDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"server":{"allowedHosts":["x"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sm := NewSettingsManagerWithProjectTrust(t.TempDir(), agentDir, false)
+	if err := sm.GlobalLoadError(); err != nil {
+		t.Fatalf("GlobalLoadError() = %v, want nil", err)
+	}
+	if keys := sm.GlobalUnknownServerKeys(); !slices.Contains(keys, "allowedHosts") {
+		t.Fatalf("GlobalUnknownServerKeys() = %v, want it to contain allowedHosts", keys)
+	}
+}

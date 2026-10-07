@@ -130,6 +130,18 @@ func TestGlobalServeAllowedRootsFailsClosedOnMalformedGlobalSettings(t *testing.
 			t.Fatal("globalServeAllowedRoots() error = nil for wrong-typed allowedRoots, want error")
 		}
 	})
+
+	t.Run("unknown-server-keys-tolerated", func(t *testing.T) {
+		agentDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"server":{"allowedHosts":["x"]}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		sm := codingagent.NewSettingsManagerWithProjectTrust(t.TempDir(), agentDir, false)
+		roots, err := globalServeAllowedRoots(sm)
+		if roots != nil || err != nil {
+			t.Fatalf("globalServeAllowedRoots() = %v, %v; want nil, nil", roots, err)
+		}
+	})
 }
 
 func TestRunServeCommandRefusesOnMalformedGlobalSettings(t *testing.T) {
@@ -215,6 +227,50 @@ func TestRunServeCommandRefusesOnUndecodableServerGuardrail(t *testing.T) {
 	}
 	if !strings.Contains(string(stderr), "allowedRoots") && !strings.Contains(string(stderr), "server") {
 		t.Fatalf("stderr = %q, want it to name the undecodable server guardrail", stderr)
+	}
+}
+
+func TestRunServeCommandRefusesOnNearMissAllowedRootsKey(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	tmp := t.TempDir()
+	t.Setenv("WOPR_HOME", tmp)
+	t.Setenv(codingagent.ENV_AGENT_DIR, "")
+	agentDir := filepath.Join(tmp, "agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"server":{"allowedRoot":"/srv"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tmpDir := t.TempDir()
+
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = old })
+	code := runServeCommand([]string{"serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port), "--dir", tmpDir})
+	os.Stderr = old
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 1 {
+		t.Fatalf("runServeCommand() = %d, want 1; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(string(stderr), "did you mean server.allowedRoots") {
+		t.Fatalf("stderr = %q, want the near-miss allowedRoots refusal", stderr)
 	}
 }
 

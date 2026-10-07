@@ -78,6 +78,9 @@ func runServeCommand(args []string) int {
 	// The allowlist is a global-layer guardrail: a served project must not be
 	// able to widen it. The manager's cwd is irrelevant to global settings.
 	globalSettings := codingagent.NewSettingsManagerWithProjectTrust(".", agentDir, false)
+	for _, key := range globalSettings.GlobalUnknownServerKeys() {
+		fmt.Fprintf(os.Stderr, "wopr serve: warning: unrecognized server setting %q ignored\n", key)
+	}
 	allowedRoots, err := globalServeAllowedRoots(globalSettings)
 	if err != nil {
 		return failf("wopr serve: %v", err)
