@@ -1259,5 +1259,36 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   "unrecognized server setting" warning — and, if its name matched the `allow…root` stem, would
   refuse a valid config. A drift hazard, not a current bug.
 - **Files:** `internal/codingagent/settings.go`.
-- **Gates:** a `ServerSettings` field addition cannot silently produce a false unknown-key warning
+- **Gates:** a `ServerSettings` field addition cannot produce a false unknown-key warning
   (derive the known set from the struct tags, or add a test coupling the two).
+
+---
+
+## Follow-ups surfaced by KKCode remote-client testing
+
+### serve-kkcode-v1-compat — KKCode mobile client 404s on connect: missing `/api/health` and sibling routes
+
+- **Status:** READY — surfaced 2026-10-07 testing `wopr serve` against the KKCode iOS client
+  (closed-source; UA `KKCode/29694823`). Captured by a logging reverse proxy in front of a real
+  opencode 1.18.34 server.
+- **Why:** KKCode's first connect call is `GET /api/health`, which wopr does not serve, so the whole
+  connect aborts with a 404 before it reaches the V1 surface wopr already implements. A full
+  connect → project → session → prompt flow uses exactly these routes: `/api/health`, `/global/health`,
+  `/experimental/session`, `/project`, `/global/event` (SSE), `/file`, `POST /session`, `/api/command`,
+  `/session/{id}/todo`, `/session/{id}/message`, `/agent`, `/config/providers`, `/config`, `/permission`,
+  `/question`, `POST /session/{id}/prompt_async`. wopr already serves all but four routes and one
+  status: `GET /api/health` → 404 (opencode answers `{"healthy":true}`); `GET /experimental/session`
+  → 404 (same session list as `GET /session`); `GET /config` → 404 (opencode returns an object with
+  keys `$schema,agent,command,instructions,mcp,mode,model,permission,plugin,provider,subagent_depth,
+  username`); `GET /api/command` → 404 (opencode returns `{location:{directory,project},data:[{name,
+  description,template}]}`, e.g. the built-in `init`); `GET /permission` → currently 501, should be
+  `200 []`. `/api/status` and `/api/info` are fallback probes that only fire when `/api/health` fails
+  (opencode serves them the web-UI HTML), so they are not required.
+- **Files:** `internal/codingagent/serve/` (route registration, handlers, DTOs), `docs/site/docs/server.md`
+  (endpoint table).
+- **Gates:** hermetic tests pinning each new route's status and body shape; a live probe against a real
+  listener. Manual: KKCode connects to `wopr serve` through the logging proxy with no 404.
+- **Notes:** The V2 tiered-parity plan `docs/plans/2026-10-07-serve-v2-api-parity.md` is NOT needed for
+  KKCode (superseded for this client by the capture above); keep it as future work for genuinely V2
+  clients. Auth: wopr ignores the client's Basic `Authorization` header and never emits 401, by owner
+  decision 2026-10-07.
