@@ -1183,7 +1183,22 @@ func readSSE(t *testing.T, body io.Reader, stop func([]sseFrame) bool) []sseFram
 		if name == "" && len(data) == 0 {
 			return
 		}
-		frames = append(frames, sseFrame{Name: name, Data: strings.Join(data, "\n")})
+		joined := strings.Join(data, "\n")
+		// opencode frames carry no event: line; the type and properties live in
+		// the data envelope. Unwrap it so callers keep seeing Name + payload.
+		if name == "" {
+			var env struct {
+				Payload struct {
+					Type       string          `json:"type"`
+					Properties json.RawMessage `json:"properties"`
+				} `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(joined), &env); err == nil && env.Payload.Type != "" {
+				name = env.Payload.Type
+				joined = string(env.Payload.Properties)
+			}
+		}
+		frames = append(frames, sseFrame{Name: name, Data: joined})
 		name, data = "", nil
 	}
 	for {

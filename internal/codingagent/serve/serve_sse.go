@@ -2,8 +2,11 @@ package serve
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -39,6 +42,7 @@ const (
 	eventSessionUpdated     = "session.updated"
 	eventSessionError       = "session.error"
 	eventSessionStatus      = "session.status"
+	eventSessionIdle        = "session.idle"
 	eventTodoUpdated        = "todo.updated"
 	eventQuestionAsked      = "question.asked"
 	eventQuestionReplied    = "question.replied"
@@ -116,6 +120,24 @@ type sseSessionError struct {
 type sseSessionUpdated struct {
 	SessionID string     `json:"sessionID"`
 	Info      sessionDTO `json:"info"`
+}
+
+// sseSessionStatus answers session.status. opencode nests the state under
+// status: {"sessionID":…,"status":{"type":"busy"}}; a top-level type is a
+// different shape the client does not read.
+type sseSessionStatus struct {
+	SessionID string               `json:"sessionID"`
+	Status    sseSessionStatusType `json:"status"`
+}
+
+type sseSessionStatusType struct {
+	Type string `json:"type"`
+}
+
+// sseSessionIdle answers session.idle, the turn-complete marker the client
+// waits for to settle a run (wopr previously emitted only session.status).
+type sseSessionIdle struct {
+	SessionID string `json:"sessionID"`
 }
 
 // sseTodoUpdated answers todo.updated.
@@ -223,11 +245,55 @@ func (s *Server) globalEvent(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// sseWrite writes one SSE frame. A write error is the only signal that the
-// connection is gone, so it ends the handler.
+// sseEnvelope is opencode's SSE frame: a wrapped payload carrying the event id,
+// type and properties. The client reads data.payload.type and
+// data.payload.properties; a bare data object (wopr's old frame) leaves
+// data.payload undefined and throws on the first frame.
+type sseEnvelope struct {
+	Payload sseEnvelopePayload `json:"payload"`
+}
+
+type sseEnvelopePayload struct {
+	ID         string          `json:"id"`
+	Type       string          `json:"type"`
+	Properties json.RawMessage `json:"properties"`
+}
+
+// newEventID mints an opencode-shaped envelope id. The client only needs it
+// unique; it is never echoed back.
+func newEventID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "evt_" + strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return "evt_" + hex.EncodeToString(b[:])
+}
+
+// sseWrite writes one SSE frame in opencode's envelope. A write error is the
+// only signal that the connection is gone, so it ends the handler.
 func sseWrite(w http.ResponseWriter, name string, payload []byte) error {
-	_, err := w.Write([]byte("event: " + name + "\ndata: " + string(payload) + "\n\n"))
-	return err
+	frame, err := json.Marshal(sseEnvelope{Payload: sseEnvelopePayload{
+		ID:         newEventID(),
+		Type:       name,
+		Properties: payload,
+	}})
+	if err != nil {
+		return err
+	}
+	frame = append(frame, '\n', '\n')
+	return writeAll(w, append([]byte("data: "), frame...))
+}
+
+// writeAll writes b in full, since a single Write may be short.
+func writeAll(w io.Writer, b []byte) error {
+	for len(b) > 0 {
+		n, err := w.Write(b)
+		if err != nil {
+			return err
+		}
+		b = b[n:]
+	}
+	return nil
 }
 
 // sseFlush pushes buffered frames to the client. Without it the response is
@@ -315,7 +381,7 @@ func (m *eventMapper) translate(ev agent.AgentEvent, entryID string) ([]codingho
 	case agent.AgentStartEvent:
 		return m.one(m.status("busy")), nil
 	case agent.AgentSettledEvent:
-		return m.one(m.status("idle")), nil
+		return []codinghost.Event{m.status("idle"), m.idle()}, nil
 	case agent.AutoRetryStartEvent:
 		return append(m.one(m.status("retry")), m.error("AutoRetry", e.ErrorMessage)), nil
 	case agent.AutoRetryEndEvent:
@@ -497,7 +563,11 @@ func (m *eventMapper) part(p partDTO) codinghost.Event {
 }
 
 func (m *eventMapper) status(kind string) codinghost.Event {
-	return m.event(eventSessionStatus, sessionStatusDTO{SessionID: m.sessionID, Type: kind})
+	return m.event(eventSessionStatus, sseSessionStatus{SessionID: m.sessionID, Status: sseSessionStatusType{Type: kind}})
+}
+
+func (m *eventMapper) idle() codinghost.Event {
+	return m.event(eventSessionIdle, sseSessionIdle{SessionID: m.sessionID})
 }
 
 func (m *eventMapper) error(name, message string) codinghost.Event {
