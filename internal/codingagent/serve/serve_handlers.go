@@ -107,7 +107,17 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 		Provider:     map[string]any{},
 		MCP:          map[string]any{},
 		Instructions: []any{},
-		Permission:   map[string]any{},
+		// wopr has no approval gate, so every action is allowed. The keys mirror
+		// opencode's so a client that reads an individual entry finds it
+		// (reading a missing permission key is the same crash class as an
+		// undefined object).
+		Permission: map[string]any{
+			"read": "allow", "edit": "allow", "glob": "allow", "grep": "allow",
+			"list": "allow", "bash": "allow", "task": "allow", "todowrite": "allow",
+			"question": "allow", "webfetch": "allow", "websearch": "allow",
+			"lsp": "allow", "skill": "allow",
+			"external_directory": map[string]any{"*": "allow"},
+		},
 	})
 }
 
@@ -374,18 +384,35 @@ func (s *Server) patchSession(w http.ResponseWriter, r *http.Request) {
 // DELETE /session/{id}, POST /session/{id}/fork, POST /session/{id}/revert, GET /session/{id}/diff
 // All share the same notImplemented stub.
 
+// project builds the served-root project DTO. time and sandboxes are always
+// present (see projectDTO); vcs is set only for a git worktree, matching how
+// opencode annotates repositories.
+func (s *Server) project() projectDTO {
+	worktree, _ := filepath.EvalSymlinks(s.services.CWD())
+	var mtime int64
+	if info, err := os.Stat(worktree); err == nil {
+		mtime = info.ModTime().UnixMilli()
+	}
+	dto := projectDTO{
+		ID:        projectID(worktree),
+		Worktree:  worktree,
+		Time:      projectTime{Created: mtime, Updated: mtime},
+		Sandboxes: []string{},
+	}
+	if _, err := os.Stat(filepath.Join(worktree, ".git")); err == nil {
+		dto.VCS = "git"
+	}
+	return dto
+}
+
 // GET /project
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
-	worktree, _ := filepath.EvalSymlinks(s.services.CWD())
-	pid := projectID(worktree)
-	s.writeJSON(w, http.StatusOK, []projectDTO{{ID: pid, Worktree: worktree}})
+	s.writeJSON(w, http.StatusOK, []projectDTO{s.project()})
 }
 
 // GET /project/current
 func (s *Server) getCurrentProject(w http.ResponseWriter, r *http.Request) {
-	worktree, _ := filepath.EvalSymlinks(s.services.CWD())
-	pid := projectID(worktree)
-	s.writeJSON(w, http.StatusOK, projectDTO{ID: pid, Worktree: worktree})
+	s.writeJSON(w, http.StatusOK, s.project())
 }
 
 // GET /config/providers

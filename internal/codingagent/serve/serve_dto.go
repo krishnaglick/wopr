@@ -150,6 +150,18 @@ type agentInfoDTO struct {
 type projectDTO struct {
 	ID       string `json:"id"`
 	Worktree string `json:"worktree"`
+	// opencode emits time and sandboxes on every project; a client that
+	// Object.keys/entries either one throws on absence, so they are always
+	// present. wopr tracks no project metadata, so time is the worktree's
+	// mtime and sandboxes is empty.
+	Time      projectTime `json:"time"`
+	Sandboxes []string    `json:"sandboxes"`
+	VCS       string      `json:"vcs,omitempty"`
+}
+
+type projectTime struct {
+	Created int64 `json:"created"`
+	Updated int64 `json:"updated"`
 }
 
 type fileNodeDTO struct {

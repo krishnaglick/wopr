@@ -35,13 +35,26 @@ func TestKKCodeConnectSequenceReplaysTheCapturedAppFlow(t *testing.T) {
 		t.Fatalf("GET /api/health: healthy = %s, want true", v)
 	}
 
-	// Health, session list, project, and the root file listing.
-	for _, path := range []string{"/global/health", "/experimental/session", "/project", "/file?path="} {
+	// Health, session list, and the root file listing.
+	for _, path := range []string{"/global/health", "/experimental/session", "/file?path="} {
 		status, body = getRaw(t, env.baseURL, path)
 		if status != http.StatusOK {
 			t.Fatalf("GET %s: got %d (%s)", path, status, body)
 		}
 	}
+
+	// GET /project: the app dereferences each project's time and sandboxes, so
+	// both must be present with the right kind, not omitted.
+	status, body = getRaw(t, env.baseURL, "/project")
+	if status != http.StatusOK {
+		t.Fatalf("GET /project: got %d (%s)", status, body)
+	}
+	var projects []map[string]json.RawMessage
+	if err := json.Unmarshal(body, &projects); err != nil || len(projects) == 0 {
+		t.Fatalf("GET /project: bad body (err=%v body=%s)", err, body)
+	}
+	assertKind(t, projects[0], "time", "object")
+	assertKind(t, projects[0], "sandboxes", "array")
 
 	// Create the session the app then reads around.
 	status, body = postJSON(t, env.baseURL, "/session?directory="+dir, "{}")
@@ -102,6 +115,10 @@ func TestKKCodeConnectSequenceReplaysTheCapturedAppFlow(t *testing.T) {
 	for _, key := range []string{"instructions", "plugin"} {
 		assertKind(t, cfg, key, "array")
 	}
+	// The app reads individual permission entries; an absent key is undefined.
+	perm := assertObject(t, cfg, "permission")
+	assertKind(t, perm, "bash", "string")
+	assertKind(t, perm, "external_directory", "object")
 
 	// The accepted prompt. 204 is the app's cue to stream.
 	status, body = postJSON(t, env.baseURL,
