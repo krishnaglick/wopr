@@ -16,6 +16,7 @@ import (
 
 	"github.com/alexrudloff/wopr/ai"
 	icodingagent "github.com/alexrudloff/wopr/internal/codingagent"
+	"github.com/alexrudloff/wopr/internal/codingagent/llama"
 )
 
 // Settings is the merged user-settings view. Global settings are overlaid by
@@ -111,6 +112,15 @@ func NewServices(opts ServicesOptions) (*Services, error) {
 	}
 	sm := icodingagent.NewSettingsManagerWithProjectTrust(cwd, agentDir, projectTrusted)
 	reg := icodingagent.NewModelRegistry(agentDir)
+	// Register the deterministic test provider's models in the process
+	// registry under the same env gate BuildModel uses, so routeModel sees
+	// them through HasModelDefinition exactly as it sees a dynamically
+	// registered provider (llama.cpp).
+	if os.Getenv("WOPR_TEST_FAUX") == "1" {
+		reg.SetProvider("test-faux", llama.ProviderConfig{
+			Models: []llama.ProviderModelConfig{{ID: "faux-1"}, {ID: "faux-2"}},
+		})
+	}
 	reg.SetAuthStorage(auth)
 
 	services := &Services{

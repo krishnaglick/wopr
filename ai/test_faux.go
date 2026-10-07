@@ -153,6 +153,15 @@ func (p *TestFauxProvider) Stream(ctx context.Context, transcript TranscriptCont
 			builder.done(StopReasonStop, nil, "")
 			return
 		}
+		if strings.Contains(lastText, "Trigger: free tier limit") {
+			if _, loaded := testFauxRetryState.LoadOrStore("free-tier-limit:"+options.SessionID, true); !loaded {
+				builder.fail(StopReasonError, errors.New("free_tier_limit"))
+				return
+			}
+			builder.textDelta("failover-ok")
+			builder.done(StopReasonStop, nil, "")
+			return
+		}
 
 		slowCompactionProbe := os.Getenv("TEST_FAUX_SLOW_COMPACTION") == "1" &&
 			(strings.Contains(lastText, "Create a concise checkpoint of the user's request and the progress shown above.") ||
