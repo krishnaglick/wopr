@@ -63,7 +63,7 @@ The wave requires the new session test to be **red before the seam and green aft
 
 ### Chosen seam (option A): register the faux models in the registry
 
-In `NewServices` (`coding/services.go:83-132`), right after `reg := icodingagent.NewModelRegistry(agentDir)` (`:113`):
+In `NewServices` (`coding/services.go:84-133`), right after `reg := icodingagent.NewModelRegistry(agentDir)` (`:114`):
 
 ```go
 if os.Getenv("WOPR_TEST_FAUX") == "1" {
@@ -78,7 +78,7 @@ Why this is the smallest correct seam:
 - `HasModelDefinition` (`model_registry.go:636-646`) checks `r.dynamic[providerID].Models` first, so the two ids resolve as defined. This is exactly the path the built-in llama.cpp provider uses (`SetProvider`, `:668-681`; registered by `llama.Host`), i.e. the same code path a real dynamically-registered routed model uses — not a bypass.
 - `routeModel` then flows unchanged into `BuildModel(spec, svcs)` (`session_router.go:440`), which returns the deterministic `TestFauxProvider` (`coding/model.go:161-166`); the env gate matches `BuildModel`'s own test-faux gate, so behaviour stays consistent whether the env is set or not.
 - Real unknown models are untouched: `HasModelDefinition("acme","x")` is still false and `ai.LookupModelExact` still false, so `routeModel` still returns `unknown model: acme/x` (`session_router.go:435-438`).
-- `modelRuntimeRequiresAuth("test-faux")` is already false (`coding/services.go:403-410`), so no credential is needed.
+- `modelRuntimeRequiresAuth("test-faux")` is already false (`coding/services.go:413-420`), so no credential is needed.
 
 **`Files:` divergence (recorded).** The backlog item names `coding/session_router.go` (`routeModel`); option A edits `coding/services.go` and leaves `routeModel` untouched. Option A is the real dynamic-provider path (`SetProvider`, the same one llama.cpp uses); C′ — an env-gated exemption inside `routeModel` — is rejected because it is a test-only bypass in production validation.
 
@@ -88,7 +88,7 @@ The registration is not confined to `HasModelDefinition`/`Resolve`. Under `WOPR_
 
 - `GetAll` (`model_registry.go:812`), also read for display names in the prompt panel (`internal/codingagent/prompt_panel.go:68`)
 - `RuntimeModels` (`internal/codingagent/model_registry_runtime_models.go:17-26`), consumed by the model picker (`model_picker.go:23`) and by startup model selection (`cmd/wopr/startup_model.go:122` — benign, because `testFauxCLIModel` short-circuits `--model test-faux/*` first, `startup_model.go:149-151`)
-- `ModelRuntime.GetModels` (`coding/services.go:201-206`, via `Registry().GetAll()`)
+- `ModelRuntime.GetModels` (`coding/services.go:211-216`, via `Registry().GetAll()`)
 
 `RequestAuthRuntime` is **not** on this list: it is composed from a separate `ModelRegistry` built from `agentDir/models.json` + `ai.ListProviders()` (`internal/codingagent/request_auth_runtime.go:77-99,104-143`) and never consults the `Services` registry's in-process `dynamic` map, so `SetProvider` never reaches it.
 
