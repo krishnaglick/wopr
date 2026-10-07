@@ -1357,7 +1357,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-sse-message-lifecycle-parity — KKCode renders the reply twice and never settles
 
-- **Status:** READY — surfaced 2026-10-07 driving KKCode against `wopr serve`. The payload-envelope fix
+- **Status:** DONE — shipped on `wave-serve-sse-message-lifecycle-parity`, merged into `main`; surfaced 2026-10-07 driving KKCode against `wopr serve`. The session mints the assistant entry id at message start (stream and transcript share one id), the stream announces the user message and its text part, and the assistant `message.updated` brackets the parts. The payload-envelope fix
   (`4eb51e1`) produced the first reply and the abort-JSON fix (`47d5ef8`) fixed Stop, but a turn still
   double-renders and the client never returns to idle.
 - **Why:** comparing one turn's `/global/event` frames from opencode 1.18.34 (`/tmp/oc-turn.txt`) and wopr
@@ -1384,3 +1384,25 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   of the provisional-then-reconcile scheme, without changing the persisted transcript ids `GET
   /session/{id}/message` returns. Preserve serve-4's invariant that the stream and the transcript agree on
   part ids for a completed message.
+
+### serve-stream-parentid-parity — streamed `message.updated` reports an empty `info.parentID`
+
+- **Status:** READY — surfaced 2026-10-07 by the `serve-sse-message-lifecycle-parity` diff-verification fan.
+- **Why:** the SSE mapper passes `""` for the assistant message's parent on both the start announce and the
+  end burst (`internal/codingagent/serve/serve_sse.go`), while `entriesToMessages` and opencode 1.18.34 report
+  the real parent entry id (`/tmp/oc-turn.txt:155`). A client that threads turns by `parentID` cannot attach
+  the streamed reply to its user message. Pre-existing; outside the id-stability item's definition of done.
+- **Files:** `internal/codingagent/serve/serve_sse.go` (mapper parent plumbing), possibly
+  `coding/host/host.go` if the parent entry id must be resolved alongside `entryID`.
+- **Gates:** an assertion in `TestSSETurnLifecycleParity` that the assistant `message.updated` parentID equals
+  the user `message.updated` id; the serve suite; `make check`.
+
+### serve-tool-delta-test-vacuous-equality-loop — `TestToolCallDeltaReachesTheStream`'s cross-source check never runs
+
+- **Status:** READY — surfaced 2026-10-07 by the `serve-sse-message-lifecycle-parity` diff-verification fan.
+- **Why:** the test stops at the first tool `arguments` delta, but the matching tool `message.part.updated` is
+  emitted later, so the loop that claims to prove the delta and the tool part share an id
+  (`internal/codingagent/serve/serve_test.go`) never executes. Pre-existing; the diff only changed the prefix
+  assertion. Either extend the read to the tool part or delete the vacuous loop and its comment.
+- **Files:** `internal/codingagent/serve/serve_test.go`.
+- **Gates:** the serve suite; `make check`.

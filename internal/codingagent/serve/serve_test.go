@@ -834,11 +834,10 @@ func TestSSEStreamDropsAStalledConnectionAtTheByteBound(t *testing.T) {
 
 // TestStreamPartIDsMatchTranscriptPartIDs is the topology gate: the final burst
 // and the persisted transcript must report the same literal part ids for the
-// same message. Deltas stream under a provisional id, because wopr allocates
-// the transcript entry at message_end; the reconciliation burst re-announces the
-// message under its real entry id, and both sides build the ids from that one
-// id. Elementwise, not as a set — a duplicate collapses in a set on both sides,
-// which is how serve-3's duplicate-part-id defect passed green.
+// same message. Deltas and the end burst both stream under the assistant entry
+// id the Session mints at message start, so both sides build the ids from that
+// one id. Elementwise, not as a set — a duplicate collapses in a set on both
+// sides, which is how serve-3's duplicate-part-id defect passed green.
 func TestStreamPartIDsMatchTranscriptPartIDs(t *testing.T) {
 	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
@@ -854,12 +853,12 @@ func TestStreamPartIDsMatchTranscriptPartIDs(t *testing.T) {
 		t.Fatalf("prompt_async: expected 204, got %d", status)
 	}
 
-	// Stop as soon as the reconciliation burst is complete, then end the stream:
-	// a live reader would otherwise hold the connection to go test's 10-minute
-	// panic.
+	// Stop on session.idle, which is emitted only after the run and its
+	// message_end persist have settled. Stopping at the first part.updated would
+	// fire on the TextEnd frame, before MessageEnd persists the entry, and the
+	// transcript read below would race an assistant message that is not there yet.
 	frames := readSSEUntil(t, resp, func(frames []sseFrame) bool {
-		_, parts := burstFrom(frames)
-		return len(parts) > 0
+		return slices.ContainsFunc(frames, func(f sseFrame) bool { return f.Name == eventSessionIdle })
 	})
 	cancel()
 
@@ -885,6 +884,180 @@ func TestStreamPartIDsMatchTranscriptPartIDs(t *testing.T) {
 	}
 	if !slices.Equal(persisted, want) {
 		t.Errorf("transcript part ids: expected %v, got %v", want, persisted)
+	}
+}
+
+// TestSSETurnLifecycleParity is the one-turn contract: a user turn announces
+// the user message under its transcript id, then streams one assistant message
+// under a single stable id for the whole run. That id is the one the transcript
+// reports, so the client renders the reply once instead of once per source id.
+func TestSSETurnLifecycleParity(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resp := openSSE(t, baseURL, ctx)
+	defer func() { _ = resp.Body.Close() }()
+
+	const promptText = "reply with exactly: parity-ok"
+	status, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"`+promptText+`"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async: expected 204, got %d", status)
+	}
+
+	// Stop on session.idle: it is emitted only after the run and its message_end
+	// persist have settled, so the transcript read below cannot race persistence.
+	frames := readSSEUntil(t, resp, func(frames []sseFrame) bool {
+		for _, f := range frames {
+			if f.Name == eventSessionIdle {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+
+	// 1. Exactly one user message.updated, with an id.
+	var userID string
+	userUpdates := 0
+	for _, f := range frames {
+		if f.Name != eventMessageUpdated {
+			continue
+		}
+		var payload sseMessageUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Info.Role != "user" {
+			continue
+		}
+		userUpdates++
+		userID = payload.Info.ID
+	}
+	if userUpdates != 1 {
+		t.Fatalf("expected exactly one user message.updated, got %d; frames: %s", userUpdates, summarize(frames))
+	}
+	if userID == "" {
+		t.Fatalf("the user message.updated carries no id; frames: %s", summarize(frames))
+	}
+
+	// 2. The user's text part, under the same id, carries the prompt verbatim.
+	wantUserPart := userID + "-text-0"
+	userPartText := ""
+	userPartSeen := false
+	for _, f := range frames {
+		if f.Name != eventMessagePartUpdated {
+			continue
+		}
+		var payload ssePartUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Part.ID != wantUserPart {
+			continue
+		}
+		userPartSeen = true
+		if payload.Part.MessageID != userID {
+			t.Errorf("user part messageID: expected %q, got %q", userID, payload.Part.MessageID)
+		}
+		userPartText = payload.Part.Text
+	}
+	if !userPartSeen {
+		t.Fatalf("no user message.part.updated %q; frames: %s", wantUserPart, summarize(frames))
+	}
+	if userPartText != promptText {
+		t.Errorf("user part text: expected %q, got %q", promptText, userPartText)
+	}
+
+	// 3. Every assistant message.updated names one id.
+	assistantID := assistantMessageUpdatedID(frames)
+	if assistantID == "" {
+		t.Fatalf("no assistant message.updated; frames: %s", summarize(frames))
+	}
+	for _, f := range frames {
+		if f.Name != eventMessageUpdated {
+			continue
+		}
+		var payload sseMessageUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Info.Role == "assistant" && payload.Info.ID != assistantID {
+			t.Errorf("assistant message.updated ids disagree: %q against %q", payload.Info.ID, assistantID)
+		}
+	}
+
+	// 4. Every assistant delta names the same part.
+	deltaPartID := ""
+	deltaCount := 0
+	for _, f := range frames {
+		if f.Name != eventMessagePartDelta {
+			continue
+		}
+		var payload ssePartDelta
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.MessageID != assistantID {
+			continue
+		}
+		deltaCount++
+		if deltaPartID == "" {
+			deltaPartID = payload.PartID
+			continue
+		}
+		if payload.PartID != deltaPartID {
+			t.Errorf("assistant deltas disagree on partID: %q against %q", payload.PartID, deltaPartID)
+		}
+	}
+	if deltaCount == 0 {
+		t.Fatalf("no assistant message.part.delta; frames: %s", summarize(frames))
+	}
+
+	// 5. A message.part.updated publishes the delta's part under the same id.
+	partSeen := false
+	for _, f := range frames {
+		if f.Name != eventMessagePartUpdated {
+			continue
+		}
+		var payload ssePartUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Part.ID != deltaPartID {
+			continue
+		}
+		partSeen = true
+		if payload.Part.Type != "text" {
+			t.Errorf("part type: expected text, got %q", payload.Part.Type)
+		}
+		if payload.Part.Text != "parity-ok" {
+			t.Errorf("part text: expected %q, got %q", "parity-ok", payload.Part.Text)
+		}
+	}
+	if !partSeen {
+		t.Fatalf("no message.part.updated for the delta part %q; frames: %s", deltaPartID, summarize(frames))
+	}
+
+	// 6. The turn settled.
+	if !slices.ContainsFunc(frames, func(f sseFrame) bool { return f.Name == eventSessionIdle }) {
+		t.Fatalf("no session.idle frame; frames: %s", summarize(frames))
+	}
+
+	// 7. The transcript reports the same assistant id and part id.
+	transcriptPartID := ""
+	for _, m := range readTranscript(t, baseURL, id) {
+		if m.Info.ID != assistantID || m.Info.Role != "assistant" {
+			continue
+		}
+		for _, p := range m.Parts {
+			transcriptPartID = p.ID
+		}
+	}
+	if transcriptPartID != deltaPartID {
+		t.Errorf("transcript part id: expected %q, got %q", deltaPartID, transcriptPartID)
 	}
 }
 
@@ -924,8 +1097,12 @@ func TestToolCallDeltaReachesTheStream(t *testing.T) {
 	// The literal shape, not partID's own output: the id has to name the streamed
 	// message and end in the call id, because a tool part is identified by its
 	// call and not by its index.
-	if !strings.HasPrefix(partID, "msg_"+id+"-") {
-		t.Errorf("a delta's partID must belong to the streamed message, got %q", partID)
+	assistantID := assistantMessageUpdatedID(frames)
+	if assistantID == "" {
+		t.Fatalf("no assistant message.updated on the stream; frames: %s", summarize(frames))
+	}
+	if !strings.HasPrefix(partID, assistantID+"-") {
+		t.Errorf("a delta's partID must belong to the streamed message %q, got %q", assistantID, partID)
 	}
 	_, callID, ok := strings.Cut(partID, "-tool-")
 	if !ok || callID == "" {
@@ -964,6 +1141,26 @@ func toolDeltaPartID(frames []sseFrame) string {
 	return ""
 }
 
+// assistantMessageUpdatedID returns the id the stream announced for the
+// assistant message, or "" when it announced none. The stream puts one stable
+// id on the assistant message for the whole run; every caller parses that
+// frame the same way rather than re-deriving the shape.
+func assistantMessageUpdatedID(frames []sseFrame) string {
+	for _, f := range frames {
+		if f.Name != eventMessageUpdated {
+			continue
+		}
+		var payload sseMessageUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Info.Role == "assistant" && payload.Info.ID != "" {
+			return payload.Info.ID
+		}
+	}
+	return ""
+}
+
 // TestToolCallDeltaAgreesWithThePartItCompletes pins the one reachable
 // unresolvable-call-id case: an OpenAI-compatible server that streams
 // tool_calls with no id. toolPart and the transcript both build their tool id
@@ -972,7 +1169,7 @@ func toolDeltaPartID(frames []sseFrame) string {
 // for a tool call in flight, so losing them leaves the bubble empty until the
 // client refetches history.
 func TestToolCallDeltaAgreesWithThePartItCompletes(t *testing.T) {
-	mapper := &eventMapper{sessionID: "sess-guard"}
+	mapper := &eventMapper{sessionID: "sess-guard", assistantID: "sess-guard"}
 	ev := agent.MessageUpdateEvent{
 		Message: agent.AgentMessage{Assistant: &agent.AssistantMessage{Role: "assistant"}},
 		AssistantMessageEvent: ai.ToolCallDeltaEvent{
@@ -996,7 +1193,7 @@ func TestToolCallDeltaAgreesWithThePartItCompletes(t *testing.T) {
 	}
 	// The same empty call id toolPart and the transcript produce, so the delta
 	// matches the part it completes.
-	if want := "msg_sess-guard-0-tool-"; payload.PartID != want {
+	if want := "sess-guard-tool-"; payload.PartID != want {
 		t.Errorf("partID: expected %q, got %q", want, payload.PartID)
 	}
 
@@ -1012,7 +1209,7 @@ func TestToolCallDeltaAgreesWithThePartItCompletes(t *testing.T) {
 	if err := json.Unmarshal(mustMarshal(t, got[0].Data), &payload); err != nil {
 		t.Fatalf("decode the delta: %v", err)
 	}
-	if want := "msg_sess-guard-0-tool-call-9"; payload.PartID != want {
+	if want := "sess-guard-tool-call-9"; payload.PartID != want {
 		t.Errorf("partID: expected %q, got %q", want, payload.PartID)
 	}
 }
@@ -1241,6 +1438,9 @@ func burstFrom(frames []sseFrame) (string, []string) {
 				Info messageInfoDTO `json:"info"`
 			}
 			if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+				continue
+			}
+			if payload.Info.Role != "assistant" {
 				continue
 			}
 			entryID, parts = payload.Info.ID, parts[:0]

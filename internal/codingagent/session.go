@@ -592,8 +592,10 @@ func writeSessionLines(path string, lines [][]byte) error {
 	return nil
 }
 
-// AppendMessage persists one AgentMessage, generating a fresh entry id
-// and timestamp and linking it to the current leaf.
+// AppendMessage persists one AgentMessage, linking it to the current leaf. An
+// assistant message that carries a pre-minted EntryID persists under it, so the
+// streamed id and the transcript entry id match; any other message gets a fresh
+// entry id.
 func (s *Session) AppendMessage(msg agent.AgentMessage) (string, error) {
 	// Custom messages round-trip as "custom_message" entries, not generic
 	// "message" entries: messagesFromSession only reconstructs them from that
@@ -610,6 +612,11 @@ func (s *Session) AppendMessage(msg agent.AgentMessage) (string, error) {
 		return "", fmt.Errorf("session: AppendMessage: %w", err)
 	}
 	e, err := appendOnLeaf(s, "message", func(base SessionEntryBase) MessageEntry {
+		// The Session minted this id at message start so the stream and the
+		// transcript agree; honor it over the fresh one appendOnLeaf generated.
+		if msg.Assistant != nil && msg.Assistant.EntryID != "" {
+			base.ID = msg.Assistant.EntryID
+		}
 		return MessageEntry{SessionEntryBase: base, Message: msg}
 	})
 	return e.ID, err
