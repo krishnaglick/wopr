@@ -385,18 +385,89 @@ func TestUnmarshalJSONRejectsNearMissAllowedRootsKey(t *testing.T) {
 	}
 }
 
+// TestUnmarshalJSONRejectsNearMissServerKey covers the outer-key fail-closed
+// guardrail: a top-level key that looks like a misspelled server and no valid
+// server.allowedRoots present is an error, while unrelated top-level keys and a
+// near-miss beside a valid server stay tolerated. The padded object's inner keys
+// are never inspected, so these fixtures exercise the outer path only.
+func TestUnmarshalJSONRejectsNearMissServerKey(t *testing.T) {
+	reject := []string{
+		`{"server ":{"allowedRoots":["/srv"]}}`,
+		// A leading zero-width space (U+200B) is padding TrimSpace would miss.
+		"{\"\u200bserver\":{\"allowedRoots\":[\"/srv\"]}}",
+		`{"servers":{"allowedRoots":["/srv"]}}`,
+		// An extra ASCII letter before the stem: prefix-only would miss it, the
+		// containment rule catches it.
+		`{"aserver":{"allowedRoots":["/srv"]}}`,
+		// Interior padding defeats a leading/trailing-only trim: a zero-width
+		// space (U+200B, Cf) and a plain space between the stem and the tail.
+		"{\"serv\u200ber\":{\"allowedRoots\":[\"/srv\"]}}",
+		`{"ser ver":{"allowedRoots":["/srv"]}}`,
+		// Invisible runes outside a drop-list category still pad the stem:
+		// BRAILLE PATTERN BLANK (U+2800, So) leading, HANGUL CHOSEONG FILLER
+		// (U+115F, Lo) interior. The keep-only-a-z rule is category-independent.
+		"{\"\\u2800server\":{\"allowedRoots\":[\"/srv\"]}}",
+		"{\"serv\\u115fer\":{\"allowedRoots\":[\"/srv\"]}}",
+		// A port-only near-miss still refuses rather than dropping port silently.
+		`{"server ":{"port":8080}}`,
+		// Non-ASCII runes are dropped, not case-folded: KELVIN SIGN (U+212A) and
+		// I WITH DOT ABOVE (U+0130) must not survive as k/i inside the stem.
+		`{"serv\u212Aer":{"allowedRoots":["/srv"]}}`,
+		`{"serv\u0130er":{"allowedRoots":["/srv"]}}`,
+	}
+	for _, body := range reject {
+		var s Settings
+		err := json.Unmarshal([]byte(body), &s)
+		if err == nil || !strings.Contains(err.Error(), "did you mean server?") {
+			t.Fatalf("Unmarshal(%s) error = %v, want an outer near-miss server error", body, err)
+		}
+	}
+
+	// Unrelated top-level keys stay tolerant.
+	var tolerant Settings
+	if err := json.Unmarshal([]byte(`{"theme":"dark"}`), &tolerant); err != nil {
+		t.Fatalf("Unmarshal(theme) = %v, want nil", err)
+	}
+	var unrelated Settings
+	if err := json.Unmarshal([]byte(`{"defaultProvider":"x","server":{"allowedRoots":["/a"]}}`), &unrelated); err != nil {
+		t.Fatalf("Unmarshal(defaultProvider beside server) = %v, want nil", err)
+	}
+	if unrelated.Server == nil || !slices.Equal(unrelated.Server.AllowedRoots, []string{"/a"}) {
+		t.Fatalf("server = %+v, want allowedRoots [/a]", unrelated.Server)
+	}
+
+	// A valid exact server wins over a near-miss beside it, and the near-miss
+	// key reaches the unknown-key warning path.
+	var validWins Settings
+	if err := json.Unmarshal([]byte(`{"server":{"allowedRoots":["/a"]},"server ":{"allowedRoots":["/b"]}}`), &validWins); err != nil {
+		t.Fatalf("Unmarshal(valid beside near-miss) = %v, want nil", err)
+	}
+	if validWins.Server == nil || !slices.Equal(validWins.Server.AllowedRoots, []string{"/a"}) {
+		t.Fatalf("server = %+v, want allowedRoots [/a]", validWins.Server)
+	}
+	if !slices.Contains(validWins.serverUnknownKeys, "server ") {
+		t.Fatalf("serverUnknownKeys = %v, want it to contain \"server \"", validWins.serverUnknownKeys)
+	}
+}
+
 // TestLoadWarnsOnUnknownServerKey checks an unrelated unknown settings.server
-// key neither fails the load nor hides: it reaches the warning accessor.
+// key and a near-miss outer server key beside a valid one neither fail the load
+// nor hide: both reach the warning accessor.
 func TestLoadWarnsOnUnknownServerKey(t *testing.T) {
 	agentDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"server":{"allowedHosts":["x"]}}`), 0o644); err != nil {
+	body := `{"server":{"allowedRoots":["/a"],"allowedHosts":["x"]},"server ":{"allowedRoots":["/b"]}}`
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sm := NewSettingsManagerWithProjectTrust(t.TempDir(), agentDir, false)
 	if err := sm.GlobalLoadError(); err != nil {
 		t.Fatalf("GlobalLoadError() = %v, want nil", err)
 	}
-	if keys := sm.GlobalUnknownServerKeys(); !slices.Contains(keys, "allowedHosts") {
+	keys := sm.GlobalUnknownServerKeys()
+	if !slices.Contains(keys, "allowedHosts") {
 		t.Fatalf("GlobalUnknownServerKeys() = %v, want it to contain allowedHosts", keys)
+	}
+	if !slices.Contains(keys, "server ") {
+		t.Fatalf("GlobalUnknownServerKeys() = %v, want it to contain \"server \"", keys)
 	}
 }

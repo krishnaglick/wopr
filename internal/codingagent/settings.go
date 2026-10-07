@@ -323,8 +323,19 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 // allowedRoots key with no valid allowedRoots present fails closed instead.
 func checkServerRaw(raw map[string]any) ([]string, error) {
 	var unknown []string
+	validRootsSeen := false
+	serverNearMiss := ""
 	for key, v := range raw {
-		if !strings.EqualFold(key, "server") || v == nil { // absent or null: treated as absent
+		if v == nil { // absent or null: treated as absent
+			continue
+		}
+		if serverKeyIsServerNearMiss(key) {
+			if serverNearMiss == "" { // several near-miss keys: which is recorded is map-order dependent
+				serverNearMiss = key
+			}
+			continue
+		}
+		if !strings.EqualFold(key, "server") {
 			continue
 		}
 		obj, ok := v.(map[string]any)
@@ -361,8 +372,44 @@ func checkServerRaw(raw map[string]any) ([]string, error) {
 		if nearMiss != "" && !hasValidRoots {
 			return nil, fmt.Errorf("server.%s is not a known key; did you mean server.allowedRoots?", nearMiss)
 		}
+		validRootsSeen = validRootsSeen || hasValidRoots
+	}
+	if serverNearMiss != "" {
+		if !validRootsSeen {
+			return nil, fmt.Errorf("%q is not a known key; did you mean server?", serverNearMiss)
+		}
+		unknown = append(unknown, serverNearMiss)
 	}
 	return unknown, nil
+}
+
+// serverKeyIsServerNearMiss reports whether a top-level settings key looks like a
+// misspelling of "server", so a likely-typo'd server block fails closed instead of
+// being dropped by encoding/json with the serve allowlist inside it. encoding/json
+// folds case but does not normalize, so only the exact case-folded key reaches the
+// Settings.Server field. It is the outer-key twin of serverKeyIsAllowedRootsNearMiss
+// and is intentionally narrow on name, broad only on noise: ASCII letters are folded
+// to lower case and every other rune — non-ASCII regardless of category (whitespace,
+// control, format, combining, symbol, letter filler, or a case-folding letter such as
+// KELVIN SIGN) — is discarded. The normalized key fails closed when it CONTAINS the
+// "server" stem, so a pad or stray letter before, inside, or after the stem is caught.
+// The container is deliberately containment rather than prefix: no other top-level
+// settings tag contains "server", so the stem cannot collide with a legitimate key.
+func serverKeyIsServerNearMiss(key string) bool {
+	if strings.EqualFold(key, "server") { // exactly what encoding/json matches
+		return false
+	}
+	k := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		case r >= 'a' && r <= 'z':
+			return r
+		default:
+			return -1
+		}
+	}, key)
+	return strings.Contains(k, "server")
 }
 
 // serverKeyIsAllowedRootsNearMiss reports whether a server key looks like a
