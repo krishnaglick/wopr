@@ -1354,3 +1354,33 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Gates:** a test that a disk-only session whose `model_change` names another model reports that model;
   `make check`. It must read from the transcript tail already parsed for the session list, not add a second
   full-file read per session.
+
+### serve-sse-message-lifecycle-parity — KKCode renders the reply twice and never settles
+
+- **Status:** READY — surfaced 2026-10-07 driving KKCode against `wopr serve`. The payload-envelope fix
+  (`4eb51e1`) produced the first reply and the abort-JSON fix (`47d5ef8`) fixed Stop, but a turn still
+  double-renders and the client never returns to idle.
+- **Why:** comparing one turn's `/global/event` frames from opencode 1.18.34 (`/tmp/oc-turn.txt`) and wopr
+  (`/tmp/wopr-sse2.txt`; regenerate against a running server, do not commit):
+  - wopr emits **no** `message.updated`/`message.part.updated` for the **user** message; opencode emits
+    `message.updated{info.role:"user"}` plus the user text part before the assistant run. The client builds
+    the user turn from these.
+  - opencode keeps part ids **stable** (`prt_…`) from creation through `message.part.delta` and the final
+    `message.part.updated`; wopr streams deltas under a provisional `msg_<session>-<n>-text-0` id and then
+    publishes the final part under `<entryid>-text-0`. The same text arrives under two ids, so the client
+    renders the reply twice. This is `eventMapper.provisionalID` (serve-4's reconciliation); the client does
+    not reconcile.
+  - opencode emits `message.updated{role:"assistant"}` (stable id) **before** the parts and again at the
+    end; wopr emits it once, at the end.
+  - opencode emits `step-start`/`step-finish` parts; wopr emits neither (may be optional).
+  - Both now emit `session.status{status:{type}}` and `session.idle`; the client still does not settle,
+    likely a consequence of the id mismatch above.
+- **Files:** `internal/codingagent/serve/serve_sse.go` (mapper and part construction); possibly
+  `serve_dto.go`/`serve_read.go` for id minting.
+- **Gates:** a hermetic test that replays one turn and asserts the frame sequence — user `message.updated`
+  plus part, a stable part id across delta/updated, an assistant `message.updated`, terminal `session.idle`;
+  the existing suite; `make check`. Live: KKCode shows the reply once and the spinner settles.
+- **Notes:** the likely fix is to mint stable message/part ids at message start (as opencode does) instead
+  of the provisional-then-reconcile scheme, without changing the persisted transcript ids `GET
+  /session/{id}/message` returns. Preserve serve-4's invariant that the stream and the transcript agree on
+  part ids for a completed message.
