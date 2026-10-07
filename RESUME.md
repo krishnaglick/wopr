@@ -19,7 +19,16 @@
   Node logging proxy `/tmp/wopr-proxy.js` on `:4098` → `:4097` → `/tmp/wopr-proxy.log`; real opencode on
   `:4096`. An iOS emulator is NOT available (Linux host, no Mac on the tailnet, closed-source App Store
   app is FairPlay-encrypted); the protocol-replay harness is the automated substitute.
-- **Last green slice:** `4642887` (auth.json-only provider listing fix) on `main`; `make check` green.
+- **Last green slice:** `4eb51e1` (SSE payload-envelope fix) on `main`; `make check` green.
+- **SSE fix (`4eb51e1`):** opencode wraps every `/global/event` frame as
+  `data: {"payload":{"id","type","properties"}}` with no `event:` line; wopr sent a bare flat
+  payload behind `event:`, so a client reading `data.payload` threw on the first frame — the exact
+  "cannot convert undefined value to object" KKCode hit on send. `sseWrite` now emits the envelope,
+  `session.status` nests `{status:{type}}`, and `session.idle` is emitted on settle. Captured
+  opencode frames (`/tmp/oc-sse.txt`) vs wopr frames confirm the match.
+- **Full V2 parity is NOT needed for KKCode:** the capture proves it is a V1-contract client
+  (`/global/health`, `/global/event`, `/session`, …; V2 only for `/api/health` and `/api/command`).
+  The V2 plan stays parked as future work for genuinely-V2 clients.
 - **What shipped:** Aligned wopr's V1 DTOs to opencode 1.18.34's captured shapes so KKCode stops
   aborting with "cannot convert undefined value to object". `GET /config` is the full 12-key object;
   `GET /config/providers` is the structural `{providers:[{id,name,source,env,key,options,models}],
