@@ -341,6 +341,17 @@ type eventMapper struct {
 	// persists, so deltas, part updates and the end burst all use the one id the
 	// transcript will report.
 	assistantID string
+	// turnUserID is the entry id of the user message that initiated the current
+	// turn, remembered when that message's MessageEndEvent is mapped. opencode
+	// parent-chains every assistant message of a turn to that user message, so
+	// each assistant message.updated reports it as parentID. It is deliberately
+	// NOT the raw persisted parent: the per-request
+	// harness-online-context-state-v1 custom entry is interposed between the two,
+	// so entriesToMessages (the transcript read API) reports a different value.
+	// It is per-session, not per-run: a run that emits no new user message_end
+	// (no Continue endpoint exists today) leaves the previous turn's value, and
+	// an assistant frame then reports whatever turn last set it.
+	turnUserID string
 }
 
 // newEventMapper returns the Translator the host runs for one session. It is a
@@ -421,7 +432,7 @@ func (m *eventMapper) messageStart(ev agent.MessageStartEvent) []codinghost.Even
 	m.assistantID = ev.Message.Assistant.EntryID
 	return m.one(m.event(eventMessageUpdated, sseMessageUpdated{
 		SessionID: m.sessionID,
-		Info: messageInfo(m.sessionID, m.cwd, m.root, m.assistantID, "assistant", "", time.Now().UnixMilli(),
+		Info: messageInfo(m.sessionID, m.cwd, m.root, m.assistantID, "assistant", m.turnUserID, time.Now().UnixMilli(),
 			ev.Message.Assistant, m.providerID, m.modelID),
 	}))
 }
@@ -476,6 +487,7 @@ func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]co
 		if entryID == "" {
 			return nil, nil
 		}
+		m.turnUserID = entryID
 		events := []codinghost.Event{m.event(eventMessageUpdated, sseMessageUpdated{
 			SessionID: m.sessionID,
 			Info: messageInfo(m.sessionID, m.cwd, m.root, entryID, "user", "", now,
@@ -501,7 +513,7 @@ func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]co
 	blocks := ev.Message.Assistant.Content
 	events := []codinghost.Event{m.event(eventMessageUpdated, sseMessageUpdated{
 		SessionID: m.sessionID,
-		Info: messageInfo(m.sessionID, m.cwd, m.root, id, "assistant", "", now,
+		Info: messageInfo(m.sessionID, m.cwd, m.root, id, "assistant", m.turnUserID, now,
 			ev.Message.Assistant, m.providerID, m.modelID),
 	})}
 	// The index runs over the full content slice, enumerated before any block is

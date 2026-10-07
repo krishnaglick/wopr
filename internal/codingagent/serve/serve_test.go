@@ -989,6 +989,22 @@ func TestSSETurnLifecycleParity(t *testing.T) {
 		}
 	}
 
+	// 3b. Every assistant message.updated names the user message as its parent,
+	// so a client can thread the reply onto the prompt it answered.
+	for _, f := range frames {
+		if f.Name != eventMessageUpdated {
+			continue
+		}
+		var payload sseMessageUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Info.Role == "assistant" && payload.Info.ParentID != userID {
+			t.Errorf("assistant message.updated parentID: expected %q, got %q",
+				userID, payload.Info.ParentID)
+		}
+	}
+
 	// 4. Every assistant delta names the same part.
 	deltaPartID := ""
 	deltaCount := 0
