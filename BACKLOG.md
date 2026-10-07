@@ -1387,7 +1387,13 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-stream-parentid-parity — streamed `message.updated` reports an empty `info.parentID`
 
-- **Status:** READY — surfaced 2026-10-07 by the `serve-sse-message-lifecycle-parity` diff-verification fan.
+- **Status:** DONE — shipped on `wave-serve-stream-parentid-parity`. The per-session SSE mapper remembers the turn's
+  user message entry id (`eventMapper.turnUserID`, set from the host-resolved id at the user `message_end`) and emits
+  it as `info.parentID` on both the assistant start announce and the end burst, matching opencode 1.18.34's
+  turn-threading (every assistant message in a turn parents on the initiating user message). The new gate in
+  `TestSSETurnLifecycleParity` (step 3b) asserts the assistant `message.updated` parentID equals the user
+  `message.updated` id. The read API still reports the raw persisted parent, so it diverges from the stream —
+  logged as `serve-transcript-parentid-skips-metadata`.
 - **Why:** the SSE mapper passes `""` for the assistant message's parent on both the start announce and the
   end burst (`internal/codingagent/serve/serve_sse.go`), while `entriesToMessages` and opencode 1.18.34 report
   the real parent entry id (`/tmp/oc-turn.txt:155`). A client that threads turns by `parentID` cannot attach
@@ -1396,6 +1402,23 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   `coding/host/host.go` if the parent entry id must be resolved alongside `entryID`.
 - **Gates:** an assertion in `TestSSETurnLifecycleParity` that the assistant `message.updated` parentID equals
   the user `message.updated` id; the serve suite; `make check`.
+
+### serve-transcript-parentid-skips-metadata — transcript read API reports the interposed online-context custom entry as an assistant message's parentID
+
+- **Status:** READY — surfaced 2026-10-07 by the `serve-stream-parentid-parity` diff-verification fan.
+- **Why:** `entriesToMessages` reads the persisted entry's raw `Base.ParentID`
+  (`internal/codingagent/serve/serve_handlers.go:1119-1121`). Online Context Compact appends a
+  `harness-online-context-state-v1` custom entry per provider request
+  (`coding/session_efficiency.go:efficiencyRecordRequest` → `AppendCustomEntry` → `appendOnLeaf`), from
+  `coding/session_transcript.go:prepareRequest`, and it lands between the persisted user message and the assistant
+  message. So `GET /session/{id}/message` reports an assistant `parentID` naming a custom entry that is skipped as a
+  message, and a client threading the fetched transcript cannot attach the reply. `serve-stream-parentid-parity`
+  fixed the stream to report the initiating user message id, so the read API and the stream now disagree.
+- **Files:** `internal/codingagent/serve/serve_handlers.go` (`entriesToMessages` parent resolution),
+  `internal/codingagent/serve/serve_prompt.go` (`assistantMessageDTO` passes `entries[start:]`, so a slice-order
+  "nearest preceding message" tracker returns `""`).
+- **Gates:** resolve the nearest `message` ancestor via a full id→entry map (not slice order) and assert an
+  assistant's transcript parentID equals the user message id; the serve suite; `make check`.
 
 ### serve-tool-delta-test-vacuous-equality-loop — `TestToolCallDeltaReachesTheStream`'s cross-source check never runs
 
