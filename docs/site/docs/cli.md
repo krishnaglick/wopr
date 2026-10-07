@@ -35,6 +35,7 @@ wopr [options] [prompt]
 | `wopr config [--local]` | Open the Resource filter TUI. Press Tab to switch global and project scope. |
 | `wopr verify [--json] [--checksums <file>] [--provenance] [path...]` | Verify this binary or downloaded files by SHA-256 digest, optionally against a SHA256SUMS file and GitHub build provenance. |
 | `wopr docs [sync\|path\|list\|show <name>]` | Materialize and read the documentation bundled with WOPR. |
+| `wopr serve [--port N] [--hostname H]` | Start the HTTP/SSE server for the working directory. `--port` overrides `server.port` (default `4096`); `--hostname` overrides `server.hostname` (default `127.0.0.1`). Unauthenticated and no TLS; see [server](server.md). |
 
 ## Options
 
