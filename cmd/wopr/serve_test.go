@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -213,5 +215,116 @@ func TestRunServeCommandRefusesOnUndecodableServerGuardrail(t *testing.T) {
 	}
 	if !strings.Contains(string(stderr), "allowedRoots") && !strings.Contains(string(stderr), "server") {
 		t.Fatalf("stderr = %q, want it to name the undecodable server guardrail", stderr)
+	}
+}
+
+func TestGlobalServeAllowedRootsReadsGlobalLayerOnly(t *testing.T) {
+	globalDir := t.TempDir()
+	projDir := t.TempDir()
+	agentDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"),
+		[]byte(fmt.Sprintf(`{"server":{"allowedRoots":[%q]}}`, globalDir)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	projSettingsDir := filepath.Join(projDir, codingagent.CONFIG_DIR_NAME)
+	if err := os.MkdirAll(projSettingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projSettingsDir, "settings.json"),
+		[]byte(fmt.Sprintf(`{"server":{"allowedRoots":[%q]}}`, projDir)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The project layer is trusted here, so its broader list reaches the merged
+	// view. The global-layer read must ignore it: a project must not widen the
+	// serve allowlist.
+	t.Run("trusted", func(t *testing.T) {
+		sm := codingagent.NewSettingsManagerWithProjectTrust(projDir, agentDir, true)
+
+		merged, err := sm.Get().GetServerAllowedRoots()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(merged, projDir) {
+			t.Fatalf("merged GetServerAllowedRoots() = %v; want it to contain project root %q", merged, projDir)
+		}
+
+		got, err := globalServeAllowedRoots(sm)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, []string{globalDir}) {
+			t.Fatalf("globalServeAllowedRoots() = %v, want only [%q]", got, globalDir)
+		}
+	})
+
+	// Untrusted mirrors runServeCommand's wiring: the project layer is not read,
+	// so both the merged and global views are the global list.
+	t.Run("untrusted", func(t *testing.T) {
+		sm := codingagent.NewSettingsManagerWithProjectTrust(projDir, agentDir, false)
+
+		merged, err := sm.Get().GetServerAllowedRoots()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(merged, []string{globalDir}) {
+			t.Fatalf("merged GetServerAllowedRoots() = %v; want project ignored, [%q]", merged, globalDir)
+		}
+
+		got, err := globalServeAllowedRoots(sm)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, []string{globalDir}) {
+			t.Fatalf("globalServeAllowedRoots() = %v, want [%q]", got, globalDir)
+		}
+	})
+}
+
+func TestRunServeCommandRefusesRootOutsideGlobalAllowlist(t *testing.T) {
+	// Hold a free port so the red-proof path (allowlist check dropped) fails
+	// fast at serve.New's net.Listen instead of blocking.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	tmp := t.TempDir()
+	t.Setenv("WOPR_HOME", tmp)
+	t.Setenv(codingagent.ENV_AGENT_DIR, "")
+	agentDir := filepath.Join(tmp, "agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	globalDir := t.TempDir()
+	projDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"),
+		[]byte(fmt.Sprintf(`{"server":{"allowedRoots":[%q]}}`, globalDir)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = old })
+	code := runServeCommand([]string{"serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port), "--dir", projDir})
+	os.Stderr = old
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 1 {
+		t.Fatalf("runServeCommand() = %d, want 1; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(string(stderr), "is outside every server.allowedRoots entry") {
+		t.Fatalf("stderr = %q, want it to contain %q", stderr, "is outside every server.allowedRoots entry")
 	}
 }
