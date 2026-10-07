@@ -154,10 +154,13 @@ func TestEveryPageIsReachableFromTheIndex(t *testing.T) {
 	}
 }
 
-// docLink captures multi-segment relative paths (for example ../../threat-model.md)
-// as well as single-segment bundle links: a link outside the bundle is invisible
-// to a single-segment match.
-var docLink = regexp.MustCompile(`\]\(([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.md)(?:#[^)]*)?\)`)
+// docLink captures a Markdown inline-link destination ending in a .md
+// reference. It accepts the CommonMark destinations the bundle may use: a
+// destination in angle brackets, a title after the destination, literal
+// spaces, percent-encoded characters, and an upper-case extension. The
+// destination must end in .md so arbitrary ](...) text is not a link.
+// Group 1 is the raw destination, without fragment or angle brackets.
+var docLink = regexp.MustCompile(`\]\([ \t]*<?([A-Za-z0-9_.% -]+(?:/[A-Za-z0-9_.% -]+)*\.(?i:md))(?:#[^)]*)?>?(?:[ \t]+"[^"\n]*")?[ \t]*\)`)
 
 func TestInternalLinksResolve(t *testing.T) {
 	files := docFiles(t)
