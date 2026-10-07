@@ -268,6 +268,9 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+	if err := checkServerRaw(raw); err != nil {
+		return err
+	}
 	if skills, ok := raw["skills"].(map[string]any); ok {
 		if _, exists := raw["enableSkillCommands"]; !exists {
 			if enabled, ok := skills["enableSkillCommands"]; ok {
@@ -299,6 +302,34 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*s = Settings(decoded)
+	return nil
+}
+
+// checkServerRaw rejects a server/allowedRoots value that decodeTolerant would
+// otherwise silently drop, which would leave the serve allowlist guardrail off.
+// Scoped to the server key only; every other setting stays tolerant.
+func checkServerRaw(raw map[string]any) error {
+	v, ok := raw["server"]
+	if !ok || v == nil { // absent or null: treated as absent
+		return nil
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return errors.New("server must be a JSON object")
+	}
+	roots, ok := obj["allowedRoots"]
+	if !ok || roots == nil {
+		return nil
+	}
+	items, ok := roots.([]any)
+	if !ok {
+		return errors.New("server.allowedRoots must be an array of strings")
+	}
+	for _, item := range items {
+		if _, ok := item.(string); !ok {
+			return errors.New("server.allowedRoots must be an array of strings")
+		}
+	}
 	return nil
 }
 
