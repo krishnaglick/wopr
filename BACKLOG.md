@@ -1219,8 +1219,20 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-server-key-near-miss-fail-open — a misspelled outer `server` key still fails open
 
-- **Status:** READY — surfaced by the `serve-allowed-roots-unknown-key-fail-open` adversarial
-  verification.
+- **Status:** DONE — shipped on `wave-serve-server-key-near-miss-fail-open`, merged into `main`.
+  A new outer-key near-miss predicate (`serverKeyIsServerNearMiss`) catches a top-level key that
+  looks like `server` and, when no exact `server` supplied a valid `allowedRoots`, `wopr serve`
+  refuses to start naming the key (`"server " is not a known key; did you mean server?`); a valid
+  exact `server` wins and the near-miss key warns via the existing unknown-key path. Padded,
+  invisible-rune-padded (any Unicode category including interior and non-ASCII case-folding runes),
+  and stray-letter-extended outer keys all fail closed; a genuinely unrelated top-level key stays
+  tolerant.
+- **Known residuals (accepted; spec Open Questions):** name mutations that break the contiguous
+  `server` stem (`srvr`, `serve`, `srever`, insertions like `serxver`) and non-ASCII letter
+  confusables (`ｓｅｒｖｅｒ`, Cyrillic `ѕerver`) still fail open — catching them needs edit distance,
+  which the shipped inner-key item also rejects. A near-miss outer key holding only `port` (no
+  `allowedRoots`) also refuses, a deliberate fail-closed extension of the owner's option-(b)
+  precedent.
 - **Why:** `checkServerRaw` matches the outer key with `strings.EqualFold(key, "server")` and no
   trim, so `{"server ":{"allowedRoots":["/srv"]}}` (or an invisible-rune-padded `server`) is never
   inspected; `encoding/json` also will not match it, the whole `server` object is dropped by
