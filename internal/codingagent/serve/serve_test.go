@@ -2138,6 +2138,48 @@ func TestListFilesEntryPathsAndFileRejection(t *testing.T) {
 	}
 }
 
+// TestListFilesAnswers400ForAForeignDirectory verifies directoryParam applies to
+// /file, matching its four siblings. The absent and correct directories must
+// still list entries, so a handler that answered 400 unconditionally cannot pass.
+func TestListFilesAnswers400ForAForeignDirectory(t *testing.T) {
+	root := t.TempDir()
+	services, err := coding.NewServices(coding.ServicesOptions{
+		CWD:            root,
+		AgentDir:       t.TempDir(),
+		ProjectTrusted: func() *bool { b := true; return &b }(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "alpha.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{services: services}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/file?directory=/somewhere/else", nil)
+	srv.listFiles(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("a foreign directory: expected 400, got %d (%s)", rec.Code, rec.Body)
+	}
+
+	for _, target := range []string{"/file", "/file?directory=" + url.QueryEscape(root)} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		srv.listFiles(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d (%s)", target, rec.Code, rec.Body)
+		}
+		var dtos []fileNodeDTO
+		if err := json.Unmarshal(rec.Body.Bytes(), &dtos); err != nil {
+			t.Fatalf("%s: decode listing: %v (%s)", target, err, rec.Body)
+		}
+		if len(dtos) != 1 || dtos[0].Name != "alpha.txt" {
+			t.Fatalf("%s: expected the one entry, got %+v", target, dtos)
+		}
+	}
+}
+
 // TestQuestionStoreTakesOneEntryUnderConcurrency covers the invariant the
 // answer-once window rests on: the lookup and the delete are one critical
 // section, so of many callers racing for one id exactly one gets the entry. Over
