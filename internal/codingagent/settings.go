@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -360,8 +361,8 @@ func checkServerRaw(raw map[string]any) ([]string, error) {
 					}
 				}
 				hasValidRoots = true
-			case strings.EqualFold(innerKey, "port"), strings.EqualFold(innerKey, "hostname"):
-				// Known keys.
+			case isServerSettingKey(innerKey):
+				// Known key declared by ServerSettings; tolerated, not warned about.
 			default:
 				if nearMiss == "" && serverKeyIsAllowedRootsNearMiss(innerKey) {
 					nearMiss = innerKey
@@ -381,6 +382,35 @@ func checkServerRaw(raw map[string]any) ([]string, error) {
 		unknown = append(unknown, serverNearMiss)
 	}
 	return unknown, nil
+}
+
+// isServerSettingKey reports whether key names a ServerSettings field, matched
+// case-insensitively the way encoding/json resolves a field: a tagged field by
+// its JSON name, an untagged or `json:",opt"` field by its Go field name, and
+// unexported or `json:"-"` fields not at all. The set is derived, so adding a
+// ServerSettings field cannot leave it in checkServerRaw's unknown-key set or
+// trip the allowedRoots near-miss guard.
+// ponytail: top-level fields only; ServerSettings does not embed, so promoted
+// tags are not walked — extend this if an embedded struct is ever added.
+func isServerSettingKey(key string) bool {
+	t := reflect.TypeFor[ServerSettings]()
+	for f := range t.Fields() {
+		if f.PkgPath != "" { // unexported: encoding/json ignores it
+			continue
+		}
+		tag := f.Tag.Get("json")
+		if tag == "-" { // json:"-": never decoded
+			continue
+		}
+		name, _, _ := strings.Cut(tag, ",")
+		if name == "" { // no tag, or json:",opt": encoding/json uses the Go name
+			name = f.Name
+		}
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // serverKeyIsServerNearMiss reports whether a top-level settings key looks like a
