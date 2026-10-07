@@ -62,6 +62,10 @@ type AssistantMessage struct {
 	// ThinkingSignature is a legacy runtime convenience; durable signatures
 	// live on ThinkingContent blocks in the wire shape.
 	ThinkingSignature string `json:"-"`
+	// EntryID is the session entry id this message persists under. The Session
+	// mints it at message start so the stream and the transcript share one id
+	// for the whole message; it is runtime-only and never serialized.
+	EntryID string `json:"-"`
 }
 
 // ToolResultMessage carries one tool execution result back to the LLM.

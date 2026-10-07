@@ -166,6 +166,10 @@ type Session struct {
 	// publish at the matching message_end and agent_end.
 	assistantEndsMu sync.Mutex
 	assistantEnds   []assistantEndNote
+	// pendingAssistantID is the entry id minted at an assistant message start
+	// and applied to its message_end before persistence, so the streamed id and
+	// the transcript entry id are the same. Only the agent goroutine touches it.
+	pendingAssistantID string
 	// lastAssistantEnd is the note of the last assistant message_end
 	// forwardAgentEvents published. Only that goroutine touches it.
 	lastAssistantEnd assistantEndNote
@@ -424,6 +428,7 @@ func NewSession(svcs *Services, opts SessionOptions) (*Session, error) {
 			if end, ok := ev.(agent.TurnEndEvent); ok {
 				ev = sess.turnEndWithEntryIDs(end)
 			}
+			sess.tagAssistantEntryID(ev)
 			sess.observeRouteTiming(ev)
 		},
 		OnMessagePersist: func(msg agent.AgentMessage) error {
@@ -567,6 +572,30 @@ func (s *Session) persistMessage(msg agent.AgentMessage) error {
 		s.pushAssistantEnd(s.noteAssistantMessageEnd(msg.Assistant))
 	}
 	return err
+}
+
+// tagAssistantEntryID mints the entry id at an assistant message start and
+// applies it at message end, before the agent persists that message and before
+// the SSE mapper reads it. Both run synchronously after OnEvent on the agent
+// goroutine, so the id the stream announces is the id the transcript stores.
+// A MessageUpdateEvent is not handled: each update carries a fresh clone, so an
+// id set there would reach neither persistence nor the mapper.
+func (s *Session) tagAssistantEntryID(ev agent.AgentEvent) {
+	switch e := ev.(type) {
+	case agent.MessageStartEvent:
+		if e.Message.Assistant == nil {
+			return
+		}
+		id, _ := icodingagent.GenerateEntryID()
+		e.Message.Assistant.EntryID = id
+		s.pendingAssistantID = id
+	case agent.MessageEndEvent:
+		if e.Message.Assistant == nil {
+			return
+		}
+		e.Message.Assistant.EntryID = s.pendingAssistantID
+		s.pendingAssistantID = ""
+	}
 }
 
 // turnEndWithEntryIDs resolves the entries already persisted by message_end

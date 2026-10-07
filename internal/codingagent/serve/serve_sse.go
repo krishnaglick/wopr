@@ -323,8 +323,9 @@ func sseDone(w http.ResponseWriter) bool {
 
 // eventMapper turns one session's agent events into opencode SSE frames.
 //
-// It holds the per-session provisional message counter, so it needs no lock: a
-// session's forwarder is a single goroutine and calls Translate only from it.
+// It holds the assistant entry id for the message in flight, so it needs no
+// lock: a session's forwarder is a single goroutine and calls Translate only
+// from it.
 type eventMapper struct {
 	sessionID string
 	// cwd is the session's own working directory, or the resolved server root
@@ -335,12 +336,11 @@ type eventMapper struct {
 	// message that omits its own provider/model.
 	providerID string
 	modelID    string
-	// next is the number of messages that have started in this session's life.
-	next int
-	// current is the index of the message being streamed, set at its
-	// MessageStartEvent. Every message emits exactly one start before its
-	// updates and its end, so it is stable for the whole message.
-	current int
+	// assistantID is the entry id of the assistant message being streamed, set
+	// at its MessageStartEvent. The Session mints it before the message
+	// persists, so deltas, part updates and the end burst all use the one id the
+	// transcript will report.
+	assistantID string
 }
 
 // newEventMapper returns the Translator the host runs for one session. It is a
@@ -371,9 +371,7 @@ func (s *Server) newEventMapper(sessionID string) codinghost.Translator {
 func (m *eventMapper) translate(ev agent.AgentEvent, entryID string) ([]codinghost.Event, error) {
 	switch e := ev.(type) {
 	case agent.MessageStartEvent:
-		m.current = m.next
-		m.next++
-		return nil, nil
+		return m.messageStart(e), nil
 	case agent.MessageUpdateEvent:
 		return m.messageUpdate(e)
 	case agent.MessageEndEvent:
@@ -412,6 +410,22 @@ func (m *eventMapper) translate(ev agent.AgentEvent, entryID string) ([]codingho
 	return nil, nil
 }
 
+// messageStart announces an assistant message as it begins and records the
+// entry id the rest of its frames use. The Session mints that id before the
+// message persists, so the announcement and the transcript share it. A start
+// for any other role produces nothing.
+func (m *eventMapper) messageStart(ev agent.MessageStartEvent) []codinghost.Event {
+	if ev.Message.Assistant == nil {
+		return nil
+	}
+	m.assistantID = ev.Message.Assistant.EntryID
+	return m.one(m.event(eventMessageUpdated, sseMessageUpdated{
+		SessionID: m.sessionID,
+		Info: messageInfo(m.sessionID, m.cwd, m.root, m.assistantID, "assistant", "", time.Now().UnixMilli(),
+			ev.Message.Assistant, m.providerID, m.modelID),
+	}))
+}
+
 // messageUpdate maps a streamed assistant message event. The role filter is
 // mandatory: message_end also fires for user and toolResult messages, and
 // toolResult is not a role opencode's Message can decode, so a mapper without
@@ -420,7 +434,7 @@ func (m *eventMapper) messageUpdate(ev agent.MessageUpdateEvent) ([]codinghost.E
 	if ev.Message.Assistant == nil {
 		return nil, nil
 	}
-	messageID := m.provisionalID()
+	messageID := m.assistantID
 	switch stream := ev.AssistantMessageEvent.(type) {
 	// Three true deltas. A tool-call delta is an arguments delta: routing it to
 	// message.part.updated instead would emit a tool part with empty arguments.
@@ -449,24 +463,45 @@ func (m *eventMapper) messageUpdate(ev agent.MessageUpdateEvent) ([]codinghost.E
 	return nil, nil
 }
 
-// messageEnd is the reconciliation burst. Deltas streamed under a provisional
-// id, because wopr allocates the transcript entry at message_end and no
-// authoritative id exists while a message streams. Here the entry is on disk,
-// so the message is re-announced under its real id and its parts are published
-// with the ids the transcript will report — which is what makes the two agree
-// by construction rather than by luck.
-//
-// message.updated is emitted for assistant messages only. A user or toolResult
-// end produces nothing: the app already holds the user message it sent.
+// messageEnd is the reconciliation burst. For an assistant message the entry
+// id is already minted and applied at message start, so the end only
+// re-announces the message and republishes its parts under the ids the
+// transcript reports. For a user message it announces the message and its text
+// parts, so the client that did not send the prompt through this connection
+// still sees it once, under its transcript id. A toolResult end produces
+// nothing: its state rides the tool part the assistant message already owns.
 func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]codinghost.Event, error) {
-	if ev.Message.Assistant == nil || entryID == "" {
+	now := time.Now().UnixMilli()
+	if ev.Message.User != nil {
+		if entryID == "" {
+			return nil, nil
+		}
+		events := []codinghost.Event{m.event(eventMessageUpdated, sseMessageUpdated{
+			SessionID: m.sessionID,
+			Info: messageInfo(m.sessionID, m.cwd, m.root, entryID, "user", "", now,
+				nil, m.providerID, m.modelID),
+		})}
+		for i, block := range ev.Message.User.Content {
+			if b, ok := block.(ai.TextContent); ok {
+				events = append(events, m.part(textPart(entryID, m.sessionID, i, b.Text)))
+			}
+		}
+		return events, nil
+	}
+	if ev.Message.Assistant == nil {
 		return nil, nil
 	}
-	now := time.Now().UnixMilli()
+	id := ev.Message.Assistant.EntryID
+	if id == "" {
+		id = entryID
+	}
+	if id == "" {
+		return nil, nil
+	}
 	blocks := ev.Message.Assistant.Content
 	events := []codinghost.Event{m.event(eventMessageUpdated, sseMessageUpdated{
 		SessionID: m.sessionID,
-		Info: messageInfo(m.sessionID, m.cwd, m.root, entryID, "assistant", "", now,
+		Info: messageInfo(m.sessionID, m.cwd, m.root, id, "assistant", "", now,
 			ev.Message.Assistant, m.providerID, m.modelID),
 	})}
 	// The index runs over the full content slice, enumerated before any block is
@@ -476,11 +511,11 @@ func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]co
 		var part partDTO
 		switch b := block.(type) {
 		case ai.TextContent:
-			part = textPart(entryID, m.sessionID, i, b.Text)
+			part = textPart(id, m.sessionID, i, b.Text)
 		case ai.ThinkingContent:
-			part = reasoningPart(entryID, m.sessionID, i, b.Thinking)
+			part = reasoningPart(id, m.sessionID, i, b.Thinking)
 		case ai.ToolCall:
-			part = toolPart(m.sessionID, entryID, i, b.ID, b.Name)
+			part = toolPart(m.sessionID, id, i, b.ID, b.Name)
 		default:
 			continue
 		}
@@ -498,7 +533,7 @@ func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]co
 // form of partID is identified by its call id, not its index, so it is the same
 // part the content-indexed events and the transcript name.
 func (m *eventMapper) toolStart(ev agent.ToolExecutionStartEvent) []codinghost.Event {
-	part := toolPart(m.sessionID, m.provisionalID(), 0, ev.ToolCallID, ev.ToolName)
+	part := toolPart(m.sessionID, m.assistantID, 0, ev.ToolCallID, ev.ToolName)
 	part.State = json.RawMessage(`{"status":"running"}`)
 	return m.one(m.part(part))
 }
@@ -507,7 +542,7 @@ func (m *eventMapper) toolStart(ev agent.ToolExecutionStartEvent) []codinghost.E
 // ToolExecutionUpdateEvent is a snapshot, never a delta, so it is a
 // message.part.updated and never a message.part.delta.
 func (m *eventMapper) toolSnapshot(callID, name, status, output string, details any) codinghost.Event {
-	part := toolPart(m.sessionID, m.provisionalID(), 0, callID, name)
+	part := toolPart(m.sessionID, m.assistantID, 0, callID, name)
 	state := map[string]any{"status": status, "output": output}
 	if todos := todosFromDetails(name, details); len(todos) > 0 {
 		state["metadata"] = map[string]any{"todos": todos}
@@ -541,11 +576,6 @@ func todosFromDetails(tool string, details any) []tools.Todo {
 		return nil
 	}
 	return todos
-}
-
-// provisionalID is the streamed id of the message in flight.
-func (m *eventMapper) provisionalID() string {
-	return "msg_" + m.sessionID + "-" + strconv.Itoa(m.current)
 }
 
 func (m *eventMapper) delta(messageID, id, field, text string) codinghost.Event {

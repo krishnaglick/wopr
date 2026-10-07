@@ -1357,7 +1357,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-sse-message-lifecycle-parity — KKCode renders the reply twice and never settles
 
-- **Status:** READY — surfaced 2026-10-07 driving KKCode against `wopr serve`. The payload-envelope fix
+- **Status:** DONE — shipped on `wave-serve-sse-message-lifecycle-parity`, merged into `main`; surfaced 2026-10-07 driving KKCode against `wopr serve`. The session mints the assistant entry id at message start (stream and transcript share one id), the stream announces the user message and its text part, and the assistant `message.updated` brackets the parts. The payload-envelope fix
   (`4eb51e1`) produced the first reply and the abort-JSON fix (`47d5ef8`) fixed Stop, but a turn still
   double-renders and the client never returns to idle.
 - **Why:** comparing one turn's `/global/event` frames from opencode 1.18.34 (`/tmp/oc-turn.txt`) and wopr

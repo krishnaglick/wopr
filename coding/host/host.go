@@ -163,7 +163,7 @@ func (h *Host) forwardEvents(sess *Session) {
 			continue
 		}
 		entryID := ""
-		if end, ok := ev.(agent.MessageEndEvent); ok && end.Message.Assistant != nil {
+		if end, ok := ev.(agent.MessageEndEvent); ok && (end.Message.Assistant != nil || end.Message.User != nil) {
 			entryID, _ = sess.Inner().MessageEntryID(end.Message)
 		}
 		events, err := translate(ev, entryID)

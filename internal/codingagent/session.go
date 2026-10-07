@@ -610,6 +610,11 @@ func (s *Session) AppendMessage(msg agent.AgentMessage) (string, error) {
 		return "", fmt.Errorf("session: AppendMessage: %w", err)
 	}
 	e, err := appendOnLeaf(s, "message", func(base SessionEntryBase) MessageEntry {
+		// The Session minted this id at message start so the stream and the
+		// transcript agree; honor it over the fresh one appendOnLeaf generated.
+		if msg.Assistant != nil && msg.Assistant.EntryID != "" {
+			base.ID = msg.Assistant.EntryID
+		}
 		return MessageEntry{SessionEntryBase: base, Message: msg}
 	})
 	return e.ID, err
