@@ -113,6 +113,30 @@ type errorDTO struct {
 	Error string `json:"error"`
 }
 
+// configDTO is the GET /config subset wopr can honestly report. model is the
+// provider/model string the server starts sessions with; omitempty yields {}.
+type configDTO struct {
+	Model string `json:"model,omitempty"`
+}
+
+// apiCommandDTO is the GET /api/command body. Data is initialized to []any{} in
+// the handler so it marshals [], never null; there is no element type because
+// built-in slash commands are out of contract.
+type apiCommandDTO struct {
+	Location commandLocationDTO `json:"location"`
+	Data     []any              `json:"data"`
+}
+
+type commandLocationDTO struct {
+	Directory string                    `json:"directory"`
+	Project   commandLocationProjectDTO `json:"project"`
+}
+
+type commandLocationProjectDTO struct {
+	ID        string `json:"id"`
+	Directory string `json:"directory"`
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 const (

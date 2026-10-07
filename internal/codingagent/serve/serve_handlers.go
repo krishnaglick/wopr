@@ -76,7 +76,7 @@ func (s *Server) directoryParam(r *http.Request) (string, *errorDTO, int) {
 	return s.sessionDir, nil, 0
 }
 
-// notImplemented is the shared stub for the six 501 routes.
+// notImplemented is the shared stub for the five 501 routes.
 func (s *Server) notImplemented(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusNotImplemented, errorDTO{Error: "not implemented"})
 }
@@ -89,6 +89,36 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		Healthy: true,
 		Version: version.Version,
 	})
+}
+
+// GET /api/health
+func (s *Server) apiHealth(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, http.StatusOK, apiHealthResponse{Healthy: true})
+}
+
+// GET /config
+func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, http.StatusOK, configDTO{Model: s.modelSpec})
+}
+
+// GET /api/command
+func (s *Server) apiCommand(w http.ResponseWriter, r *http.Request) {
+	dir, _ := filepath.EvalSymlinks(s.services.CWD())
+	s.writeJSON(w, http.StatusOK, apiCommandDTO{
+		Location: commandLocationDTO{
+			Directory: dir,
+			Project:   commandLocationProjectDTO{ID: "global", Directory: dir},
+		},
+		Data: []any{},
+	})
+}
+
+// GET /permission
+//
+// Every tool is open by default, so there are never pending requests; the
+// client polls this and reads a non-array body as a broken host.
+func (s *Server) listPermissions(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, http.StatusOK, []any{})
 }
 
 // GET /session

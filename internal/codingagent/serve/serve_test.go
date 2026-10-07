@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -1278,9 +1279,9 @@ func truncate(s string, n int) string {
 // TestNewRegistersEveryRouteWithoutPanicking is the gate for the permission
 // route's wildcard name. ServeMux rejects a pattern that reuses one wildcard
 // name and HandleFunc panics on that error, so the wrong name aborts New and
-// takes all thirty routes with it. The wire path is byte-identical either way,
-// so a request cannot tell the two spellings apart; what this asserts is that
-// New survives and the mux it built answers.
+// takes all thirty-four routes with it. The wire path is byte-identical either
+// way, so a request cannot tell the two spellings apart; what this asserts is
+// that New survives and the mux it built answers.
 func TestNewRegistersEveryRouteWithoutPanicking(t *testing.T) {
 	env := promptEnvFor(t)
 
@@ -1297,17 +1298,15 @@ func TestNewRegistersEveryRouteWithoutPanicking(t *testing.T) {
 	}
 }
 
-// TestPermissionRoutesAnswer501OnEveryMatchingPath verifies the two 501 routes
-// answer without reading a body, looking up a session, or parsing an id: an
-// unknown session is 501 here, not 404, because the client reads 404 as "host
-// gone" and this route is not implemented either way.
-func TestPermissionRoutesAnswer501OnEveryMatchingPath(t *testing.T) {
+// TestPermissionSubmitRoutesAnswer501OnEveryMatchingPath verifies the one
+// remaining 501 route answers without reading a body, looking up a session, or
+// parsing an id: an unknown session is 501 here, not 404, because the client
+// reads 404 as "host gone" and this route is not implemented either way. The
+// GET /permission list answers 200 [] and is covered by
+// TestPermissionListAnswersEmptyArray.
+func TestPermissionSubmitRoutesAnswer501OnEveryMatchingPath(t *testing.T) {
 	env := promptEnvFor(t)
 	id := createPromptSession(t, env.baseURL)
-
-	if status, body := getRaw(t, env.baseURL, "/permission"); status != http.StatusNotImplemented {
-		t.Errorf("GET /permission: expected 501, got %d (%s)", status, body)
-	}
 
 	for _, path := range []string{
 		"/session/" + id + "/permissions/per-1",
@@ -1333,6 +1332,140 @@ func TestPermissionRoutesAnswer501OnEveryMatchingPath(t *testing.T) {
 	// rather than a 501 for a route that was never registered.
 	if status, _ := postJSON(t, env.baseURL, "/session/"+id+"/permissions", `{}`); status != http.StatusNotFound {
 		t.Errorf("POST /session/{id}/permissions: expected 404, got %d", status)
+	}
+}
+
+// TestAPIHealthAnswersHealthyWithoutVersion pins the KKCode connect probe:
+// 200, healthy true, and no version key (that belongs to /global/health).
+func TestAPIHealthAnswersHealthyWithoutVersion(t *testing.T) {
+	env := promptEnvFor(t)
+	status, body := getRaw(t, env.baseURL, "/api/health")
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/health: expected 200, got %d (%s)", status, body)
+	}
+	var got apiHealthResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("GET /api/health: decode: %v (%s)", err, body)
+	}
+	if !got.Healthy {
+		t.Errorf("GET /api/health: expected healthy=true, got %s", body)
+	}
+	if strings.Contains(string(body), `"version"`) {
+		t.Errorf("GET /api/health: expected no version key, got %s", body)
+	}
+}
+
+// TestExperimentalSessionMatchesSessionList proves the new route answers the
+// same session list as the existing handler: with one seeded session the two
+// bodies decode to the same non-empty []sessionDTO, and the foreign-directory
+// validation still applies (200 on the root, 400 on a mismatch).
+func TestExperimentalSessionMatchesSessionList(t *testing.T) {
+	env := promptEnvFor(t)
+	createPromptSession(t, env.baseURL)
+
+	statusList, bodyList := getRaw(t, env.baseURL, "/session")
+	statusExp, bodyExp := getRaw(t, env.baseURL, "/experimental/session")
+	if statusList != http.StatusOK || statusExp != http.StatusOK {
+		t.Fatalf("/session=%d, /experimental/session=%d, want both 200", statusList, statusExp)
+	}
+	var list, exp []sessionDTO
+	if err := json.Unmarshal(bodyList, &list); err != nil {
+		t.Fatalf("decode /session: %v (%s)", err, bodyList)
+	}
+	if err := json.Unmarshal(bodyExp, &exp); err != nil {
+		t.Fatalf("decode /experimental/session: %v (%s)", err, bodyExp)
+	}
+	if len(list) == 0 {
+		t.Fatal("/session returned no sessions after seeding one; the compare would be trivial")
+	}
+	if !reflect.DeepEqual(list, exp) {
+		t.Errorf("/experimental/session differs from /session:\n got %+v\nwant %+v", exp, list)
+	}
+
+	root, err := filepath.EvalSymlinks(env.services.CWD())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, body := getRaw(t, env.baseURL, "/experimental/session?directory="+url.QueryEscape(root)); status != http.StatusOK {
+		t.Errorf("GET /experimental/session?directory=<root>: expected 200, got %d (%s)", status, body)
+	}
+	if status, _ := getRaw(t, env.baseURL, "/experimental/session?directory=/somewhere/else"); status != http.StatusBadRequest {
+		t.Errorf("GET /experimental/session foreign directory: expected 400, got %d", status)
+	}
+}
+
+// TestConfigAnswersAnObject pins the honest subset: 200 and model equal to the
+// spec promptEnvFor starts the server with. A {} or null body would fail here.
+func TestConfigAnswersAnObject(t *testing.T) {
+	env := promptEnvFor(t)
+	status, body := getRaw(t, env.baseURL, "/config")
+	if status != http.StatusOK {
+		t.Fatalf("GET /config: expected 200, got %d (%s)", status, body)
+	}
+	var cfg configDTO
+	if err := json.Unmarshal(body, &cfg); err != nil {
+		t.Fatalf("GET /config: decode: %v (%s)", err, body)
+	}
+	if cfg.Model != "test-faux/faux-1" {
+		t.Errorf("GET /config: expected model=test-faux/faux-1, got %q (%s)", cfg.Model, body)
+	}
+}
+
+// TestAPICommandShape pins the exact body KKCode decodes: a global project id,
+// both directories equal to EvalSymlinks(CWD()), and data as [] never null.
+func TestAPICommandShape(t *testing.T) {
+	env := promptEnvFor(t)
+	status, body := getRaw(t, env.baseURL, "/api/command")
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/command: expected 200, got %d (%s)", status, body)
+	}
+	var cmd apiCommandDTO
+	if err := json.Unmarshal(body, &cmd); err != nil {
+		t.Fatalf("GET /api/command: decode: %v (%s)", err, body)
+	}
+	want, err := filepath.EvalSymlinks(env.services.CWD())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Location.Project.ID != "global" {
+		t.Errorf("GET /api/command: expected project id global, got %q", cmd.Location.Project.ID)
+	}
+	if cmd.Location.Directory != want {
+		t.Errorf("GET /api/command: location.directory = %q, want %q", cmd.Location.Directory, want)
+	}
+	if cmd.Location.Project.Directory != want {
+		t.Errorf("GET /api/command: location.project.directory = %q, want %q", cmd.Location.Project.Directory, want)
+	}
+	if cmd.Data == nil {
+		t.Errorf("GET /api/command: data is null, want [] (%s)", body)
+	}
+	if len(cmd.Data) != 0 {
+		t.Errorf("GET /api/command: expected empty data, got %v", cmd.Data)
+	}
+}
+
+// TestPermissionListAnswersEmptyArray pins the repointed route: 200 with the
+// literal [] body, never null and never the old 501.
+func TestPermissionListAnswersEmptyArray(t *testing.T) {
+	env := promptEnvFor(t)
+	status, body := getRaw(t, env.baseURL, "/permission")
+	if status != http.StatusOK {
+		t.Fatalf("GET /permission: expected 200, got %d (%s)", status, body)
+	}
+	if got := strings.TrimSpace(string(body)); got != "[]" {
+		t.Errorf("GET /permission: expected [], got %s", got)
+	}
+}
+
+// TestNewRoutesIgnoreAForeignDirectory proves tolerance is deliberate: KKCode
+// appends ?directory= to these, and a 400 here breaks the first connect.
+func TestNewRoutesIgnoreAForeignDirectory(t *testing.T) {
+	env := promptEnvFor(t)
+	for _, path := range []string{"/api/health", "/config", "/api/command"} {
+		status, body := getRaw(t, env.baseURL, path+"?directory=/somewhere/else")
+		if status != http.StatusOK {
+			t.Errorf("GET %s?directory=/somewhere/else: expected 200, got %d (%s)", path, status, body)
+		}
 	}
 }
 

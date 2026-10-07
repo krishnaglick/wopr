@@ -14,6 +14,12 @@ type healthResponse struct {
 	Version string `json:"version"`
 }
 
+// apiHealthResponse is the V2 /api/health body. It has no version field: the
+// V1 /global/health keeps version, so the two responses cannot share a type.
+type apiHealthResponse struct {
+	Healthy bool `json:"healthy"`
+}
+
 // Server holds the HTTP server and its dependencies.
 type Server struct {
 	services   *host.Services
@@ -56,9 +62,11 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 	// Health
 	mux.HandleFunc("GET /global/health", s.health)
 	mux.HandleFunc("GET /global/event", s.globalEvent)
+	mux.HandleFunc("GET /api/health", s.apiHealth)
 
 	// Sessions
 	mux.HandleFunc("GET /session", s.listSessions)
+	mux.HandleFunc("GET /experimental/session", s.listSessions)
 	mux.HandleFunc("POST /session", s.createSession)
 	mux.HandleFunc("GET /session/{id}", s.getSession)
 	mux.HandleFunc("PATCH /session/{id}", s.patchSession)
@@ -81,7 +89,11 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 	mux.HandleFunc("GET /project/current", s.getCurrentProject)
 
 	// Config
+	mux.HandleFunc("GET /config", s.getConfig)
 	mux.HandleFunc("GET /config/providers", s.listProviders)
+
+	// Commands
+	mux.HandleFunc("GET /api/command", s.apiCommand)
 
 	// Providers
 	mux.HandleFunc("GET /provider", s.listProviderNames)
@@ -90,7 +102,7 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 	mux.HandleFunc("GET /agent", s.listAgents)
 
 	// Permissions
-	mux.HandleFunc("GET /permission", s.notImplemented)
+	mux.HandleFunc("GET /permission", s.listPermissions)
 
 	// Questions
 	mux.HandleFunc("GET /question", s.listQuestions)

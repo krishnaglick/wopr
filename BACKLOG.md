@@ -1268,7 +1268,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-kkcode-v1-compat — KKCode mobile client 404s on connect: missing `/api/health` and sibling routes
 
-- **Status:** READY — surfaced 2026-10-07 testing `wopr serve` against the KKCode iOS client
+- **Status:** DONE — shipped on `wave-serve-kkcode-v1-compat`, merged into `main`; surfaced testing `wopr serve` against the KKCode iOS client
   (closed-source; UA `KKCode/29694823`). Captured by a logging reverse proxy in front of a real
   opencode 1.18.34 server.
 - **Why:** KKCode's first connect call is `GET /api/health`, which wopr does not serve, so the whole
