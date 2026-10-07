@@ -179,9 +179,15 @@ absent requireds. These are required and must be emitted:
 | `TodoItem` | `id`, `content`, `status`, `priority` (each has a decoder fallback) |
 
 `Session.slug` and `Session.version` are non-optional in the client and have no wopr
-equivalent. Derive both deterministically from the session ID so they are stable across
-reconnects. `session.tokens` and `session.cost` are optional and cumulative; emit them
-or omit them, do not emit zeros that read as real totals.
+equivalent. Both must be emitted; the plan originally said to derive both deterministically
+from the session ID, and that is amended by decision: `slug` **is** the session ID (a
+UUIDv7, already URL-safe, so `GET /session/{slug}` and `GET /session/{id}` are one request),
+while `version` **emits the build constant** `coding/version.Version`. The stated purpose was
+stability across reconnects, which the constant satisfies by construction — the derivation
+was a means the plan did not need, and a hash of an ID presented as a version is a value
+with no meaning in a field the client requires. Evidence and rejected alternatives:
+`BACKLOG.md`, serve-3's `Session.version` entry. `session.tokens` and `session.cost` are
+optional and cumulative; emit them or omit them, do not emit zeros that read as real totals.
 
 Auth is optional in the client: `Authorization` is set only when both a username and a
 password are stored (`APIClient.swift:75`). This plan serves without auth on a trusted
@@ -320,6 +326,8 @@ Six. Each ends green and is independently committable.
    slice that proves the seam; SSE is not started until a prompt streams correctly.
 5. **Interactive surfaces.** `todowrite` tool and `/todo` plus `todo.updated`;
    `askuser.Asker` wired to `/question*` and the three question events;
+   `GET /permission` and `POST /session/{id}/permissions/{id}` as **501** stubs — the
+   approval substrate is assigned to `serve-7` and is `BLOCKED` on a human decision;
    `/file/content` behind the resolved-path allowlist. The phone becomes a first-class
    frontend: the agent can ask a question and there is a real answerer.
 6. **Docs and threat model.** `docs/site/docs/server.md` with the endpoint table, the
