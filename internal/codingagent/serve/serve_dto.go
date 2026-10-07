@@ -92,7 +92,13 @@ type projectDTO struct {
 type fileNodeDTO struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
-	Type string `json:"type"`
+	// Absolute is the entry's absolute path; opencode emits it and clients
+	// (KKCode) call string methods on it, so its absence is fatal, not cosmetic.
+	Absolute string `json:"absolute"`
+	Type     string `json:"type"`
+	// Ignored mirrors opencode's field; wopr has no ignore rules, so it is
+	// always false. Present so a strict client decoding the object finds it.
+	Ignored bool `json:"ignored"`
 }
 
 type fileStatusDTO struct {

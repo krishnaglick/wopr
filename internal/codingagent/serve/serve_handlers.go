@@ -577,11 +577,19 @@ func (s *Server) serveListFiles(w http.ResponseWriter, r *http.Request, beforeOp
 		if entry.IsDir() {
 			t = "directory"
 		}
-		rel, _ := filepath.Rel(root, filepath.Join(resolved, entry.Name()))
+		abs := filepath.Join(resolved, entry.Name())
+		rel, _ := filepath.Rel(root, abs)
+		relSlash := filepath.ToSlash(rel)
+		if entry.IsDir() {
+			// opencode marks directories with a trailing slash in the
+			// project-root-relative path, but not in absolute.
+			relSlash += "/"
+		}
 		dtos = append(dtos, fileNodeDTO{
-			Name: entry.Name(),
-			Path: filepath.ToSlash(rel),
-			Type: t,
+			Name:     entry.Name(),
+			Path:     relSlash,
+			Absolute: filepath.ToSlash(abs),
+			Type:     t,
 		})
 	}
 
@@ -740,8 +748,9 @@ func (s *Server) findFiles(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		matches = append(matches, fileNodeDTO{
-			Name: name,
-			Path: filepath.ToSlash(rel),
+			Name:     name,
+			Path:     filepath.ToSlash(rel),
+			Absolute: filepath.ToSlash(path),
 			Type: func() string {
 				if d.IsDir() {
 					return "directory"

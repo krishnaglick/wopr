@@ -2258,8 +2258,18 @@ func TestListFilesEntryPathsAndFileRejection(t *testing.T) {
 		t.Fatalf("path=. returned %d entries, want 3: %+v", len(dtos), dtos)
 	}
 	for _, d := range dtos {
-		if d.Path != d.Name || d.Path == "." {
-			t.Fatalf("entry path shadowed by the directory's own rel: %+v", d)
+		wantPath := d.Name
+		if d.Type == "directory" {
+			wantPath = d.Name + "/"
+		}
+		if d.Path != wantPath {
+			t.Fatalf("entry path = %q, want %q: %+v", d.Path, wantPath, d)
+		}
+		if !filepath.IsAbs(d.Absolute) || filepath.Base(d.Absolute) != d.Name {
+			t.Fatalf("entry absolute = %q, want an absolute path ending in %q: %+v", d.Absolute, d.Name, d)
+		}
+		if d.Ignored {
+			t.Fatalf("entry %q ignored = true, want false", d.Name)
 		}
 	}
 
