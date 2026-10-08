@@ -1593,3 +1593,40 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   never overwritten with a missing time; the serve suite; `make check`. Live: KKCode renders once and idles.
 - **Notes:** keep the user-message announce branch unchanged. Only suppress the assistant part republish for parts the
   stream already sent; if a part genuinely never streamed, it may still be emitted (with `time` via `finishPart`).
+
+### serve-sse-session-frames — wopr never emits `session.updated`/`session.diff`, and announces the user message once instead of opencode's twice
+
+- **Status:** READY — surfaced 2026-10-08 driving KKCode: it never enters a running state (no Stop), so the user
+  resends and wopr answers `409 busy`; each sent message also renders twice.
+- **Why:** in one opencode 1.18.34 turn (`/tmp/oc-turn2.txt`) the frame census is `session.updated` ×5, `session.diff`
+  ×2, `message.updated` ×6 (the user message updated at turn start with no `summary`, again mid-turn, and again at the
+  end with `summary:{diffs:[]}`), plus `step-start`/`step-finish` parts. wopr's turn emits **no** `session.updated`,
+  **no** `session.diff`, and the user `message.updated` once. KKCode is opencode-shaped: it likely derives the
+  session's running/updated state and title/token metadata from `session.updated`, and reconciles the message it
+  optimistically rendered from the user `message.updated` sequence — so their absence leaves it thinking the session is
+  idle (no Stop button) and doubling the message. Abort itself is verified working (wopr stops the stream promptly;
+  `POST /session/{id}/abort` → 200 `true`), so "can't stop" is the missing running state, not the abort handler.
+- **Files:** `internal/codingagent/serve/serve_sse.go` (mapper), `internal/codingagent/serve/serve_handlers.go` /
+  `serve_dto.go` (`buildSessionDTO` for the `session.updated` info).
+- **Gates:** a hermetic replay test comparing wopr's turn against `/tmp/oc-turn2.txt`: `session.updated` emitted on
+  session start and at turn end (info = the session DTO, `time.updated` moving), `session.diff` after the assistant
+  run, and the user `message.updated` emitted twice (start without `summary`, end with `summary:{diffs:[]}`); the serve
+  suite; `make check`. Live: KKCode shows the run state (Stop) and renders each message once.
+- **Notes:** only emit frames wopr can produce honestly. If the double is not explained by the user-message sequence,
+  the spec fan must say so and the item narrows to the session frames.
+
+### serve-prompt-async-queue-when-busy — a second `prompt_async` while running returns `409`; opencode returns `204`
+
+- **Status:** READY — surfaced 2026-10-08 in the KKCode proxy log (`prompt_async` → `409` twice) and verified live:
+  opencode's `POST /session/{id}/prompt_async` on a busy session returns `204` (accepts/queues), wopr returns `409`
+  `application/json`.
+- **Why:** the client allows sending while running (it has no queue UI) and wopr's `409 busy` surfaces as an error.
+  wopr already models queued input (`HasPendingMessages`/`PendingMessageCount`, and the failure table's "queued input
+  after compaction"), but `promptAsync` calls `PromptContent`, which returns `ErrSessionBusy` instead of queueing.
+- **Files:** `internal/codingagent/serve/serve_prompt.go` (`promptAsync`), `coding/host/host.go`
+  (`PromptContent`/queue path).
+- **Gates:** a test that two `prompt_async` calls in a row both return `204`, and the second run's user+assistant
+  messages appear after the first settles (in order); the serve suite; `make check`. Live: KKCode sends while running
+  without an error.
+- **Notes:** match opencode's queued (not replaced, not dropped) semantics; confirm whether opencode steers the
+  running turn or runs the queued message next before implementing.
