@@ -1676,8 +1676,8 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-message-id — wopr ignores the client's `messageID`, so KKCode's optimistic user message never reconciles and renders twice
 
-- **Status:** READY — surfaced 2026-10-08. Owner confirmed the **user** message doubles even on the first message of a
-  new session.
+- **Status:** IN PROGRESS (claimed 2026-10-08, `wave-serve-prompt-message-id`) — surfaced 2026-10-08. Owner confirmed
+  the **user** message doubles even on the first message of a new session.
 - **Why:** opencode's `POST /session/{id}/prompt_async` (and `/message`) body accepts an optional `messageID`
   (`pattern ^msg`; see `/tmp/ocapi.json`). Verified live on opencode 1.18.34: a prompt sent with
   `messageID:"msg_…"` produces a user message whose id **is** that value, round-tripping through
