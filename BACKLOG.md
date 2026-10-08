@@ -1504,14 +1504,25 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Notes:** the same info builder feeds both `GET /session/{id}/message` and the SSE `message.updated`, so branch on
   `role` once, in the one place both callers route through.
 
-### serve-delete-session-501 — `DELETE /session/{id}` answers 501
+### serve-delete-session-archives — `DELETE /session/{id}` answers 501; archive on delete and hide archived from `/experimental/session`
 
-- **Status:** READY — surfaced 2026-10-07 in the KKCode proxy log (two `DELETE /session/{id}` → `501`).
-- **Why:** opencode implements `DELETE /session/{id}` (returns `200 application/json true`); wopr answers `501`, so the
-  client's session deletion silently fails and sessions accumulate. Verified in `/tmp/wopr-proxy.log`.
-- **Files:** `internal/codingagent/serve/serve.go` (route), `internal/codingagent/serve/serve_handlers.go` (handler),
-  possibly `coding/host/host.go` for a delete/forget operation.
-- **Gates:** a test that `DELETE /session/{id}` returns 200 `true` and the session no longer appears in
-  `GET /experimental/session`; 404 for unknown id; `make check`.
-- **Notes:** confirm the opencode contract (status and body) against the live server before implementing; wopr must not
-  delete the transcript file unless that matches opencode.
+- **Status:** READY — surfaced 2026-10-07 in the KKCode proxy log (two `DELETE /session/{id}` → `501`). Owner decision
+  2026-10-08: **archive on delete** rather than hard-delete, so a mistaken delete is recoverable; KKCode has an archive.
+- **Why:** opencode implements `DELETE /session/{id}` (`200 application/json true`) as a **hard delete**. wopr answers
+  `501`, so the client's delete silently fails. wopr already has archiving: `PATCH /session/{id}` with
+  `{time:{archived:<ms>}}` sets it (`serve_handlers.go` `patchSession`), `sessionRecord.Archived` reads it back
+  (`serve_read.go`), and the session DTO emits `time.archived` (`serve_dto.go`). wopr has no host-level delete primitive
+  and must not remove transcript files. Decision: `DELETE` archives (sets `time.archived`) instead of deleting — a safe,
+  deliberate divergence from opencode. Separately, opencode's `GET /experimental/session` **excludes** archived sessions
+  while `GET /session` includes them (verified live on 1.18.34: an archived session is present in `/session`, absent in
+  `/experimental/session`). KKCode calls `/experimental/session`, so wopr must filter archived there or an
+  archived/deleted session never leaves the client's list. wopr's `/experimental/session` is currently an alias of
+  `/session` with no filter (`serve.go:69`).
+- **Files:** `internal/codingagent/serve/serve.go` (`DELETE /session/{id}` route → new handler; the experimental route),
+  `internal/codingagent/serve/serve_handlers.go` (reuse the `patchSession` archive write; `listSessions` gains an
+  archived filter for the experimental route only).
+- **Gates:** a test that `DELETE /session/{id}` returns 200 `true`, and the session is then absent from
+  `GET /experimental/session` but still present in `GET /session` and `GET /session/{id}`; 404 for an unknown id;
+  `make check`.
+- **Notes:** reuse the existing archive write (no second metadata format). Keep `/session` inclusive, matching opencode.
+  The DTO `time.archived` must carry the archive timestamp.
