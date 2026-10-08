@@ -1596,7 +1596,9 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-sse-session-frames — wopr never emits `session.updated`/`session.diff`, and announces the user message once instead of opencode's twice
 
-- **Status:** READY — surfaced 2026-10-08 driving KKCode: it never enters a running state (no Stop), so the user
+- **Status:** DONE (narrowed) — shipped on `wave-serve-sse-session-frames`, merged `--no-ff` into `main`; session
+  frames only, because the item's narrow clause fired (the double-render was not explained by the user-message
+  sequence). Surfaced 2026-10-08 driving KKCode: it never enters a running state (no Stop), so the user
   resends and wopr answers `409 busy`; each sent message also renders twice.
 - **Why:** in one opencode 1.18.34 turn (`/tmp/oc-turn2.txt`) the frame census is `session.updated` ×5, `session.diff`
   ×2, `message.updated` ×6 (the user message updated at turn start with no `summary`, again mid-turn, and again at the
@@ -1614,6 +1616,36 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   suite; `make check`. Live: KKCode shows the run state (Stop) and renders each message once.
 - **Notes:** only emit frames wopr can produce honestly. If the double is not explained by the user-message sequence,
   the spec fan must say so and the item narrows to the session frames.
+- **Landed (2026-10-08, narrowed):** the mapper now emits `session.updated` at turn start (before `session.status
+  busy`) and at turn end (`AgentSettledEvent`, before `session.status idle`/`session.idle`), info = the real
+  `buildSessionDTO(rec, live)` with `time.updated` moving; and `session.diff` `{sessionID,diff:[]}` at turn end. The
+  terminal seam fires on every settle including abort. Hermetic test `TestSSETurnSessionFramesMatchOpencode` embeds
+  the opencode census and never reads `/tmp`. No persisted-transcript change; no `coding` import into `serve`.
+- **Double-render — UNESTABLISHED and deliberately not fixed.** The spec fan and the work fan both found the
+  user-message sequence does **not** explain the double render: wopr emits one user `message.updated` and still
+  doubles, while opencode emits three for one id and renders once — the multiplicity runs opposite the symptom, so
+  it cannot be the cause; neither candidate alternative is proven. Per the item's clause the item narrowed and no
+  cause was invented. The two-phase user parity and the double-render diagnosis are surfaced as the two items below.
+
+### serve-sse-user-message-two-phase — emit the user `message.updated` in opencode's two-phase form (parity only)
+
+- **Status:** READY (parity, low priority) — deferred out of `serve-sse-session-frames` by that item's narrow clause.
+- **Why:** opencode emits the user message.updated at turn start with no `summary` and again (twice) at/after turn end
+  with `summary:{diffs:[]}` (`/tmp/oc-turn2.txt:7,35,83`); wopr emits it once, always with `summary`. This is frame
+  parity only — it is **not** a double-render fix; the double-render cause is UNESTABLISHED (see
+  `serve-sse-session-frames`). Do not reintroduce a fix claim.
+- **Files:** `internal/codingagent/serve/serve_sse.go`, `serve_dto.go`.
+- **Gates:** a hermetic test asserting the two-phase shape; the serve suite; `make check`.
+
+### kkcode-double-render-cause — diagnose the remaining KKCode message double-render
+
+- **Status:** READY (investigation, needs live QA) — surfaced 2026-10-08.
+- **Why:** driving KKCode, each sent message renders twice. The frame captures rule out the user-message sequence
+  (opencode emits more user updates than wopr and does not double; wopr emits one and does). Candidate causes are
+  unproven: the client's optimistic render not reconciling with the echoed `message.updated`, or a residual
+  assistant/part frame path. Needs the real KKCode client and a fresh capture with client-side render logging.
+- **Files:** TBD (client-side; capture against `internal/codingagent/serve`).
+- **Gates:** a capture that shows the duplicate's source; then a server-side fix with a hermetic test.
 
 ### serve-prompt-async-queue-when-busy — a second `prompt_async` while running returns `409`; opencode returns `204`
 

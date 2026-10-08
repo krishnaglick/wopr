@@ -33,6 +33,10 @@ import (
 // wopr removes either — a failed tool is state.status = "error" on a part that
 // stays. Emitting a placeholder for one would render an empty permission prompt
 // or a phantom deletion the client cannot reconcile.
+//
+// session.diff is emitted for opencode parity; the captured client event list
+// does not name it, and that list is not exhaustive — it does not name
+// session.idle either, which the client does wait for.
 const (
 	eventServerConnected    = "server.connected"
 	eventServerHeartbeat    = "server.heartbeat"
@@ -40,6 +44,7 @@ const (
 	eventMessagePartUpdated = "message.part.updated"
 	eventMessagePartDelta   = "message.part.delta"
 	eventSessionUpdated     = "session.updated"
+	eventSessionDiff        = "session.diff"
 	eventSessionError       = "session.error"
 	eventSessionStatus      = "session.status"
 	eventSessionIdle        = "session.idle"
@@ -120,6 +125,13 @@ type sseSessionError struct {
 type sseSessionUpdated struct {
 	SessionID string     `json:"sessionID"`
 	Info      sessionDTO `json:"info"`
+}
+
+// sseSessionDiff answers session.diff. wopr records no diff, so Diff is the
+// empty array the client requires, never null — mirrors messageSummary.Diffs.
+type sseSessionDiff struct {
+	SessionID string            `json:"sessionID"`
+	Diff      []json.RawMessage `json:"diff"`
 }
 
 // sseSessionStatus answers session.status. opencode nests the state under
@@ -336,6 +348,10 @@ type eventMapper struct {
 	// message that omits its own provider/model.
 	providerID string
 	modelID    string
+	// sessionInfo returns the session's current DTO, or false when the record
+	// cannot be read. Built by newEventMapper from the server's own read
+	// surface, so the stream and GET /session cannot disagree.
+	sessionInfo func() (sessionDTO, bool)
 	// assistantID is the entry id of the assistant message being streamed, set
 	// at its MessageStartEvent. The Session mints it before the message
 	// persists, so deltas, part updates and the end burst all use the one id the
@@ -388,6 +404,14 @@ func (s *Server) newEventMapper(sessionID string) codinghost.Translator {
 		providerID: providerID,
 		modelID:    modelID,
 	}
+	mapper.sessionInfo = func() (sessionDTO, bool) {
+		live, _ := s.host.Get(sessionID)
+		rec, ok := getSessionRecord(s.sessionDir, sessionID, live)
+		if !ok {
+			return sessionDTO{}, false
+		}
+		return s.buildSessionDTO(rec, live), true
+	}
 	return mapper.translate
 }
 
@@ -403,9 +427,20 @@ func (m *eventMapper) translate(ev agent.AgentEvent, entryID string) ([]codingho
 	case agent.MessageEndEvent:
 		return m.messageEnd(e, entryID)
 	case agent.AgentStartEvent:
-		return m.one(m.status("busy")), nil
+		events := m.one(m.status("busy"))
+		if ev, ok := m.sessionUpdated(); ok {
+			events = append([]codinghost.Event{ev}, events...)
+		}
+		return events, nil
 	case agent.AgentSettledEvent:
-		return []codinghost.Event{m.status("idle"), m.idle()}, nil
+		var events []codinghost.Event
+		if ev, ok := m.sessionUpdated(); ok {
+			events = append(events, ev)
+		}
+		events = append(events,
+			m.event(eventSessionDiff, sseSessionDiff{SessionID: m.sessionID, Diff: []json.RawMessage{}}),
+			m.status("idle"), m.idle())
+		return events, nil
 	case agent.AutoRetryStartEvent:
 		return append(m.one(m.status("retry")), m.error("AutoRetry", e.ErrorMessage)), nil
 	case agent.AutoRetryEndEvent:
@@ -699,6 +734,21 @@ func (m *eventMapper) status(kind string) codinghost.Event {
 
 func (m *eventMapper) idle() codinghost.Event {
 	return m.event(eventSessionIdle, sseSessionIdle{SessionID: m.sessionID})
+}
+
+// sessionUpdated builds the turn-level session.updated frame from the session's
+// current DTO. It is fallible: a nil closure (a mapper built without the
+// server read surface) or an unreadable record yields no frame rather than a
+// stale one.
+func (m *eventMapper) sessionUpdated() (codinghost.Event, bool) {
+	if m.sessionInfo == nil {
+		return codinghost.Event{}, false
+	}
+	info, ok := m.sessionInfo()
+	if !ok {
+		return codinghost.Event{}, false
+	}
+	return m.event(eventSessionUpdated, sseSessionUpdated{SessionID: m.sessionID, Info: info}), true
 }
 
 func (m *eventMapper) error(name, message string) codinghost.Event {
