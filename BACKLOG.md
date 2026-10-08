@@ -1475,7 +1475,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-user-message-nested-model — KKCode crashes "Cannot read properties of undefined (reading 'providerID')"
 
-- **Status:** READY — surfaced 2026-10-07 driving KKCode against `wopr serve` after the SSE lifecycle fixes.
+- **Status:** CLAIMED — wave-serve-user-message-nested-model; surfaced 2026-10-07 driving KKCode against `wopr serve` after the SSE lifecycle fixes.
 - **Why:** opencode's **user** message info is a different shape from the assistant's. Verified live on opencode
   1.18.34: `{id,sessionID,role:"user",time:{created},summary:{diffs:[]},agent,model:{providerID,modelID}}` — a
   **nested** `model` and **no** flat `providerID`/`modelID`. wopr emits the assistant shape for every role: flat
