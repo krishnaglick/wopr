@@ -134,7 +134,11 @@ func runServeCommand(args []string) int {
 		sessionDir = codingagent.NewSessionManager(cwd).SessionDir()
 	}
 
-	// Resolve model spec.
+	// Resolve model spec. When no provider is authenticated and no default
+	// resolves, selectStartupModel returns a nil model with a nil error. Leave
+	// modelSpec empty: GET /config reports no model and POST /session answers 409
+	// (codinghost.ErrNoModel), instead of naming a provider this server cannot
+	// reach.
 	startup, err := selectStartupModel(startupModelOptions{}, settings.Get(), services)
 	if err != nil {
 		return failf("wopr serve: %v", err)
@@ -142,8 +146,6 @@ func runServeCommand(args []string) int {
 	var modelSpec string
 	if startup.Model != nil {
 		modelSpec = codinghost.ModelProviderID(startup.Model) + "/" + startup.Model.ID
-	} else {
-		modelSpec = "test-faux/faux-1" // fallback for tests
 	}
 
 	srv, ln, err := serve.New(net.JoinHostPort(host, strconv.Itoa(port)), hostObj, sessionDir, modelSpec)

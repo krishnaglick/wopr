@@ -1,17 +1,22 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alexrudloff/wopr/internal/codingagent"
+	"github.com/alexrudloff/wopr/internal/testbudget"
 	"github.com/alexrudloff/wopr/internal/testenv"
 )
 
@@ -450,5 +455,129 @@ func TestRunServeCommandRefusesRootOutsideGlobalAllowlist(t *testing.T) {
 	}
 	if !strings.Contains(string(stderr), "is outside every server.allowedRoots entry") {
 		t.Fatalf("stderr = %q, want it to contain %q", stderr, "is outside every server.allowedRoots entry")
+	}
+}
+
+// TestRunServeCommandDoesNotReportFauxModelWithoutProvider drives the real
+// binary with no provider configured. A fresh WOPR_HOME has no credentials, so
+// selectStartupModel yields no model: GET /config must report an empty model
+// (never the test-faux fallback) and POST /session must answer 409.
+func TestRunServeCommandDoesNotReportFauxModelWithoutProvider(t *testing.T) {
+	// Bind then release so the child can bind the port; the child's stderr is
+	// reported if a foreign process wins the race and the child fails to bind.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	binary := woprBinary(t)
+	cmd := exec.Command(binary, "serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port))
+	cmd.Dir = t.TempDir()
+	// Last entry wins for a duplicated key. A fresh HOME closes the Google
+	// Vertex ADC lookup (~/.config/gcloud) that TestMain does not clear; an
+	// empty WOPR_TEST_FAUX keeps the in-process test model from being selected.
+	home := t.TempDir()
+	cmd.Env = append(os.Environ(),
+		"WOPR_HOME="+t.TempDir(),
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+home,
+		"WOPR_TEST_FAUX=",
+	)
+	stderr := &lockedBuffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait is called once, from this goroutine; the channel tells poll and
+	// cleanup whether the child has already been reaped (no double-Wait).
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	exited := false
+	t.Cleanup(func() {
+		if exited {
+			return
+		}
+		_ = cmd.Process.Kill()
+		<-waitCh
+	})
+
+	checkExited := func(what string) {
+		select {
+		case err := <-waitCh:
+			exited = true
+			t.Fatalf("wopr serve exited before %s: %v\nstderr: %s", what, err, stderr)
+		default:
+		}
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	configURL := fmt.Sprintf("http://127.0.0.1:%d/config", port)
+	deadline := time.Now().Add(testbudget.Wait(t))
+	var (
+		status int
+		body   []byte
+	)
+	for {
+		checkExited("answering GET /config")
+		resp, err := client.Get(configURL)
+		if err == nil {
+			body, _ = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			status = resp.StatusCode
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("GET /config did not answer within the budget: %v\nstderr: %s", err, stderr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// The child may have failed to bind after a foreign responder answered;
+	// fail rather than assert against that responder's data.
+	checkExited("answering GET /config")
+
+	if status != http.StatusOK {
+		t.Fatalf("GET /config = %d, want 200; body: %s\nstderr: %s", status, body, stderr)
+	}
+
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(body, &cfg); err != nil {
+		t.Fatalf("GET /config body is not a JSON object: %v; body: %s", err, body)
+	}
+	raw, ok := cfg["model"]
+	if !ok {
+		t.Fatalf("GET /config has no \"model\" key (an omitempty regression); body: %s", body)
+	}
+	// Reject a JSON null or any non-string: json.Unmarshal("null", &s) succeeds
+	// and leaves s empty, so the raw first byte must be a string quote.
+	if len(raw) == 0 || raw[0] != '"' {
+		t.Fatalf("GET /config \"model\" is not a JSON string: %s", raw)
+	}
+	var model string
+	if err := json.Unmarshal(raw, &model); err != nil {
+		t.Fatalf("GET /config \"model\" is not a string: %v; raw: %s", err, raw)
+	}
+	if model == "test-faux/faux-1" {
+		t.Fatalf("GET /config reports the test-faux fallback model %q; want it removed", model)
+	}
+	if model != "" {
+		t.Fatalf("GET /config model = %q, want empty with no provider configured", model)
+	}
+
+	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/session", port), "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("POST /session: %v\nstderr: %s", err, stderr)
+	}
+	sessionBody, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("POST /session = %d, want 409; body: %s\nstderr: %s", resp.StatusCode, sessionBody, stderr)
+	}
+	if !strings.Contains(string(sessionBody), "no model is configured") {
+		t.Fatalf("POST /session error body = %s, want it to contain %q", sessionBody, "no model is configured")
 	}
 }
