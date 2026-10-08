@@ -206,12 +206,19 @@ type Session struct {
 	queueMu sync.Mutex
 	queued  []queuedPrompt
 
-	// cancel aborts the run this Session owns, from the reservation until the
-	// run settles. RequestAbort only reaches a run whose cancel coding has
-	// already stored, which happens after beginAgentRun — inside sendContent,
-	// not at the reservation.
+	// cancel aborts the reserved run — the run this Session started on its own
+	// reservation — from that reservation until releaseRun clears it. A non-nil
+	// cancel therefore means a reserved run is outstanding and has not yet been
+	// released by releaseRun, not that it is still active. A queued run handed
+	// the slot by releaseSlot is deliberately not registered here and is
+	// abortable only from beginAgentRun onward via RequestAbort.
 	cancelMu sync.Mutex
 	cancel   context.CancelFunc
+
+	// handoffBarrier, when non-nil, runs in releaseSlot after the handed-off run's
+	// context is created and before its goroutine starts. Tests set it to execute an
+	// Abort inside the handoff window; production leaves it nil.
+	handoffBarrier func()
 }
 
 func (s *Session) ID() string {
@@ -275,8 +282,11 @@ func (s *Session) releaseSlot() {
 		next := s.queued[0]
 		s.queued[0] = queuedPrompt{} // drop the backing array's reference to the run content
 		s.queued = s.queued[1:]
-		runCtx, cancel := s.ownRun(context.Background())
+		runCtx, cancel := context.WithCancel(context.Background())
 		s.queueMu.Unlock()
+		if s.handoffBarrier != nil {
+			s.handoffBarrier() // test-only; nil in production
+		}
 		go s.runAndRelease(runCtx, cancel, next.content, next.entryID)
 		return
 	}
@@ -327,9 +337,11 @@ func (s *Session) withReservation(before func() error) error {
 	return nil
 }
 
-// ownRun detaches ctx from its cancellation, makes it cancellable, and stores
-// the cancel for Abort. A cancel delivered before beginAgentRun still stops the
-// run, because context.WithCancel over an already-cancelled parent yields an
+// ownRun detaches ctx from its cancellation, makes it cancellable, and
+// registers the cancel for Abort. Only the reserved run is registered; a queued
+// run handed the slot by releaseSlot uses a bare context.WithCancel and is not
+// registered. A cancel delivered before beginAgentRun still stops the run,
+// because context.WithCancel over an already-cancelled parent yields an
 // already-cancelled child.
 func (s *Session) ownRun(ctx context.Context) (context.Context, context.CancelFunc) {
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
@@ -348,8 +360,16 @@ func (s *Session) releaseRun(cancel context.CancelFunc) {
 	s.releaseSlot()
 }
 
-// Abort cancels the run this Session owns when the reservation is still
-// outstanding, then asks the session to abort whatever run it has. It does not
+// Abort stops the run this Session owns. A non-nil host cancel means a reserved
+// run is outstanding and has not yet been released by releaseRun: cancel it and
+// return. The host run context parents beginAgentRun, the retry context, and the
+// threshold/overflow compaction context, so cancel() stops all three, and
+// returning without RequestAbort keeps a late abort from landing on a run that
+// has since begun. With no host cancel, a run handed the slot by releaseSlot is
+// reached only through coding's active run: IsStreaming is false exactly while
+// no run is between beginAgentRun and settle, so an abort raised in the handoff
+// window (the queued run not yet begun) returns without cancelling it, while an
+// abort of an active handed-off run cancels it via RequestAbort. It does not
 // wait for the drain: the cancel has already been delivered, and a later
 // session.status reports idle. Aborting an idle session is success.
 func (s *Session) Abort() {
@@ -358,6 +378,10 @@ func (s *Session) Abort() {
 	s.cancelMu.Unlock()
 	if cancel != nil {
 		cancel()
+		return
+	}
+	if !s.sess.IsStreaming() {
+		return
 	}
 	s.sess.RequestAbort()
 }
