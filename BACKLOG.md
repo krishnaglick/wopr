@@ -1458,7 +1458,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-tool-delta-test-vacuous-equality-loop — `TestToolCallDeltaReachesTheStream`'s cross-source check never runs
 
-- **Status:** READY — surfaced 2026-10-07 by the `serve-sse-message-lifecycle-parity` diff-verification fan.
+- **Status:** CLAIMED — wave-serve-tool-delta-test-vacuous-equality-loop; surfaced 2026-10-07 by the `serve-sse-message-lifecycle-parity` diff-verification fan.
 - **Why:** the test stops at the first tool `arguments` delta, but the matching tool `message.part.updated` is
   emitted later, so the loop that claims to prove the delta and the tool part share an id
   (`internal/codingagent/serve/serve_test.go`) never executes. Pre-existing; the diff only changed the prefix
