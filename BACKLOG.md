@@ -1295,7 +1295,18 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-test-faux-fallback-in-production — `wopr serve` reports a fake model when startup resolution yields none
 
-- **Status:** READY — surfaced 2026-10-07 during the `serve-kkcode-v1-compat` wave.
+- **Status:** DONE — shipped on `wave-serve-test-faux-fallback-in-production`, 2026-10-07.
+  Confirmed reachable in production: a fresh `WOPR_HOME` with no authenticated provider and no saved default
+  leaves `selectStartupModel` returning a nil model with a nil error. Fix: the `test-faux/faux-1` fallback in
+  `cmd/wopr/serve.go` is deleted; `modelSpec` stays `""` when no model resolves, so `GET /config` reports
+  `"model":""` (key present, never a fake provider) and `POST /session` answers the existing `409` via
+  `codinghost.ErrNoModel` ("no model is configured for this server…"). Gate
+  `TestRunServeCommandDoesNotReportFauxModelWithoutProvider` (`cmd/wopr/serve_test.go`) drives the real binary
+  hermetically and asserts the key present/string/empty plus the 409; reproduced red pre-fix (`"test-faux/faux-1"`)
+  and green post-fix. Spec was a planning artifact and is not committed; the decision is recorded here.
+- **Note:** the item allowed "fail with a clear message or omit the field". Chosen: omit the fake while keeping the
+  `model` JSON key with an empty string, because an absent object field is the repo's documented client-crash class
+  (`internal/codingagent/serve/serve_dto.go`); the loud per-session `409` is the clear failure. No `omitempty`.
 - **Why:** `cmd/wopr/serve.go:142-147` sets `modelSpec = "test-faux/faux-1"` (comment "fallback for tests")
   whenever `selectStartupModel` returns no model, which it can do with a nil error when no provider is
   authenticated and no default resolves (`cmd/wopr/startup_model.go:134-137`). In that state `GET /config`
