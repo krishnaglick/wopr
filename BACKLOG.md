@@ -1295,7 +1295,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-test-faux-fallback-in-production — `wopr serve` reports a fake model when startup resolution yields none
 
-- **Status:** READY — surfaced 2026-10-07 during the `serve-kkcode-v1-compat` wave.
+- **Status:** CLAIMED — wave `wave-serve-test-faux-fallback-in-production`, 2026-10-07.
 - **Why:** `cmd/wopr/serve.go:142-147` sets `modelSpec = "test-faux/faux-1"` (comment "fallback for tests")
   whenever `selectStartupModel` returns no model, which it can do with a nil error when no provider is
   authenticated and no default resolves (`cmd/wopr/startup_model.go:134-137`). In that state `GET /config`
