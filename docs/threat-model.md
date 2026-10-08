@@ -61,7 +61,7 @@ Release artifacts cross from protected build infrastructure to users. Checksums,
 | Background work (tools, subagents, MCP servers) outlives its owner | Bind goroutine lifetime to a context; drain shutdown; report errors |
 | Background work blocks TUI input or mutates UI off-loop | Keep blocking work off the input/render loop; marshal mutations through the owned UI path |
 | Anyone reaching the serve port can read files or run tools | Bind loopback by default; resolve every file path against the project root; answer `501` for unfinished mutating routes |
-| A served session overlaps or outlives another writer | The host owns one run per session and rejects a second with `ErrSessionBusy` |
+| A served session overlaps or outlives another writer | The host owns one run per session; a second `prompt_async` is queued to run next, and a request while an `ask_user` question is pending is rejected with `ErrSessionBusy` (409) |
 | SBOM omits or misidentifies a component | Reconcile scanner output with manifests, locks, embedded assets, generated data, and archive contents |
 
 ## Security assumptions

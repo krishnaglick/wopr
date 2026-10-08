@@ -285,30 +285,80 @@ func TestPromptAsyncAnswers413ForABodyOverTheCap(t *testing.T) {
 	}
 }
 
-// TestPromptAsyncAnswers409WhileTheSessionIsBusy verifies one run per session:
-// a second accepted prompt while the first is in flight is refused.
-func TestPromptAsyncAnswers409WhileTheSessionIsBusy(t *testing.T) {
+// TestPromptAsyncQueuesWhileTheSessionIsBusy verifies the queue contract: a
+// second prompt_async while a run is in flight is accepted (204) and runs as the
+// next user turn, after the first settles, in FIFO order. The first prompt is
+// TUI_LIVE_STREAM_PAUSE, which streams for roughly two seconds and settles
+// naturally, so the order is observed without an abort.
+func TestPromptAsyncQueuesWhileTheSessionIsBusy(t *testing.T) {
 	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
 
-	// "Run: sleep for a while" gives a tool call that blocks long enough for
-	// the contended request to land.
 	first, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
-		`{"parts":[{"type":"text","text":"Run: sleep for a while"}]}`)
+		`{"parts":[{"type":"text","text":"TUI_LIVE_STREAM_PAUSE"}]}`)
 	if first != http.StatusNoContent {
 		t.Fatalf("first prompt_async: expected 204, got %d", first)
 	}
+	// waitForBusy returns while A still holds the run slot, so B's reservation
+	// lands on a taken slot rather than racing A's start.
+	waitForBusy(t, baseURL, id)
 
-	contended, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+	second, body := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
 		`{"parts":[{"type":"text","text":"reply with exactly: second"}]}`)
-	if contended != http.StatusConflict {
-		t.Fatalf("second prompt_async: expected 409, got %d", contended)
+	if second != http.StatusNoContent {
+		t.Fatalf("second prompt_async while busy: expected 204, got %d (%s)", second, body)
 	}
 
-	// Abort so the 45s tool does not outlive the test.
-	abort, _ := postJSON(t, baseURL, "/session/"+id+"/abort", `{}`)
-	if abort != http.StatusOK {
-		t.Fatalf("abort: expected 200, got %d", abort)
+	// Backstop only: A settles on its own and B runs after it. If either hangs,
+	// the abort keeps the test bounded.
+	t.Cleanup(func() { _, _ = postJSON(t, baseURL, "/session/"+id+"/abort", `{}`) })
+
+	roleText := func(m messageDTO) string {
+		var b strings.Builder
+		for _, p := range m.Parts {
+			b.WriteString(p.Text)
+		}
+		return b.String()
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	var msgs []messageDTO
+	for time.Now().Before(deadline) {
+		msgs = readTranscript(t, baseURL, id)
+		found := false
+		for _, m := range msgs {
+			if m.Info.Role == "assistant" && strings.TrimSpace(roleText(m)) == "second" {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	userA, asstA, userB, asstB := -1, -1, -1, -1
+	for i, m := range msgs {
+		text := roleText(m)
+		switch {
+		case userA < 0 && m.Info.Role == "user" && strings.Contains(text, "TUI_LIVE_STREAM_PAUSE"):
+			userA = i
+		case userA >= 0 && asstA < 0 && m.Info.Role == "assistant":
+			asstA = i
+		case asstA >= 0 && userB < 0 && m.Info.Role == "user" && strings.Contains(text, "reply with exactly: second"):
+			userB = i
+		case userB >= 0 && asstB < 0 && m.Info.Role == "assistant" && strings.TrimSpace(text) == "second":
+			asstB = i
+		}
+	}
+	if userA < 0 || asstA <= userA || userB <= asstA || asstB <= userB {
+		roles := make([]string, 0, len(msgs))
+		for _, m := range msgs {
+			roles = append(roles, m.Info.Role+":"+strings.TrimSpace(roleText(m)))
+		}
+		t.Fatalf("queued prompt did not run after the active one in FIFO order: userA=%d asstA=%d userB=%d asstB=%d; transcript=%v",
+			userA, asstA, userB, asstB, roles)
 	}
 }
 

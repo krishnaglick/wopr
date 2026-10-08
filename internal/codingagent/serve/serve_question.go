@@ -107,6 +107,18 @@ func (q *questionStore) list() []questionDTO {
 	return out
 }
 
+// hasPending reports whether sessionID has a question awaiting an answer.
+func (q *questionStore) hasPending(sessionID string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, p := range q.m {
+		if p.sessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
 // ask is the asker every served session installs: it registers the question,
 // publishes it, and blocks until a reply, a reject, or the run's cancellation.
 // Whichever arrives first wins.

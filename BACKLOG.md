@@ -1649,9 +1649,20 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-async-queue-when-busy — a second `prompt_async` while running returns `409`; opencode returns `204`
 
-- **Status:** READY — surfaced 2026-10-08 in the KKCode proxy log (`prompt_async` → `409` twice) and verified live:
-  opencode's `POST /session/{id}/prompt_async` on a busy session returns `204` (accepts/queues), wopr returns `409`
-  `application/json`.
+- **Status:** DONE — shipped 2026-10-08 on `wave-serve-prompt-async-queue-when-busy`. A busy `prompt_async` now
+  returns `204` and queues the prompt to run as the next user turn (FIFO, after the current run settles);
+  `host.Session` gained a host-owned queue (`queueMu`/`queued`) whose accept-vs-release handoff is serialized under
+  one mutex, so a queued prompt cannot be appended to a free slot and strand. `questionStore.hasPending` keeps the
+  `409` while an `ask_user` question is pending (the `serve-5` DoD 11 invariant); `/message` keeps its `409`. Gate
+  `TestPromptAsyncQueuesWhileTheSessionIsBusy` (both calls `204`; order userA/assistantA/userB/assistantB, natural
+  `TUI_LIVE_STREAM_PAUSE` settle). Surfaced 2026-10-08 in the KKCode proxy log (`prompt_async` → `409` twice) and
+  verified live: opencode's `POST /session/{id}/prompt_async` on a busy session returns `204` (accepts/queues),
+  wopr returned `409` `application/json`.
+- **Decision:** a host-scoped queue, not the agent follow-up queue: that queue is single-run-scoped, its final drain
+  decision is unsynchronized with an enqueue (a tail enqueue strands), and it never drains on abort
+  (`runPostAgentRunsWith` is `ctx.Err()==nil`-gated). The host queue stores `[]ai.UserContentBlock` verbatim.
+  Known gap: serve's queued prompts are not surfaced in `PendingMessageCount`/`queue_update`.
+- **Surfaced:** `serve-prompt-async-abort-handoff-race` (READY, edge case).
 - **Why:** the client allows sending while running (it has no queue UI) and wopr's `409 busy` surfaces as an error.
   wopr already models queued input (`HasPendingMessages`/`PendingMessageCount`, and the failure table's "queued input
   after compaction"), but `promptAsync` calls `PromptContent`, which returns `ErrSessionBusy` instead of queueing.
@@ -1662,3 +1673,15 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   without an error.
 - **Notes:** match opencode's queued (not replaced, not dropped) semantics; confirm whether opencode steers the
   running turn or runs the queued message next before implementing.
+
+### serve-prompt-async-abort-handoff-race — a late abort can cancel the just-handed-off queued prompt
+
+- **Status:** READY (edge case) — surfaced 2026-10-08 by the `wave-serve-prompt-async-queue-when-busy` diff fan.
+- **Why:** `releaseSlot` installs the next run's cancel (`ownRun`) and spawns it; an `abort` delivered after run A
+  settles but before the queued run B reaches `beginAgentRun` reads B's fresh cancel and cancels B, whose turn is
+  then lost although it was already answered `204`. It is not a strand (B's release still drains the queue) and it is
+  only reachable inside the handoff window; the queue gate does not assert abort semantics. Decide whether abort
+  should run the queued prompt (current behavior for an abort while A is running) or clear the queue.
+- **Files:** `coding/host/host.go` (`releaseSlot`, `Abort`).
+- **Gates:** a test that queues B behind A, aborts across the handoff, and pins the chosen semantics; the host suite;
+  `make check`.
