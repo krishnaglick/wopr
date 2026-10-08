@@ -1119,6 +1119,154 @@ func TestSSETurnLifecycleParity(t *testing.T) {
 	}
 }
 
+// TestSSETurnSessionFramesMatchOpencode pins the turn-level session frames the
+// mapper adds on top of the prior-wave message and part frames: session.updated
+// before session.status busy at turn start, and session.updated + session.diff
+// {diff:[]} at settle, before session.status idle and session.idle. The expected
+// sequence is an in-test fixture transcribed from opencode's turn census; this
+// test never reads a developer capture.
+//
+// Non-vacuity: dropping the session.updated emission fails (1) and (2); emitting
+// diff:null fails (3); emitting session.diff after idle fails (3).
+func TestSSETurnSessionFramesMatchOpencode(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resp := openSSE(t, baseURL, ctx)
+	defer func() { _ = resp.Body.Close() }()
+
+	status, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"reply with exactly: parity-ok"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async: expected 204, got %d", status)
+	}
+
+	// One read only: a second readSSEUntil would build a second bufio.Reader
+	// over the same body and lose the frames the first already buffered. Stop at
+	// session.idle, which follows every session frame of the turn.
+	frames := readSSEUntil(t, resp, func(frames []sseFrame) bool {
+		for _, f := range frames {
+			if f.Name == eventSessionIdle {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+
+	// Normalized session contract: server.* and message.* frames are dropped
+	// (message.* is the prior waves' surface), and a session.status contributes
+	// its name without its busy/idle payload.
+	var (
+		normalized     []string
+		updates        []sessionDTO
+		firstStatus    string
+		lastStatus     string
+		diffCount      int
+		diffProperties map[string]json.RawMessage
+	)
+	for _, f := range frames {
+		switch f.Name {
+		case eventSessionUpdated:
+			normalized = append(normalized, f.Name)
+			var payload sseSessionUpdated
+			if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+				t.Fatalf("decode session.updated: %v (data %s)", err, f.Data)
+			}
+			updates = append(updates, payload.Info)
+		case "session.diff":
+			normalized = append(normalized, f.Name)
+			diffCount++
+			if err := json.Unmarshal([]byte(f.Data), &diffProperties); err != nil {
+				t.Fatalf("decode session.diff: %v (data %s)", err, f.Data)
+			}
+			var payload struct {
+				SessionID string            `json:"sessionID"`
+				Diff      []json.RawMessage `json:"diff"`
+			}
+			if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+				t.Fatalf("decode session.diff: %v (data %s)", err, f.Data)
+			}
+			if payload.SessionID != id {
+				t.Errorf("session.diff sessionID: expected %q, got %q", id, payload.SessionID)
+			}
+			if payload.Diff == nil || len(payload.Diff) != 0 {
+				t.Errorf("session.diff diff: expected a non-null empty array, got %s", f.Data)
+			}
+		case eventSessionStatus:
+			normalized = append(normalized, f.Name)
+			var payload sseSessionStatus
+			if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+				t.Fatalf("decode session.status: %v (data %s)", err, f.Data)
+			}
+			if firstStatus == "" {
+				firstStatus = payload.Status.Type
+			}
+			lastStatus = payload.Status.Type
+		case eventSessionIdle:
+			normalized = append(normalized, f.Name)
+		}
+	}
+
+	// 1. The first session contract frame is session.updated, and the first
+	// status after it is busy.
+	if len(normalized) == 0 || normalized[0] != eventSessionUpdated {
+		t.Fatalf("first session contract frame: expected %q, got %v; frames: %s",
+			eventSessionUpdated, normalized, summarize(frames))
+	}
+	if firstStatus != "busy" {
+		t.Errorf("first session.status: expected busy, got %q; frames: %s", firstStatus, summarize(frames))
+	}
+
+	// 2. Exactly two session.updated with the session's id and a moving
+	// time.updated.
+	if len(updates) != 2 {
+		t.Fatalf("session.updated count: expected 2, got %d; frames: %s", len(updates), summarize(frames))
+	}
+	for i, info := range updates {
+		if info.ID != id {
+			t.Errorf("session.updated[%d] info.id: expected %q, got %q", i, id, info.ID)
+		}
+		if info.Time.Updated <= 0 {
+			t.Errorf("session.updated[%d] info.time.updated: expected > 0, got %d", i, info.Time.Updated)
+		}
+	}
+	if updates[1].Time.Updated <= updates[0].Time.Updated {
+		t.Errorf("session.updated info.time.updated did not move forward: %d then %d",
+			updates[0].Time.Updated, updates[1].Time.Updated)
+	}
+
+	// 3. Exactly one session.diff, properties {sessionID, diff} with diff an
+	// empty array (not null), before the idle status.
+	if diffCount != 1 {
+		t.Fatalf("session.diff count: expected 1, got %d; frames: %s", diffCount, summarize(frames))
+	}
+	if len(diffProperties) != 2 || diffProperties["sessionID"] == nil || diffProperties["diff"] == nil {
+		t.Errorf("session.diff properties: expected exactly {sessionID, diff}, got %v", diffProperties)
+	}
+
+	// 4. session.status idle precedes session.idle, and it is the last status.
+	if len(normalized) < 2 || normalized[len(normalized)-2] != eventSessionStatus || normalized[len(normalized)-1] != eventSessionIdle {
+		t.Fatalf("idle tail: expected [%s %s], got %v; frames: %s",
+			eventSessionStatus, eventSessionIdle, normalized, summarize(frames))
+	}
+	if lastStatus != "idle" {
+		t.Errorf("last session.status: expected idle, got %q", lastStatus)
+	}
+
+	// 5. The normalized session contract subsequence, the transcribed fixture.
+	want := []string{
+		eventSessionUpdated, eventSessionStatus,
+		eventSessionUpdated, "session.diff", eventSessionStatus, eventSessionIdle,
+	}
+	if !slices.Equal(normalized, want) {
+		t.Fatalf("normalized session contract sequence:\n got %v\nwant %v\nframes: %s",
+			normalized, want, summarize(frames))
+	}
+}
+
 // TestSSETurnFrameParity pins the per-part frame order a client needs to
 // materialise exactly one part per streamed block: an empty create
 // message.part.updated carrying time:{start}, then the text delta, then one
