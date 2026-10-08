@@ -3846,3 +3846,248 @@ func restartServer(t *testing.T, env promptEnv) string {
 	t.Cleanup(func() { _ = srv.Close() })
 	return "http://" + ln.Addr().String()
 }
+
+// stopOnSessionIdle is the readSSEUntil predicate the prompt tests share:
+// session.idle is emitted only after the run and its message_end persist have
+// settled, so a transcript read after it cannot race persistence.
+func stopOnSessionIdle(frames []sseFrame) bool {
+	for _, f := range frames {
+		if f.Name == eventSessionIdle {
+			return true
+		}
+	}
+	return false
+}
+
+// firstUserMessageID returns the id of the first user message in the transcript,
+// or "" when there is none.
+func firstUserMessageID(msgs []messageDTO) string {
+	for _, m := range msgs {
+		if m.Info.Role == "user" {
+			return m.Info.ID
+		}
+	}
+	return ""
+}
+
+// lastUserMessageID returns the id of the last user message in the transcript,
+// or "" when there is none.
+func lastUserMessageID(msgs []messageDTO) string {
+	id := ""
+	for _, m := range msgs {
+		if m.Info.Role == "user" {
+			id = m.Info.ID
+		}
+	}
+	return id
+}
+
+// TestPromptMessageIDHonoredEndToEnd pins the item's contract: a client-minted
+// messageID in the prompt body becomes the user transcript entry id on the SSE
+// user message.updated, on its part, and on GET, so a client that rendered the
+// bubble optimistically under that id reconciles instead of double-rendering. A
+// prompt with no messageID still mints a server id, and stream and GET agree on
+// it.
+func TestPromptMessageIDHonoredEndToEnd(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	ctx := t.Context()
+	resp := openSSE(t, baseURL, ctx)
+	defer func() { _ = resp.Body.Close() }()
+
+	status, body := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"messageID":"msg_test1","parts":[{"type":"text","text":"reply with exactly: id-ok"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async with messageID: expected 204, got %d (%s)", status, body)
+	}
+	frames := readSSEUntil(t, resp, stopOnSessionIdle)
+
+	// (a) Exactly one user message.updated, carrying the client id.
+	userUpdates := 0
+	streamUserID := ""
+	for _, f := range frames {
+		if f.Name != eventMessageUpdated {
+			continue
+		}
+		var payload sseMessageUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Info.Role != "user" {
+			continue
+		}
+		userUpdates++
+		streamUserID = payload.Info.ID
+	}
+	if userUpdates != 1 {
+		t.Fatalf("expected exactly one user message.updated, got %d; frames: %s", userUpdates, summarize(frames))
+	}
+	if streamUserID != "msg_test1" {
+		t.Errorf("stream user id: expected client id %q, got %q", "msg_test1", streamUserID)
+	}
+
+	// (b) The user text part derives from the client id.
+	partSeen := false
+	for _, f := range frames {
+		if f.Name != eventMessagePartUpdated {
+			continue
+		}
+		var payload ssePartUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Part.MessageID != "msg_test1" {
+			continue
+		}
+		partSeen = true
+		if want := "msg_test1-text-0"; payload.Part.ID != want {
+			t.Errorf("stream user part id: expected %q, got %q", want, payload.Part.ID)
+		}
+	}
+	if !partSeen {
+		t.Fatalf("no user message.part.updated under %q; frames: %s", "msg_test1", summarize(frames))
+	}
+
+	// (c) GET reports the same id.
+	if got := firstUserMessageID(readTranscript(t, baseURL, id)); got != "msg_test1" {
+		t.Errorf("GET user id: expected client id %q, got %q", "msg_test1", got)
+	}
+
+	// A second prompt with no messageID mints a server id; stream == GET.
+	status, body = postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"reply with exactly: id-minted"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async without messageID: expected 204, got %d (%s)", status, body)
+	}
+	frames = readSSEUntil(t, resp, stopOnSessionIdle)
+
+	mintedStream := ""
+	for _, f := range frames {
+		if f.Name != eventMessageUpdated {
+			continue
+		}
+		var payload sseMessageUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Info.Role == "user" {
+			mintedStream = payload.Info.ID
+		}
+	}
+	if mintedStream == "" {
+		t.Fatalf("minted user message.updated carries no id; frames: %s", summarize(frames))
+	}
+	if got := lastUserMessageID(readTranscript(t, baseURL, id)); got != mintedStream {
+		t.Errorf("minted id disagrees: stream %q, GET %q", mintedStream, got)
+	}
+}
+
+// TestPromptMessageIDHonoredOnMessage pins that POST /session/{id}/message
+// honors a valid client id through the same shared helper as prompt_async.
+func TestPromptMessageIDHonoredOnMessage(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	status, body := postJSON(t, baseURL, "/session/"+id+"/message",
+		`{"messageID":"msg_sync1","parts":[{"type":"text","text":"reply with exactly: sync-ok"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("POST /message with messageID: expected 200, got %d (%s)", status, body)
+	}
+	if got := firstUserMessageID(readTranscript(t, baseURL, id)); got != "msg_sync1" {
+		t.Errorf("GET user id: expected client id %q, got %q", "msg_sync1", got)
+	}
+}
+
+// TestPromptMessageIDRejectsMalformedAndDuplicate pins the two 400s: an id not
+// starting with "msg" is a schema rejection on both prompt endpoints, and an id
+// already in the append-only transcript is refused rather than duplicated.
+func TestPromptMessageIDRejectsMalformedAndDuplicate(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	for _, path := range []string{"prompt_async", "message"} {
+		status, body := postJSON(t, baseURL, "/session/"+id+"/"+path,
+			`{"messageID":"bogus","parts":[{"type":"text","text":"hi"}]}`)
+		if status != http.StatusBadRequest {
+			t.Errorf("%s malformed messageID: expected 400, got %d (%s)", path, status, body)
+			continue
+		}
+		if got, want := strings.TrimSpace(string(body)), `{"error":"invalid messageID"}`; got != want {
+			t.Errorf("%s malformed messageID body: expected %s, got %s", path, want, got)
+		}
+	}
+
+	// The first msg_dup is honored once its user message persists.
+	status, body := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"messageID":"msg_dup","parts":[{"type":"text","text":"reply with exactly: dup-ok"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("first msg_dup: expected 204, got %d (%s)", status, body)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	persisted := false
+	for time.Now().Before(deadline) && !persisted {
+		for _, m := range readTranscript(t, baseURL, id) {
+			if m.Info.Role == "user" && m.Info.ID == "msg_dup" {
+				persisted = true
+			}
+		}
+		if !persisted {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if !persisted {
+		t.Fatal("the first msg_dup never reached the transcript")
+	}
+	waitForIdle(t, baseURL, id)
+
+	status, body = postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"messageID":"msg_dup","parts":[{"type":"text","text":"again"}]}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("duplicate messageID: expected 400, got %d (%s)", status, body)
+	}
+	if got, want := strings.TrimSpace(string(body)), `{"error":"messageID already exists"}`; got != want {
+		t.Errorf("duplicate messageID body: expected %s, got %s", want, got)
+	}
+}
+
+// TestQueuedPromptMessageIDPreserved pins that a prompt accepted while the
+// session is busy keeps its id when it later runs: the id rides the queued
+// entry through releaseSlot, not just the immediately-started prompt.
+func TestQueuedPromptMessageIDPreserved(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	first, body := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"TUI_LIVE_STREAM_PAUSE"}]}`)
+	if first != http.StatusNoContent {
+		t.Fatalf("first prompt_async: expected 204, got %d (%s)", first, body)
+	}
+	waitForBusy(t, baseURL, id)
+
+	queued, body := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"messageID":"msg_queued","parts":[{"type":"text","text":"reply with exactly: queued-ok"}]}`)
+	if queued != http.StatusNoContent {
+		t.Fatalf("queued prompt_async: expected 204, got %d (%s)", queued, body)
+	}
+	t.Cleanup(func() { _, _ = postJSON(t, baseURL, "/session/"+id+"/abort", `{}`) })
+	waitForIdle(t, baseURL, id)
+
+	// waitForIdle can observe the gap between the first run settling and the
+	// queued one starting, so poll the transcript for the persisted id.
+	deadline := time.Now().Add(30 * time.Second)
+	found := false
+	for time.Now().Before(deadline) && !found {
+		for _, m := range readTranscript(t, baseURL, id) {
+			if m.Info.Role == "user" && m.Info.ID == "msg_queued" {
+				found = true
+			}
+		}
+		if !found {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if !found {
+		t.Fatal("the queued prompt's id was not preserved into the transcript")
+	}
+}

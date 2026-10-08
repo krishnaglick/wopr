@@ -22,8 +22,9 @@ import (
 // StructuredOutputError path) and runtime agent personas are three different
 // slices; declaring the fields now would promise behaviour nothing implements.
 type promptBody struct {
-	Parts []promptPart `json:"parts"`
-	Model *modelRef    `json:"model,omitempty"`
+	MessageID string       `json:"messageID,omitempty"`
+	Parts     []promptPart `json:"parts"`
+	Model     *modelRef    `json:"model,omitempty"`
 }
 
 // promptPart is one client part. Text and file are sent; every other type the
@@ -58,6 +59,10 @@ func (s *Server) promptAsync(w http.ResponseWriter, r *http.Request) {
 	if !s.decodePromptBody(w, r, &body) {
 		return
 	}
+	msgID, ok := s.resolveMessageID(w, sess, body.MessageID)
+	if !ok {
+		return
+	}
 	content, errDTO := bodyContent(body.Parts)
 	if errDTO != nil {
 		s.writeJSON(w, http.StatusBadRequest, errDTO)
@@ -71,7 +76,7 @@ func (s *Server) promptAsync(w http.ResponseWriter, r *http.Request) {
 		s.writePromptError(w, codinghost.ErrSessionBusy) // {"error":"session is busy"}, 409
 		return
 	}
-	if err := sess.PromptContent(r.Context(), content); err != nil {
+	if err := sess.PromptContent(r.Context(), content, msgID); err != nil {
 		s.writePromptError(w, err)
 		return
 	}
@@ -91,6 +96,10 @@ func (s *Server) sessionMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	var body promptBody
 	if !s.decodePromptBody(w, r, &body) {
+		return
+	}
+	msgID, ok := s.resolveMessageID(w, sess, body.MessageID)
+	if !ok {
 		return
 	}
 	content, errDTO := bodyContent(body.Parts)
@@ -115,7 +124,7 @@ func (s *Server) sessionMessage(w http.ResponseWriter, r *http.Request) {
 		// previous request chose.
 		var errDTO *errorDTO
 		var status int
-		msgs, runError := sess.PromptContentWait(r.Context(), content, func() error {
+		msgs, runError := sess.PromptContentWait(r.Context(), content, msgID, func() error {
 			if body.Model == nil {
 				return nil
 			}
@@ -220,6 +229,26 @@ func (s *Server) decodePromptBody(w http.ResponseWriter, r *http.Request, body *
 		return false
 	}
 	return true
+}
+
+// resolveMessageID validates the optional client-minted user message id. A
+// value not beginning with "msg" is 400, matching opencode's schema. A value
+// already an entry in this session is 400: wopr's transcript is append-only and
+// has no upsert, so accepting it would duplicate the wire message id. ok=false
+// means the response was already written.
+func (s *Server) resolveMessageID(w http.ResponseWriter, sess *codinghost.Session, id string) (string, bool) {
+	if id == "" {
+		return "", true
+	}
+	if !strings.HasPrefix(id, "msg") {
+		s.writeJSON(w, http.StatusBadRequest, errorDTO{Error: "invalid messageID"})
+		return "", false
+	}
+	if _, exists := sess.Inner().EntryByID(id); exists {
+		s.writeJSON(w, http.StatusBadRequest, errorDTO{Error: "messageID already exists"})
+		return "", false
+	}
+	return id, true
 }
 
 // bodyContent converts client parts to user content blocks. A file part's data

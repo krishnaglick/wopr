@@ -1676,20 +1676,38 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-message-id — wopr ignores the client's `messageID`, so KKCode's optimistic user message never reconciles and renders twice
 
-- **Status:** IN PROGRESS (claimed 2026-10-08, `wave-serve-prompt-message-id`) — surfaced 2026-10-08. Owner confirmed
-  the **user** message doubles even on the first message of a new session.
+- **Status:** DONE — shipped 2026-10-08 on `wave-serve-prompt-message-id`. Both prompt endpoints now accept
+  `messageID`; when present and `^msg`-valid it becomes the user transcript entry id end-to-end (the SSE user
+  `message.updated`/parts and `GET /session/{id}/message` all report it), so KKCode's optimistic bubble reconciles
+  and renders once. Absent the field, wopr mints a 16-hex server id exactly as before. The id rides the prompt
+  through the host queue, so a prompt accepted while busy keeps it. Gate `TestPromptMessageIDHonoredEndToEnd` (the
+  named assertion: SSE id == client id, text part `msg_test1-text-0`, GET id == client id; a no-field prompt still
+  mints and SSE == GET), plus `TestPromptMessageIDHonoredOnMessage`,
+  `TestPromptMessageIDRejectsMalformedAndDuplicate`, `TestQueuedPromptMessageIDPreserved`; independently reproduced
+  red pre-implementation / green post.
+- **Decision (deliberate divergence):** malformed (`^msg` fails) → `400 {"error":"invalid messageID"}` matches
+  opencode's schema (`z.isStartsWith("msg")`). A **duplicate** id → `400 {"error":"messageID already exists"}` is a
+  wopr divergence: opencode accepts and upserts in its id-keyed store, but wopr's transcript is an append-only entry
+  tree with no upsert, so accepting would write two entries under one id. Ratified by the orchestrator; recorded as
+  divergence, not parity.
+- **Surfaced:** `serve-prompt-message-id-duplicate-race` (READY) — the duplicate check runs at handler time, so a
+  same-id resend arriving before the first prompt persists is accepted twice. Deferred with that follow-up.
 - **Why:** opencode's `POST /session/{id}/prompt_async` (and `/message`) body accepts an optional `messageID`
   (`pattern ^msg`; see `/tmp/ocapi.json`). Verified live on opencode 1.18.34: a prompt sent with
   `messageID:"msg_…"` produces a user message whose id **is** that value, round-tripping through
   `GET /session/{id}/message`. KKCode is opencode-shaped: it renders the sent message optimistically with a
   client-generated id and reconciles it when the SSE `message.updated` carries the same id. wopr ignores the body's
   `messageID` and mints its own entry id, so the echo never matches the optimistic bubble and the client shows two.
-- **Files:** `internal/codingagent/serve/serve_prompt.go` (`promptBody`, `promptAsync`, `sessionMessage`),
-  `coding/host/host.go` / `coding/session.go` (where the user entry id is assigned).
+- **Files (as built):** `internal/codingagent/serve/serve_prompt.go` (`promptBody.MessageID`, `resolveMessageID`,
+  both handlers), `agent/agent.go` (`UserMessage.EntryID`, `SendContent`), `coding/session.go`,
+  `coding/session_ops.go` (`EntryByID` delegate), `coding/host/host.go` (`queuedPrompt` carries the id),
+  `coding/host/rpc.go` + `internal/codingagent/interactive_turn.go` (pass `""`),
+  `internal/codingagent/session.go` (`AppendMessage` honors the user id, mirroring the assistant branch).
 - **Gates:** a test that a prompt carrying `messageID:"msg_…"` yields a user message whose id equals it in both the
   SSE `message.updated` and `GET /session/{id}/message`, while a prompt without one still mints a server id; the serve
   suite; `make check`. Live: KKCode renders the sent message once.
-- **Notes:** opencode's pattern is `^msg`; match its handling of a malformed or duplicate id. **Confirmed 2026-10-08**:
+- **Notes:** opencode's pattern is `^msg`; malformed → 400 schema parity, duplicate → 400 wopr divergence (see
+  Decision). **Confirmed 2026-10-08**:
   KKCode's prompt body is `{"messageID":"msg_optimistic_muzwmw43_1","parts":[{"type":"text","text":"Hi"}],
   "agent":"explore","model":{"providerID":"opencode-go","modelID":"deepseek-v4.1-flash"}}` (captured in
   `/tmp/wopr-proxy.log`), so the client does send `messageID` and wopr drops it. The body also carries `agent` and
@@ -1706,3 +1724,18 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Files:** `coding/host/host.go` (`releaseSlot`, `Abort`).
 - **Gates:** a test that queues B behind A, aborts across the handoff, and pins the chosen semantics; the host suite;
   `make check`.
+
+### serve-prompt-message-id-duplicate-race — a same-`messageID` resend before the first prompt persists is accepted twice
+
+- **Status:** READY (edge case) — surfaced 2026-10-08 by the `wave-serve-prompt-message-id` verify fan.
+- **Why:** `resolveMessageID` (`internal/codingagent/serve/serve_prompt.go`) rejects a duplicate client id by
+  checking the persisted entry map (`codinghost.Session.Inner().EntryByID`). A prompt accepted while the session is
+  busy is only queued (`host.Session.PromptContent`), and even a running prompt's user message is absent from `byID`
+  until the `OnMessagePersist` hook runs on the run goroutine — not at accept time. So two requests carrying the same
+  id that arrive during that window both pass the check and both `204`, then both `AppendMessage` under one id
+  (`internal/codingagent/session.go` has no collision check), producing two entries with the same id. Client ids are
+  per-bubble unique (`msg_optimistic_*`), so this needs a resend racing itself; the item's gate does not cover it.
+- **Files:** `internal/codingagent/serve/serve_prompt.go` (`resolveMessageID`), `coding/host/host.go`
+  (`PromptContent`/`PromptContentWait` — the atomic seam if a host-side in-flight-id set is chosen).
+- **Gates:** a test that sends the same `messageID` twice across the busy window and pins the chosen semantics
+  (reject the second, or make it idempotent); the serve and host suites; `make check`.

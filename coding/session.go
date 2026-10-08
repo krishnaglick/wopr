@@ -666,19 +666,20 @@ func (s *Session) Send(ctx context.Context, prompt string) ([]agent.AgentMessage
 // SendContent is the structured-content variant of Send. It persists the full
 // user content (text and/or images), then runs the agent loop.
 func (s *Session) SendContent(ctx context.Context, content []ai.UserContentBlock) ([]agent.AgentMessage, error) {
-	return s.SendContentWithPreflight(ctx, content, nil)
+	return s.SendContentWithPreflight(ctx, content, "", nil)
 }
 
 // SendContentWithPreflight calls preflight after prompt validation completes,
 // immediately before the agent run starts. The run is active (IsStreaming)
-// from then until agent_settled, and Abort cancels it.
-func (s *Session) SendContentWithPreflight(ctx context.Context, content []ai.UserContentBlock, preflight func()) ([]agent.AgentMessage, error) {
-	msgs, err := s.sendContent(ctx, content, preflight)
+// from then until agent_settled, and Abort cancels it. entryID, when non-empty,
+// is the transcript entry id the user message persists under.
+func (s *Session) SendContentWithPreflight(ctx context.Context, content []ai.UserContentBlock, entryID string, preflight func()) ([]agent.AgentMessage, error) {
+	msgs, err := s.sendContent(ctx, content, entryID, preflight)
 	s.notifyIdleWaiters()
 	return msgs, err
 }
 
-func (s *Session) sendContent(ctx context.Context, content []ai.UserContentBlock, preflight func()) ([]agent.AgentMessage, error) {
+func (s *Session) sendContent(ctx context.Context, content []ai.UserContentBlock, entryID string, preflight func()) ([]agent.AgentMessage, error) {
 	s.mu.Lock()
 	select {
 	case <-s.closeDone:
@@ -710,7 +711,7 @@ func (s *Session) sendContent(ctx context.Context, content []ai.UserContentBlock
 	content = icodingagent.NormalizePromptContent(content, s.services.SettingsManager().GetImageAutoResize(), s.agent.Model())
 	runCtx, cancelRun := s.beginAgentRun(ctx)
 	defer cancelRun()
-	msgs, sendErr := s.agent.SendContent(runCtx, content)
+	msgs, sendErr := s.agent.SendContent(runCtx, content, entryID)
 	// Retries, overflow and length recovery, and threshold compaction finish
 	// before the run settles.
 	msgs, sendErr = s.runPostAgentRuns(runCtx, msgs, sendErr)

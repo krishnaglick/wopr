@@ -669,7 +669,7 @@ func ServeRPC(ctx context.Context, svcs *coding.Services, sess *coding.Session, 
 			promptPending.Store(true)
 			promptWG.Go(func() {
 				accepted := false
-				_, sendErr := sess.SendContentWithPreflight(ctx, coding.BuildUserContent(cmd.Message, images), func() {
+				_, sendErr := sess.SendContentWithPreflight(ctx, coding.BuildUserContent(cmd.Message, images), "", func() {
 					accepted = true
 					promptPending.Store(false)
 					writeRPC(rpcSuccess(env.ID, "prompt", nil))

@@ -614,8 +614,12 @@ func (s *Session) AppendMessage(msg agent.AgentMessage) (string, error) {
 	e, err := appendOnLeaf(s, "message", func(base SessionEntryBase) MessageEntry {
 		// The Session minted this id at message start so the stream and the
 		// transcript agree; honor it over the fresh one appendOnLeaf generated.
-		if msg.Assistant != nil && msg.Assistant.EntryID != "" {
+		// A client-minted user id is honored the same way.
+		switch {
+		case msg.Assistant != nil && msg.Assistant.EntryID != "":
 			base.ID = msg.Assistant.EntryID
+		case msg.User != nil && msg.User.EntryID != "":
+			base.ID = msg.User.EntryID
 		}
 		return MessageEntry{SessionEntryBase: base, Message: msg}
 	})
