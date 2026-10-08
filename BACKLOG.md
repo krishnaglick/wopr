@@ -1435,7 +1435,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-transcript-parentid-userturn — transcript read API reports the previous assistant as a later user message's parentID
 
-- **Status:** CLAIMED — wave `wave-serve-transcript-parentid-userturn`, 2026-10-07.
+- **Status:** DONE — shipped on `wave-serve-transcript-parentid-userturn`. `entriesToMessages` now leaves a user-role row's transcript `parentID` at `""` (guard on `me.Message.User == nil`, skipping the nearest-message walk), matching the stream's user `message.updated` (`serve_sse.go` `messageEnd` emits parentID `""`). Assistant/toolResult/system/custom resolution is byte-identical to before: every non-user row still calls `nearestMessageAncestor(byID, e, assistant != nil)`. Gate: `TestEntriesToMessagesUserTurnParentIsEmpty` (fixture `u1 → a1 → u2`, `u2` raw parent `a1`) asserts `u2` parentID `""` and the neighbouring `a1` parentID `u1`; independently reproduced red pre-fix (`u2` was `a1`) in a throwaway checkout by three verification angles and green post-fix. Serve suite 88 passed, `golangci-lint` 0 issues, `go fix -diff` empty, `make check` all green in the worktree. Spec: `docs/plans/2026-10-07-serve-transcript-parentid-userturn.md` (planning artifact, not committed).
 - **Why:** the stream emits a user `message.updated` with `parentID: ""` (`internal/codingagent/serve/serve_sse.go`),
   and captured opencode 1.18.34 frames agree (user messages carry no parentID). But `entriesToMessages` computes a
   user row's `parentID` with the nearest-message walk, so a later user turn (`… → A_n → U2`) reports `A_n`. Read and
