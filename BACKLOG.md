@@ -1750,7 +1750,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-async-abort-handoff-race — a late abort can cancel the just-handed-off queued prompt
 
-- **Status:** READY (edge case) — surfaced 2026-10-08 by the `wave-serve-prompt-async-queue-when-busy` diff fan.
+- **Status:** IN PROGRESS — claimed 2026-10-08 on `wave-serve-prompt-async-abort-handoff-race`.
 - **Why:** `releaseSlot` installs the next run's cancel (`ownRun`) and spawns it; an `abort` delivered after run A
   settles but before the queued run B reaches `beginAgentRun` reads B's fresh cancel and cancels B, whose turn is
   then lost although it was already answered `204`. It is not a strand (B's release still drains the queue) and it is
