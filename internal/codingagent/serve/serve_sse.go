@@ -383,6 +383,10 @@ type eventMapper struct {
 	// (no Continue endpoint exists today) leaves the previous turn's value, and
 	// an assistant frame then reports whatever turn last set it.
 	turnUserID string
+	// turnUserCreated is the user message's created time (ms), recorded at its
+	// message_end and reused on the turn-end frame so both phases of the user
+	// message.updated report one clock.
+	turnUserCreated int64
 }
 
 // newEventMapper returns the Translator the host runs for one session. It is a
@@ -438,8 +442,19 @@ func (m *eventMapper) translate(ev agent.AgentEvent, entryID string) ([]codingho
 			events = append(events, ev)
 		}
 		events = append(events,
-			m.event(eventSessionDiff, sseSessionDiff{SessionID: m.sessionID, Diff: []json.RawMessage{}}),
-			m.status("idle"), m.idle())
+			m.event(eventSessionDiff, sseSessionDiff{SessionID: m.sessionID, Diff: []json.RawMessage{}}))
+		// The settle burst's second user message.updated closes the two-phase
+		// pair: the same id and clock as the start frame, now carrying the
+		// summary:{"diffs":[]} opencode emits on a settled turn. It rides before
+		// the idle terminators so a reader that stops on session.idle sees it.
+		if m.turnUserID != "" {
+			events = append(events, m.event(eventMessageUpdated, sseMessageUpdated{
+				SessionID: m.sessionID,
+				Info: messageInfo(m.sessionID, m.cwd, m.root, m.turnUserID, "user", "", m.turnUserCreated,
+					nil, m.providerID, m.modelID),
+			}))
+		}
+		events = append(events, m.status("idle"), m.idle())
 		return events, nil
 	case agent.AutoRetryStartEvent:
 		return append(m.one(m.status("retry")), m.error("AutoRetry", e.ErrorMessage)), nil
@@ -556,10 +571,15 @@ func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]co
 			return nil, nil
 		}
 		m.turnUserID = entryID
+		m.turnUserCreated = now
+		// The start frame carries no summary; the settle burst adds it, so the
+		// turn emits opencode's two-phase pair under one id and clock.
+		info := messageInfo(m.sessionID, m.cwd, m.root, entryID, "user", "", now,
+			nil, m.providerID, m.modelID)
+		info.omitSummary = true
 		events := []codinghost.Event{m.event(eventMessageUpdated, sseMessageUpdated{
 			SessionID: m.sessionID,
-			Info: messageInfo(m.sessionID, m.cwd, m.root, entryID, "user", "", now,
-				nil, m.providerID, m.modelID),
+			Info:      info,
 		})}
 		for i, block := range ev.Message.User.Content {
 			if b, ok := block.(ai.TextContent); ok {

@@ -1629,13 +1629,46 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-sse-user-message-two-phase — emit the user `message.updated` in opencode's two-phase form (parity only)
 
-- **Status:** CLAIMED 2026-10-08 by `wave-serve-sse-user-message-two-phase` — previously READY (parity, low priority), deferred out of `serve-sse-session-frames` by that item's narrow clause.
+- **Status:** DONE — shipped 2026-10-08 on `wave-serve-sse-user-message-two-phase`, merged `--no-ff` into `main`.
+  Previously READY (parity, low priority), deferred out of `serve-sse-session-frames` by that item's narrow clause.
 - **Why:** opencode emits the user message.updated at turn start with no `summary` and again (twice) at/after turn end
-  with `summary:{diffs:[]}` (`/tmp/oc-turn2.txt:7,35,83`); wopr emits it once, always with `summary`. This is frame
+  with `summary:{diffs:[]}` (`/tmp/oc-turn2.txt:7,35,83`); wopr emitted it once, always with `summary`. This is frame
   parity only — it is **not** a double-render fix; the double-render cause is UNESTABLISHED (see
   `serve-sse-session-frames`). Do not reintroduce a fix claim.
 - **Files:** `internal/codingagent/serve/serve_sse.go`, `serve_dto.go`.
-- **Gates:** a hermetic test asserting the two-phase shape; the serve suite; `make check`.
+- **Gates:** a hermetic test asserting the two-phase shape; the serve suite; `make check`. — all met.
+
+**What landed, for the next session**
+
+- `messageInfoDTO` gained an unexported `omitSummary` flag (`serve_dto.go`), read only by the user branch of
+  `MarshalJSON`, where `Summary` is now `*messageSummary` with `omitempty`: nil omits the key, non-nil emits
+  `{"diffs":[]}`. The zero value leaves every existing caller — above all the `GET /session/{id}/message` read path
+  through `entriesToMessages`/`messageInfo` — emitting `summary` exactly as before. The persisted transcript shape is
+  untouched.
+- `eventMapper` gained `turnUserCreated`, recorded at the user `message_end`. `messageEnd`'s user branch now sets
+  `omitSummary=true` — the turn-start frame, no `summary`. `translate`'s `AgentSettledEvent` case emits a second user
+  `message.updated` for the same id and clock after `session.diff`, before `session.status idle`/`session.idle` — the
+  `summary:{"diffs":[]}` settle frame. **Exactly two per turn**; an abort/error settle gets the second too
+  (`emitAgentSettled` is reached unconditionally).
+- Hermetic `TestSSEUserMessageTwoPhase` (never reads `/tmp`), plus updates to `TestSSETurnLifecycleParity` and
+  `TestPromptMessageIDHonoredEndToEnd` — both previously pinned exactly one user frame — and the
+  `assertUserInfoShape`/`assertUserSummaryEmpty` helpers (`assertUserSummaryEmpty` rejects `diffs:null`, not just a
+  len-0 slice). Non-vacuity proven red on: the settle emission, the DTO no-summary flag, the shared clock, and the
+  null-diffs rejection.
+- **Deliberate divergence, recorded:** opencode's capture shows **three** user frames (start + two end); this item's
+  DoD and slice pin **two** (start no-summary, settle with summary). The third is out of scope. The settle frame sits
+  after `session.diff` and before the idle terminators rather than at opencode's post-`session.idle` position, so a
+  reader that stops on `session.idle` sees it deterministically.
+- **Latent, accepted:** the `m.turnUserID != ""` settle guard is sticky per session; with no Continue endpoint there
+  is no live path where a settle re-emits the prior turn's id and clock. No machinery added for it.
+- **No double-render claim.** Frame parity only; the KKCode double-render was resolved separately by
+  `serve-prompt-message-id` (`b9db06d`).
+- Six gates green in the worktree and re-run on merged `main`: `go build ./...`, `go vet ./...`,
+  `go fix -diff ./...` empty, the serve suite, `golangci-lint` (0 issues), and `bash -lc 'make check'`.
+- Spec of record: `docs/plans/2026-10-08-serve-sse-user-message-two-phase.md`. A 4-angle spec fan found one blocker
+  (a sixth test, `TestPromptMessageIDHonoredEndToEnd`, also pinned one user frame) and one helper-seam ambiguity,
+  both fixed before implementation; a 4-angle diff fan found one major (the `diffs:null` false green above), fixed
+  before commit.
 
 ### kkcode-double-render-cause — diagnose the remaining KKCode message double-render
 

@@ -86,6 +86,12 @@ type messageInfoDTO struct {
 	ProviderID string        `json:"providerID"`
 	Time       messageTime   `json:"time"`
 	Finish     string        `json:"finish"`
+	// omitSummary is a stream-phase flag, never wire data. When set, the user
+	// branch of MarshalJSON omits the summary key, which is how the stream's
+	// start frame differs from its settle frame. The zero value false leaves
+	// every read-path caller emitting summary, so entriesToMessages and the
+	// persisted transcript shape are unchanged.
+	omitSummary bool
 }
 
 // messageModel is the nested model object opencode's user Message carries.
@@ -109,20 +115,27 @@ type messageSummary struct {
 // pointer-receiver MarshalJSON would be skipped.
 func (m messageInfoDTO) MarshalJSON() ([]byte, error) {
 	if m.Role == "user" {
+		// A non-nil pointer marshals summary:{"diffs":[]}; a nil pointer is
+		// omitted by omitempty. The start frame sets omitSummary, the settle
+		// frame and every read-path message do not.
+		var summary *messageSummary
+		if !m.omitSummary {
+			summary = &messageSummary{Diffs: []json.RawMessage{}}
+		}
 		return json.Marshal(struct {
-			ID        string         `json:"id"`
-			SessionID string         `json:"sessionID"`
-			Role      string         `json:"role"`
-			Time      messageTime    `json:"time"`
-			Summary   messageSummary `json:"summary"`
-			Agent     string         `json:"agent"`
-			Model     messageModel   `json:"model"`
+			ID        string          `json:"id"`
+			SessionID string          `json:"sessionID"`
+			Role      string          `json:"role"`
+			Time      messageTime     `json:"time"`
+			Summary   *messageSummary `json:"summary,omitempty"`
+			Agent     string          `json:"agent"`
+			Model     messageModel    `json:"model"`
 		}{
 			ID:        m.ID,
 			SessionID: m.SessionID,
 			Role:      m.Role,
 			Time:      m.Time,
-			Summary:   messageSummary{Diffs: []json.RawMessage{}},
+			Summary:   summary,
 			Agent:     m.Agent,
 			Model:     messageModel{ProviderID: m.ProviderID, ModelID: m.ModelID},
 		})
