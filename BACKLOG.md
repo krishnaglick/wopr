@@ -1750,15 +1750,31 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-async-abort-handoff-race — a late abort can cancel the just-handed-off queued prompt
 
-- **Status:** READY (edge case) — surfaced 2026-10-08 by the `wave-serve-prompt-async-queue-when-busy` diff fan.
-- **Why:** `releaseSlot` installs the next run's cancel (`ownRun`) and spawns it; an `abort` delivered after run A
-  settles but before the queued run B reaches `beginAgentRun` reads B's fresh cancel and cancels B, whose turn is
-  then lost although it was already answered `204`. It is not a strand (B's release still drains the queue) and it is
-  only reachable inside the handoff window; the queue gate does not assert abort semantics. Decide whether abort
-  should run the queued prompt (current behavior for an abort while A is running) or clear the queue.
-- **Files:** `coding/host/host.go` (`releaseSlot`, `Abort`).
-- **Gates:** a test that queues B behind A, aborts across the handoff, and pins the chosen semantics; the host suite;
-  `make check`.
+- **Status:** DONE — shipped 2026-10-08 on `wave-serve-prompt-async-abort-handoff-race`. A late abort no longer cancels
+  the queued run. `releaseSlot` now hands a queued run the slot with a bare `context.WithCancel(context.Background())`
+  that is **not** registered in `s.cancel`, so an abort delivered in the handoff window (A settled, B handed off, B not
+  yet in `beginAgentRun`) does not find B's cancel. `Abort` now discriminates: a non-nil host cancel (a reserved run
+  outstanding) → `cancel()` and return, never reaching the session-wide abort; otherwise it returns unless
+  `s.sess.IsStreaming()`, so with no begun run it cancels nothing, and only a genuinely active handed-off run is
+  cancelled via `RequestAbort`. `s.cancel` therefore aborts only the reserved run; a handed-off run is abortable only
+  from `beginAgentRun` onward. A test-only `handoffBarrier func()` field (nil in production) fires inside `releaseSlot`
+  between context creation and the goroutine spawn so the test executes `Abort()` synchronously in the window.
+- **Why:** `releaseSlot` installed the next run's cancel (`ownRun`) and spawned it; an `abort` delivered after run A
+  settles but before the queued run B reaches `beginAgentRun` read B's fresh cancel and cancelled B, whose turn was
+  then lost although it was already answered `204`. Pinned semantics (verified live on opencode 1.18.34): abort cancels
+  only the currently-active run; the queue is not cleared and a queued-but-not-yet-started run keeps running.
+- **Files:** `coding/host/host.go` (`releaseSlot`, `Abort`, `Session.cancel`/`ownRun` comments, `handoffBarrier` seam);
+  `coding/host/host_test.go` (`TestAbortInHandoffWindowDoesNotCancelQueuedPrompt`).
+- **Gates:** `TestAbortInHandoffWindowDoesNotCancelQueuedPrompt` queues B behind a blocking A, fires `Abort()` in the
+  handoff window via the seam, and asserts B reaches the provider and its user+assistant messages appear; independently
+  reproduced red by reverting only `releaseSlot`'s registration line (`waitArrived` times out) / green post-fix, stable
+  under `-race`. Spec fan (5 angles: 2 blockers fixed in Rev 2) + focused re-fan (2 angles) + diff fan (3 angles:
+  test-integrity and scope CLEAN; the correctness angle's nil-cancel residual was closed by the `IsStreaming` guard and
+  re-verified CLEAN). Gates: `go build`, `go vet`, `go fix -diff` empty, host `-race` 5 passed, host+serve 106 passed,
+  `golangci-lint ./coding/host/` 0 issues, `make check` all green.
+- **Accepted residual (out of scope):** an abort issued while a handed-off run is active can still land on a successor
+  if that run settles and the next queued run begins within the `RequestAbort` call; closing it needs a generation-scoped
+  coding abort, and abort-while-active semantics are already covered by serve's `TestAbortStopsARunningPrompt`.
 
 ### serve-prompt-message-id-duplicate-race — a same-`messageID` resend before the first prompt persists is accepted twice
 

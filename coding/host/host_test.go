@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -183,6 +185,181 @@ func TestHostRejectsASecondConcurrentPromptPerSession(t *testing.T) {
 	// Session B's prompt should not have returned ErrSessionBusy
 	if errors.Is(sessBErr, ErrSessionBusy) {
 		t.Fatalf("session B should not be busy, got %v", sessBErr)
+	}
+}
+
+// TestAbortInHandoffWindowDoesNotCancelQueuedPrompt proves an Abort that runs in
+// the window after A settles and before the queued B enters beginAgentRun does
+// not cancel B. The handoffBarrier fires Abort() synchronously between B's
+// context creation and B's goroutine start; B must still reach the provider and
+// settle. Without the fix, releaseSlot registers B's context as s.cancel, the
+// barrier cancels it, and B never reaches the provider.
+func TestAbortInHandoffWindowDoesNotCancelQueuedPrompt(t *testing.T) {
+	aRelease := make(chan struct{})
+	bRelease := make(chan struct{})
+	releases := []chan struct{}{aRelease, bRelease}
+	arrived := make(chan int, 4)
+
+	var bodiesMu sync.Mutex
+	var bodies []string
+	var reqN atomic.Int32
+
+	blockingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		idx := int(reqN.Add(1) - 1)
+		bodiesMu.Lock()
+		bodies = append(bodies, string(body))
+		bodiesMu.Unlock()
+		arrived <- idx
+		if idx < len(releases) {
+			// Selecting on the request context lets a cancelled run end here
+			// instead of blocking forever.
+			select {
+			case <-releases[idx]:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, line := range []string{
+			`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","model":"test-model","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}`,
+			`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+			`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}`,
+			`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`,
+			`event: message_stop` + "\n" + `data: {"type":"message_stop"}`,
+		} {
+			_, _ = io.WriteString(w, line+"\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}))
+	defer blockingSrv.Close()
+	var aOnce, bOnce sync.Once
+	defer aOnce.Do(func() { close(aRelease) })
+	defer bOnce.Do(func() { close(bRelease) })
+
+	tempDir := t.TempDir()
+	agentDir := filepath.Join(tempDir, "agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	modelsContent := `{"providers":{"anthropic":{"baseUrl":"` + blockingSrv.URL + `","apiKey":"test-key","modelOverrides":{"test-model":{"promptCache":{"short":12}}}}}}`
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(modelsContent), 0o644); err != nil {
+		t.Fatalf("write models.json: %v", err)
+	}
+
+	svcs, err := coding.NewServices(coding.ServicesOptions{AgentDir: agentDir})
+	if err != nil {
+		t.Fatalf("NewServices: %v", err)
+	}
+	if _, err := coding.BuildModel("anthropic/test-model", svcs); err != nil {
+		t.Fatalf("BuildModel: %v", err)
+	}
+
+	h := New(svcs, nil)
+	sessA, err := h.Start(StartOptions{Model: "anthropic/test-model"})
+	if err != nil {
+		t.Fatalf("Start session A: %v", err)
+	}
+	defer func() { _ = sessA.Close() }()
+
+	// Publication: assigned before the first PromptContent, whose
+	// `go s.runAndRelease` starts A's goroutine (happens-before). releaseSlot
+	// runs in that goroutine and reads a published value.
+	sessA.handoffBarrier = func() { sessA.Abort() }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// A: accepted, blocks in the provider, holds the slot.
+	if err := sessA.PromptContent(ctx, coding.BuildUserContent("A", nil), ""); err != nil {
+		t.Fatalf("PromptContent A: %v", err)
+	}
+	waitArrived(t, arrived, 0)
+
+	// B: queued behind A, must be accepted.
+	if err := sessA.PromptContent(ctx, coding.BuildUserContent("B", nil), ""); err != nil {
+		t.Fatalf("PromptContent B: %v", err)
+	}
+
+	// A settles -> releaseRun -> releaseSlot -> barrier Abort() in the handoff
+	// window -> B's goroutine starts.
+	aOnce.Do(func() { close(aRelease) })
+
+	waitArrived(t, arrived, 1)
+	bOnce.Do(func() { close(bRelease) })
+
+	if err := sessA.Inner().WaitForIdle(ctx); err != nil {
+		t.Fatalf("WaitForIdle: %v", err)
+	}
+
+	msgs := sessA.Inner().Messages()
+	var userTexts []string
+	sawB := false
+	assistantAfterB := false
+	for _, m := range msgs {
+		switch {
+		case m.User != nil:
+			var sb strings.Builder
+			for _, block := range m.User.Content {
+				if tc, ok := block.(ai.TextContent); ok {
+					sb.WriteString(tc.Text)
+				}
+			}
+			text := sb.String()
+			userTexts = append(userTexts, text)
+			if strings.Contains(text, "B") {
+				sawB = true
+			}
+		case m.Assistant != nil:
+			if sawB {
+				assistantAfterB = true
+			}
+		}
+	}
+	if !sawB {
+		t.Fatalf("expected a user message containing B, got user texts %q", userTexts)
+	}
+	if !assistantAfterB {
+		t.Fatalf("expected an assistant message after the B user message")
+	}
+
+	bodiesMu.Lock()
+	gotBodies := append([]string(nil), bodies...)
+	bodiesMu.Unlock()
+	if len(gotBodies) < 2 {
+		t.Fatalf("expected both A and B to reach the provider, got %d requests", len(gotBodies))
+	}
+	if !strings.Contains(gotBodies[0], `"text":"A"`) {
+		t.Errorf("provider's first request did not carry A: %q", gotBodies[0])
+	}
+	sawBInBody := false
+	for _, b := range gotBodies {
+		if strings.Contains(b, `"text":"B"`) {
+			sawBInBody = true
+		}
+	}
+	if !sawBInBody {
+		t.Errorf("provider never saw a request carrying B; bodies=%q", gotBodies)
+	}
+}
+
+// waitArrived blocks until the provider signals request idx, or the test times
+// out. It drains any earlier signals so callers can wait for 0 then 1 in order.
+func waitArrived(t *testing.T, arrived <-chan int, want int) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case got := <-arrived:
+			if got == want {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for provider request %d", want)
+		}
 	}
 }
 
