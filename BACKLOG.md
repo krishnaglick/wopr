@@ -1536,3 +1536,30 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   `make check`.
 - **Notes:** reuse the existing archive write (no second metadata format). Keep `/session` inclusive, matching opencode.
   The DTO `time.archived` must carry the archive timestamp.
+
+### serve-sse-turn-frame-parity — KKCode still double-renders and never idles: assistant part is created after its delta, and the message never completes
+
+- **Status:** READY — surfaced 2026-10-08 driving KKCode after `serve-sse-message-lifecycle-parity`: one prompt shows
+  the reply twice and the client never returns to idle for the next command.
+- **Why:** comparing a full turn's `/global/event` frames from opencode 1.18.34 (`/tmp/oc-turn2.txt`) and wopr
+  (`/tmp/wopr-turn2.txt`; regenerate against a running server, do not commit), the per-turn frame lifecycle still
+  diverges:
+  - **Delta before part.** opencode emits `message.part.updated` for the assistant text part **created** first
+    (empty `text`, `time:{start}`), then `message.part.delta`, then a final `message.part.updated` (`time:{start,end}`).
+    wopr emits the **delta first** (`serve_sse.go`), before any part for that id exists, then the part. A client that
+    materialises a part on the delta and a second on the update renders it twice.
+  - **No part time.** opencode text/reasoning parts carry `time:{start,end}`; wopr's carry none.
+  - **No message completion.** opencode's final assistant `message.updated` has `time:{created, completed}`; wopr's has
+    `time:{created}` only, so the client never sees the assistant message finish — the likely reason it stays busy.
+  - **No step parts.** opencode brackets the assistant run with `step-start` and `step-finish` parts (`step-finish`
+    carries `cost`/`tokens`/`reason`/`snapshot`); wopr emits neither.
+  - Minor: opencode's assistant placeholder has no `finish` key (wopr sends `"pending"`), and opencode emits
+    `session.updated`/`session.diff` frames wopr omits (likely optional).
+- **Files:** `internal/codingagent/serve/serve_sse.go` (the mapper and part construction), maybe `serve_dto.go`.
+- **Gates:** a hermetic replay test asserting, for one assistant text part, the order
+  `message.part.updated(create) → message.part.delta → message.part.updated(final)`, a stable part id across all
+  three, `time:{start}` on create and `{start,end}` on final, and a final assistant `message.updated` whose
+  `time.completed` is set. The serve suite; `make check`. Live: KKCode shows the reply once and returns to idle.
+- **Notes:** match opencode's order/fields for the core message/part frames; `step-start`/`step-finish` and
+  `session.updated`/`session.diff` are secondary — include only if cheap and honest. Do not change the persisted
+  transcript shape.
