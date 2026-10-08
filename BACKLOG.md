@@ -1674,6 +1674,24 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Notes:** match opencode's queued (not replaced, not dropped) semantics; confirm whether opencode steers the
   running turn or runs the queued message next before implementing.
 
+### serve-prompt-message-id — wopr ignores the client's `messageID`, so KKCode's optimistic user message never reconciles and renders twice
+
+- **Status:** READY — surfaced 2026-10-08. Owner confirmed the **user** message doubles even on the first message of a
+  new session.
+- **Why:** opencode's `POST /session/{id}/prompt_async` (and `/message`) body accepts an optional `messageID`
+  (`pattern ^msg`; see `/tmp/ocapi.json`). Verified live on opencode 1.18.34: a prompt sent with
+  `messageID:"msg_…"` produces a user message whose id **is** that value, round-tripping through
+  `GET /session/{id}/message`. KKCode is opencode-shaped: it renders the sent message optimistically with a
+  client-generated id and reconciles it when the SSE `message.updated` carries the same id. wopr ignores the body's
+  `messageID` and mints its own entry id, so the echo never matches the optimistic bubble and the client shows two.
+- **Files:** `internal/codingagent/serve/serve_prompt.go` (`promptBody`, `promptAsync`, `sessionMessage`),
+  `coding/host/host.go` / `coding/session.go` (where the user entry id is assigned).
+- **Gates:** a test that a prompt carrying `messageID:"msg_…"` yields a user message whose id equals it in both the
+  SSE `message.updated` and `GET /session/{id}/message`, while a prompt without one still mints a server id; the serve
+  suite; `make check`. Live: KKCode renders the sent message once.
+- **Notes:** opencode's pattern is `^msg`; match its handling of a malformed or duplicate id. Confirm the client
+  actually sends `messageID` from the body log in `/tmp/wopr-proxy.log` (the proxy now logs POST bodies).
+
 ### serve-prompt-async-abort-handoff-race — a late abort can cancel the just-handed-off queued prompt
 
 - **Status:** READY (edge case) — surfaced 2026-10-08 by the `wave-serve-prompt-async-queue-when-busy` diff fan.
