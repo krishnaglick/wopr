@@ -1629,7 +1629,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-sse-user-message-two-phase — emit the user `message.updated` in opencode's two-phase form (parity only)
 
-- **Status:** READY (parity, low priority) — deferred out of `serve-sse-session-frames` by that item's narrow clause.
+- **Status:** CLAIMED 2026-10-08 by `wave-serve-sse-user-message-two-phase` — previously READY (parity, low priority), deferred out of `serve-sse-session-frames` by that item's narrow clause.
 - **Why:** opencode emits the user message.updated at turn start with no `summary` and again (twice) at/after turn end
   with `summary:{diffs:[]}` (`/tmp/oc-turn2.txt:7,35,83`); wopr emits it once, always with `summary`. This is frame
   parity only — it is **not** a double-render fix; the double-render cause is UNESTABLISHED (see
