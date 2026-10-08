@@ -1574,3 +1574,22 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Notes:** match opencode's order/fields for the core message/part frames; `step-start`/`step-finish` and
   `session.updated`/`session.diff` are secondary — include only if cheap and honest. Do not change the persisted
   transcript shape.
+
+### serve-sse-end-burst-duplicate-part — the assistant end burst re-emits already-streamed parts with no `time`, wiping the part's `end`
+
+- **Status:** READY — surfaced 2026-10-08 verifying `serve-sse-turn-frame-parity` against a live wopr turn.
+- **Why:** wopr's assistant `MessageEndEvent` emits the final `message.updated` (now with `time.completed`) and then
+  **re-publishes every content part** (`internal/codingagent/serve/serve_sse.go` `messageEnd`, the loop over `blocks`).
+  Every part is already emitted during streaming — text/reasoning via `createPart`/`finishPart` (with
+  `time:{start,end}`), tools via `toolStart`/`toolSnapshot`/`ToolExecutionEndEvent`. opencode emits **no** such
+  republish (`/tmp/oc-turn2.txt`). The re-published text part is rebuilt with no time, so the trailing
+  `message.part.updated` carries `time:None` (`/tmp/wopr-turn3.txt`, the frame after the final assistant
+  `message.updated`) and overwrites the part's `{start,end}` from the streaming frame — which can leave the client
+  seeing an unterminated part and never settling. It is also an extra part frame opencode never sends, a plausible
+  second copy in the double render.
+- **Files:** `internal/codingagent/serve/serve_sse.go` (`messageEnd`).
+- **Gates:** a hermetic replay test asserting that, after the final assistant `message.updated`, no
+  `message.part.updated` is emitted for a part that was already streamed, and that a streamed part's `time.end` is
+  never overwritten with a missing time; the serve suite; `make check`. Live: KKCode renders once and idles.
+- **Notes:** keep the user-message announce branch unchanged. Only suppress the assistant part republish for parts the
+  stream already sent; if a part genuinely never streamed, it may still be emitted (with `time` via `finishPart`).
