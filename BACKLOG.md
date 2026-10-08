@@ -1539,7 +1539,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-sse-turn-frame-parity — KKCode still double-renders and never idles: assistant part is created after its delta, and the message never completes
 
-- **Status:** READY — surfaced 2026-10-08 driving KKCode after `serve-sse-message-lifecycle-parity`: one prompt shows
+- **Status:** IN PROGRESS (claimed 2026-10-08, `wave-serve-sse-turn-frame-parity`) — surfaced 2026-10-08 driving KKCode after `serve-sse-message-lifecycle-parity`: one prompt shows
   the reply twice and the client never returns to idle for the next command.
 - **Why:** comparing a full turn's `/global/event` frames from opencode 1.18.34 (`/tmp/oc-turn2.txt`) and wopr
   (`/tmp/wopr-turn2.txt`; regenerate against a running server, do not commit), the per-turn frame lifecycle still
