@@ -1689,8 +1689,11 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Gates:** a test that a prompt carrying `messageID:"msg_…"` yields a user message whose id equals it in both the
   SSE `message.updated` and `GET /session/{id}/message`, while a prompt without one still mints a server id; the serve
   suite; `make check`. Live: KKCode renders the sent message once.
-- **Notes:** opencode's pattern is `^msg`; match its handling of a malformed or duplicate id. Confirm the client
-  actually sends `messageID` from the body log in `/tmp/wopr-proxy.log` (the proxy now logs POST bodies).
+- **Notes:** opencode's pattern is `^msg`; match its handling of a malformed or duplicate id. **Confirmed 2026-10-08**:
+  KKCode's prompt body is `{"messageID":"msg_optimistic_muzwmw43_1","parts":[{"type":"text","text":"Hi"}],
+  "agent":"explore","model":{"providerID":"opencode-go","modelID":"deepseek-v4.1-flash"}}` (captured in
+  `/tmp/wopr-proxy.log`), so the client does send `messageID` and wopr drops it. The body also carries `agent` and
+  `model`; honoring `agent` is a separate concern (log it if it diverges).
 
 ### serve-prompt-async-abort-handoff-race — a late abort can cancel the just-handed-off queued prompt
 
