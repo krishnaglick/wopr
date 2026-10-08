@@ -991,6 +991,9 @@ func (s *Server) buildSessionDTO(rec sessionRecord, live *codinghost.Session) se
 			dto.Model = sessionModel{ID: m.ID, ProviderID: codinghost.ModelProviderID(m), Variant: "default"}
 		}
 	}
+	if dto.Model == (sessionModel{}) && rec.ModelID != "" {
+		dto.Model = sessionModel{ID: rec.ModelID, ProviderID: rec.ModelProvider, Variant: "default"}
+	}
 	if dto.Model == (sessionModel{}) {
 		providerID, modelID, _ := s.sessionModelParts()
 		dto.Model = sessionModel{ID: modelID, ProviderID: providerID, Variant: "default"}

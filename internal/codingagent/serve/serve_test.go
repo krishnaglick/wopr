@@ -2878,6 +2878,42 @@ func TestAgentShapeMatchesOpencode(t *testing.T) {
 	}
 }
 
+// TestDiskSessionModelFromChangeEntry: a disk-only session reports the model its
+// newest model_change names, not the server default; one without a model_change
+// still reports the server default.
+func TestDiskSessionModelFromChangeEntry(t *testing.T) {
+	env := promptEnvFor(t)
+	writeTestSession(t, env.sessionDir, "disk-model",
+		[]string{modelChangeEntry("mc-1", "anthropic", "claude-x"), userEntry("u-1", "hi")})
+	writeTestSession(t, env.sessionDir, "disk-nomodel",
+		[]string{userEntry("u-2", "hi")})
+	base := restartServer(t, env)
+
+	status, body := getRaw(t, base, "/session/disk-model")
+	if status != http.StatusOK {
+		t.Fatalf("GET /session/disk-model: expected 200, got %d (%s)", status, body)
+	}
+	var got sessionDTO
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode disk-model: %v", err)
+	}
+	if got.Model != (sessionModel{ID: "claude-x", ProviderID: "anthropic", Variant: "default"}) {
+		t.Fatalf("disk-model model = %+v, want {claude-x anthropic default}", got.Model)
+	}
+
+	status, body = getRaw(t, base, "/session/disk-nomodel")
+	if status != http.StatusOK {
+		t.Fatalf("GET /session/disk-nomodel: expected 200, got %d (%s)", status, body)
+	}
+	var fallback sessionDTO
+	if err := json.Unmarshal(body, &fallback); err != nil {
+		t.Fatalf("decode disk-nomodel: %v", err)
+	}
+	if fallback.Model != (sessionModel{ID: "faux-1", ProviderID: "test-faux", Variant: "default"}) {
+		t.Fatalf("disk-nomodel model = %+v, want {faux-1 test-faux default}", fallback.Model)
+	}
+}
+
 // TestSessionShapeMatchesOpencode drives every route that reaches
 // buildSessionDTO plus a disk-only session (restart), so both model sources are
 // covered.
