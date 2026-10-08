@@ -1577,7 +1577,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-sse-end-burst-duplicate-part — the assistant end burst re-emits already-streamed parts with no `time`, wiping the part's `end`
 
-- **Status:** READY — surfaced 2026-10-08 verifying `serve-sse-turn-frame-parity` against a live wopr turn.
+- **Status:** DONE — shipped 2026-10-08 on `wave-serve-sse-end-burst-duplicate-part`. `messageEnd` now skips a part the stream already published, so the burst no longer overwrites a streamed part's `{start,end}` with a timeless frame; a never-streamed part is still announced, created then stamped. `m.parts` records every published part (via `m.part`), so text, reasoning and tool parts are all suppressed. New `TestMessageEndDoesNotRepublishStreamedPart`; `TestStreamPartIDsMatchTranscriptPartIDs` reads streamed frames.
 - **Why:** wopr's assistant `MessageEndEvent` emits the final `message.updated` (now with `time.completed`) and then
   **re-publishes every content part** (`internal/codingagent/serve/serve_sse.go` `messageEnd`, the loop over `blocks`).
   Every part is already emitted during streaming — text/reasoning via `createPart`/`finishPart` (with

@@ -347,11 +347,12 @@ type eventMapper struct {
 	// report one creation time. It is zero until a start is observed; the end
 	// burst falls back to its own clock then.
 	assistantCreated int64
-	// parts records the start time (ms) of each assistant part the stream has
-	// already created — text, reasoning and tool ids alike — keyed by part id. A
-	// delta creates its part on first sight so a client materialises one part, not
-	// two. Cleared at each message start; part ids embed the message id so nothing
-	// collides.
+	// parts records every assistant part the stream has published, keyed by part
+	// id: the start time (ms) for text and reasoning, presence for tools. A delta
+	// creates its part on first sight so a client materialises one part, not two.
+	// messageEnd reads presence to avoid republishing a part that already
+	// streamed. Cleared at each message start; part ids embed the message id so
+	// nothing collides.
 	parts map[string]int64
 	// turnUserID is the entry id of the user message that initiated the current
 	// turn, remembered when that message's MessageEndEvent is mapped. opencode
@@ -507,11 +508,12 @@ func (m *eventMapper) messageUpdate(ev agent.MessageUpdateEvent) ([]codinghost.E
 
 // messageEnd is the reconciliation burst. For an assistant message the entry
 // id is already minted and applied at message start, so the end only
-// re-announces the message and republishes its parts under the ids the
-// transcript reports. For a user message it announces the message and its text
-// parts, so the client that did not send the prompt through this connection
-// still sees it once, under its transcript id. A toolResult end produces
-// nothing: its state rides the tool part the assistant message already owns.
+// re-announces the message and announces a part the stream did not already
+// publish; an already-streamed part is not re-sent. For a user message it
+// announces the message and its text parts, so the client that did not send the
+// prompt through this connection still sees it once, under its transcript id. A
+// toolResult end produces nothing: its state rides the tool part the assistant
+// message already owns.
 func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]codinghost.Event, error) {
 	now := time.Now().UnixMilli()
 	if ev.Message.User != nil {
@@ -574,7 +576,20 @@ func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]co
 		default:
 			continue
 		}
-		events = append(events, m.part(part))
+		// A part the stream already published is not re-sent: opencode emits
+		// nothing after the final message.updated, and the republished text part
+		// carried no time, overwriting the streamed part's {start,end}. Only a
+		// part that never streamed is announced here, created empty and then
+		// stamped, so the client sees a terminated part rather than a timeless one.
+		if _, streamed := m.parts[part.ID]; streamed {
+			continue
+		}
+		create := part
+		create.Text = ""
+		events = append(events, m.createPart(create)...)
+		if part.Type == "text" || part.Type == "reasoning" {
+			events = append(events, m.part(m.finishPart(part, now)))
+		}
 	}
 	if ev.Message.Assistant.ErrorMessage != "" {
 		// Without this a run that streamed deltas and then failed leaves the app
@@ -669,6 +684,12 @@ func (m *eventMapper) delta(messageID, id, field, text string) codinghost.Event 
 }
 
 func (m *eventMapper) part(p partDTO) codinghost.Event {
+	if m.parts == nil {
+		m.parts = make(map[string]int64)
+	}
+	if _, ok := m.parts[p.ID]; !ok {
+		m.parts[p.ID] = time.Now().UnixMilli()
+	}
 	return m.event(eventMessagePartUpdated, ssePartUpdated{SessionID: m.sessionID, Part: p, Time: time.Now().UnixMilli()})
 }
 
