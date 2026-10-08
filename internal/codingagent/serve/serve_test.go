@@ -1003,29 +1003,25 @@ func TestSSETurnLifecycleParity(t *testing.T) {
 	})
 	cancel()
 
-	// 1. Exactly one user message.updated, with an id.
+	// 1. Exactly two user message.updated frames (opencode's two-phase pair):
+	// same id, the start frame without a summary key, the settle frame with
+	// summary.diffs == [].
+	userInfos := userMessageUpdatedInfos(t, frames)
+	if len(userInfos) != 2 {
+		t.Fatalf("expected exactly two user message.updated, got %d; frames: %s", len(userInfos), summarize(frames))
+	}
 	var userID string
-	userUpdates := 0
-	for _, f := range frames {
-		if f.Name != eventMessageUpdated {
-			continue
-		}
-		var payload sseMessageUpdated
-		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
-			continue
-		}
-		if payload.Info.Role != "user" {
-			continue
-		}
-		userUpdates++
-		userID = payload.Info.ID
-	}
-	if userUpdates != 1 {
-		t.Fatalf("expected exactly one user message.updated, got %d; frames: %s", userUpdates, summarize(frames))
-	}
+	_ = json.Unmarshal(userInfos[0]["id"], &userID)
 	if userID == "" {
 		t.Fatalf("the user message.updated carries no id; frames: %s", summarize(frames))
 	}
+	var settleUserID string
+	_ = json.Unmarshal(userInfos[1]["id"], &settleUserID)
+	if settleUserID != userID {
+		t.Errorf("user message.updated ids disagree: %q against %q", userID, settleUserID)
+	}
+	assertUserSummaryOmitted(t, userInfos[0])
+	assertUserSummaryEmpty(t, userInfos[1])
 
 	// 2. The user's text part, under the same id, carries the prompt verbatim.
 	wantUserPart := userID + "-text-0"
@@ -1167,6 +1163,52 @@ func TestSSETurnLifecycleParity(t *testing.T) {
 	if transcriptPartID != deltaPartID {
 		t.Errorf("transcript part id: expected %q, got %q", deltaPartID, transcriptPartID)
 	}
+}
+
+// TestSSEUserMessageTwoPhase pins opencode's two-phase user message.updated:
+// one prompted turn emits the user frame once at turn start with no summary
+// key, and once in the settle burst with summary:{"diffs":[]}, under one id and
+// clock. Frame parity only; the read path is asserted elsewhere and unchanged.
+func TestSSEUserMessageTwoPhase(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resp := openSSE(t, baseURL, ctx)
+	defer func() { _ = resp.Body.Close() }()
+
+	status, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"reply with exactly: two-phase-ok"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async: expected 204, got %d", status)
+	}
+	frames := readSSEUntil(t, resp, stopOnSessionIdle)
+	cancel()
+
+	infos := userMessageUpdatedInfos(t, frames)
+	if len(infos) != 2 {
+		t.Fatalf("expected exactly two user message.updated, got %d; frames: %s", len(infos), summarize(frames))
+	}
+	var firstID, secondID string
+	_ = json.Unmarshal(infos[0]["id"], &firstID)
+	_ = json.Unmarshal(infos[1]["id"], &secondID)
+	if firstID == "" {
+		t.Fatalf("first user message.updated carries no id; frames: %s", summarize(frames))
+	}
+	if firstID != secondID {
+		t.Errorf("user message.updated ids disagree: %q against %q", firstID, secondID)
+	}
+	firstCreated := userMessageCreated(t, infos[0])
+	secondCreated := userMessageCreated(t, infos[1])
+	if firstCreated == 0 {
+		t.Errorf("first user message.updated time.created is zero, want a stamp")
+	}
+	if firstCreated != secondCreated {
+		t.Errorf("user message.updated time.created disagree: %d against %d", firstCreated, secondCreated)
+	}
+	assertUserSummaryOmitted(t, infos[0])
+	assertUserSummaryEmpty(t, infos[1])
 }
 
 // TestSSETurnSessionFramesMatchOpencode pins the turn-level session frames the
@@ -3270,7 +3312,7 @@ func assertInfoShape(t *testing.T, info map[string]json.RawMessage) {
 		_ = json.Unmarshal(raw, &role)
 	}
 	if role == "user" {
-		assertUserInfoShape(t, info)
+		assertUserInfoShape(t, info, true)
 		return
 	}
 	for _, key := range []string{"id", "sessionID", "role", "parentID", "mode", "agent", "modelID", "providerID", "finish"} {
@@ -3294,12 +3336,17 @@ func assertInfoShape(t *testing.T, info map[string]json.RawMessage) {
 // assertUserInfoShape asserts the nested user-message info shape: exactly the
 // keys id, sessionID, role, time, summary, agent, model; a created time; a
 // summary whose diffs is an array (never null); and a model object. The exact
-// key count is what a flat user object fails on. Shared by assertInfoShape's
-// role branch and TestMessageInfoRoleShapes so the user wire shape has one
-// definition.
-func assertUserInfoShape(t *testing.T, info map[string]json.RawMessage) {
+// key count is what a flat user object fails on. wantSummary selects the two
+// stream phases: true is the read-path/settle shape with summary, false is the
+// SSE start frame whose summary key is absent. Shared by assertInfoShape's
+// role branch, TestMessageInfoRoleShapes, and the SSE sites so the user wire
+// shape has one definition.
+func assertUserInfoShape(t *testing.T, info map[string]json.RawMessage, wantSummary bool) {
 	t.Helper()
 	want := []string{"id", "sessionID", "role", "time", "summary", "agent", "model"}
+	if !wantSummary {
+		want = []string{"id", "sessionID", "role", "time", "agent", "model"}
+	}
 	if len(info) != len(want) {
 		keys := make([]string, 0, len(info))
 		for k := range info {
@@ -3313,13 +3360,102 @@ func assertUserInfoShape(t *testing.T, info map[string]json.RawMessage) {
 	}
 	tm := assertObject(t, info, "time")
 	assertKind(t, tm, "created", "number")
-	summary := assertObject(t, info, "summary")
-	if diffs := assertArray(t, summary, "diffs"); len(diffs) != 0 {
-		t.Errorf("user info summary.diffs = %v, want []", diffs)
+	if wantSummary {
+		summary := assertObject(t, info, "summary")
+		if diffs := assertArray(t, summary, "diffs"); len(diffs) != 0 {
+			t.Errorf("user info summary.diffs = %v, want []", diffs)
+		}
 	}
 	model := assertObject(t, info, "model")
 	assertKind(t, model, "providerID", "string")
 	assertKind(t, model, "modelID", "string")
+}
+
+// userMessageUpdatedInfos decodes every message.updated frame's info object,
+// keeps the user-role ones in frame order, and returns them as raw key maps so
+// summary presence is observable (sseMessageUpdated carries no summary field).
+func userMessageUpdatedInfos(t *testing.T, frames []sseFrame) []map[string]json.RawMessage {
+	t.Helper()
+	var infos []map[string]json.RawMessage
+	for _, f := range frames {
+		if f.Name != eventMessageUpdated {
+			continue
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		raw, ok := payload["info"]
+		if !ok {
+			continue
+		}
+		var info map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &info); err != nil {
+			continue
+		}
+		var role string
+		_ = json.Unmarshal(info["role"], &role)
+		if role != "user" {
+			continue
+		}
+		infos = append(infos, info)
+	}
+	return infos
+}
+
+// assertUserSummaryOmitted asserts a user info object carries no summary key.
+func assertUserSummaryOmitted(t *testing.T, info map[string]json.RawMessage) {
+	t.Helper()
+	if raw, ok := info["summary"]; ok {
+		t.Errorf("user info must not carry a summary key, got %s", raw)
+	}
+}
+
+// userMessageCreated decodes a user info object's time.created (ms).
+func userMessageCreated(t *testing.T, info map[string]json.RawMessage) int64 {
+	t.Helper()
+	raw, ok := info["time"]
+	if !ok {
+		t.Fatalf("user info must carry a time key")
+	}
+	var ts struct {
+		Created int64 `json:"created"`
+	}
+	if err := json.Unmarshal(raw, &ts); err != nil {
+		t.Fatalf("user info time is not an object: %v (%s)", err, raw)
+	}
+	return ts.Created
+}
+
+// assertUserSummaryEmpty asserts a user info object carries summary as an
+// object whose diffs is an empty, non-null array.
+func assertUserSummaryEmpty(t *testing.T, info map[string]json.RawMessage) {
+	t.Helper()
+	raw, ok := info["summary"]
+	if !ok {
+		t.Fatalf("user info must carry a summary key")
+	}
+	if string(raw) == "null" {
+		t.Fatalf("user info summary is null, want an object")
+	}
+	var summary map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		t.Fatalf("user info summary is not an object: %v (%s)", err, raw)
+	}
+	diffsRaw, ok := summary["diffs"]
+	if !ok {
+		t.Fatalf("user info summary.diffs key missing")
+	}
+	if string(diffsRaw) == "null" {
+		t.Fatalf("user info summary.diffs is null, want []")
+	}
+	var diffs []json.RawMessage
+	if err := json.Unmarshal(diffsRaw, &diffs); err != nil {
+		t.Fatalf("user info summary.diffs is not an array: %v (%s)", err, diffsRaw)
+	}
+	if len(diffs) != 0 {
+		t.Errorf("user info summary.diffs = %v, want []", diffs)
+	}
 }
 
 // assertMessageShape asserts one {info, parts} message and every part's keys.
@@ -3603,7 +3739,18 @@ func TestSSEMessageUpdatedShapeMatchesOpencode(t *testing.T) {
 		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
 			continue
 		}
-		assertInfoShape(t, assertObject(t, payload, "info"))
+		info := assertObject(t, payload, "info")
+		var role string
+		if raw, ok := info["role"]; ok {
+			_ = json.Unmarshal(raw, &role)
+		}
+		if role == "user" {
+			// The first message.updated of a turn is the start frame, which
+			// carries no summary.
+			assertUserInfoShape(t, info, false)
+		} else {
+			assertInfoShape(t, info)
+		}
 		found = true
 	}
 	if !found {
@@ -3696,7 +3843,7 @@ func TestMessageInfoRoleShapes(t *testing.T) {
 			t.Fatalf("no message.updated among %d events: %+v", len(got), got)
 		}
 		info := infoOf(t, updated)
-		assertInfoShape(t, info)
+		assertUserInfoShape(t, info, false)
 		assertModel(t, info)
 	})
 }
@@ -3903,29 +4050,25 @@ func TestPromptMessageIDHonoredEndToEnd(t *testing.T) {
 	}
 	frames := readSSEUntil(t, resp, stopOnSessionIdle)
 
-	// (a) Exactly one user message.updated, carrying the client id.
-	userUpdates := 0
-	streamUserID := ""
-	for _, f := range frames {
-		if f.Name != eventMessageUpdated {
-			continue
-		}
-		var payload sseMessageUpdated
-		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
-			continue
-		}
-		if payload.Info.Role != "user" {
-			continue
-		}
-		userUpdates++
-		streamUserID = payload.Info.ID
+	// (a) Exactly two user message.updated frames (opencode's two-phase pair)
+	// carrying the client id; the start frame has no summary, the settle frame
+	// does.
+	userInfos := userMessageUpdatedInfos(t, frames)
+	if len(userInfos) != 2 {
+		t.Fatalf("expected exactly two user message.updated, got %d; frames: %s", len(userInfos), summarize(frames))
 	}
-	if userUpdates != 1 {
-		t.Fatalf("expected exactly one user message.updated, got %d; frames: %s", userUpdates, summarize(frames))
-	}
+	var streamUserID string
+	_ = json.Unmarshal(userInfos[0]["id"], &streamUserID)
 	if streamUserID != "msg_test1" {
 		t.Errorf("stream user id: expected client id %q, got %q", "msg_test1", streamUserID)
 	}
+	var settleUserID string
+	_ = json.Unmarshal(userInfos[1]["id"], &settleUserID)
+	if settleUserID != streamUserID {
+		t.Errorf("user message.updated ids disagree: %q against %q", streamUserID, settleUserID)
+	}
+	assertUserSummaryOmitted(t, userInfos[0])
+	assertUserSummaryEmpty(t, userInfos[1])
 
 	// (b) The user text part derives from the client id.
 	partSeen := false
