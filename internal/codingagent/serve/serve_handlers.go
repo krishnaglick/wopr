@@ -1155,8 +1155,13 @@ func entriesToMessages(entries []icodingagent.SessionEntry, sessionID, cwd, root
 		}
 
 		// Assistant rows resolve to the turn's user message so the transcript
-		// matches the stream; user and toolResult rows keep the nearest message.
-		parentID := nearestMessageAncestor(byID, e, assistant != nil)
+		// matches the stream; toolResult and other rows keep the nearest message.
+		// A user row reports no parentID, matching the stream's user
+		// message.updated (serve_sse.go messageEnd).
+		var parentID string
+		if me.Message.User == nil {
+			parentID = nearestMessageAncestor(byID, e, assistant != nil)
+		}
 		created := parseRFC3339NanoToMillis(e.Base.Timestamp)
 
 		msg := messageDTO{

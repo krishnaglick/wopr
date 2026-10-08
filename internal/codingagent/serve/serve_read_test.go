@@ -426,6 +426,41 @@ func TestEntriesToMessagesAssistantParentsOnTurnUserInMultiStepToolTurn(t *testi
 	}
 }
 
+// TestEntriesToMessagesUserTurnParentIsEmpty pins that a user-role row reports an
+// empty parentID, matching the stream's user message.updated (serve_sse.go messageEnd).
+// A later user turn's raw parent is the previous assistant, so the nearest-message walk
+// would report a1; user u2 must report "". userEntry hardcodes parentId:null, so u2's
+// parent link is hand-written. Assistant resolution is pinned by the sibling test.
+func TestEntriesToMessagesUserTurnParentIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	id := "parent-user-turn"
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	path := writeTestSession(t, dir, id, []string{
+		userEntry("u1", "first"),
+		`{"type":"message","id":"a1","parentId":"u1","timestamp":"` + ts + `","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"api":"faux","provider":"test-faux","model":"faux-1","usage":{"input":1,"output":1,"cache":{"read":0,"write":0}},"stopReason":"stop","timestamp":1704067201000}}`,
+		`{"type":"message","id":"u2","parentId":"a1","timestamp":"` + ts + `","message":{"role":"user","content":[{"type":"text","text":"second"}],"timestamp":1704067202000}}`,
+	})
+
+	entries, err := tailEntries(path, maxLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := entriesToMessages(entries, id, "/test", "/test", "", "")
+
+	parents := make(map[string]string, len(messages))
+	for _, m := range messages {
+		parents[m.Info.ID] = m.Info.ParentID
+	}
+	if got, ok := parents["u2"]; !ok {
+		t.Fatalf("user u2 not in transcript: %+v", messages)
+	} else if got != "" {
+		t.Errorf("u2 parentID: expected empty (matching the stream), got %q", got)
+	}
+	if got := parents["a1"]; got != "u1" {
+		t.Errorf("a1 parentID: expected the turn's user message %q, got %q", "u1", got)
+	}
+}
+
 // BenchmarkServeListRead benchmarks the list sessions read path.
 func BenchmarkServeListRead(b *testing.B) {
 	for _, entriesPerSession := range []int{400, 800} {
