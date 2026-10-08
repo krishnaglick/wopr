@@ -1631,10 +1631,12 @@ func TestAPIHealthAnswersHealthyWithoutVersion(t *testing.T) {
 	}
 }
 
-// TestExperimentalSessionMatchesSessionList proves the new route answers the
-// same session list as the existing handler: with one seeded session the two
-// bodies decode to the same non-empty []sessionDTO, and the foreign-directory
-// validation still applies (200 on the root, 400 on a mismatch).
+// TestExperimentalSessionMatchesSessionList proves the two list routes agree
+// when no session is archived: with one seeded session the two bodies decode to
+// the same non-empty []sessionDTO, and the foreign-directory validation still
+// applies (200 on the root, 400 on a mismatch). They diverge once a session is
+// archived — /experimental/session omits it while /session stays inclusive; see
+// TestDeleteSessionArchives.
 func TestExperimentalSessionMatchesSessionList(t *testing.T) {
 	env := promptEnvFor(t)
 	createPromptSession(t, env.baseURL)
@@ -1667,6 +1669,79 @@ func TestExperimentalSessionMatchesSessionList(t *testing.T) {
 	}
 	if status, _ := getRaw(t, env.baseURL, "/experimental/session?directory=/somewhere/else"); status != http.StatusBadRequest {
 		t.Errorf("GET /experimental/session foreign directory: expected 400, got %d", status)
+	}
+}
+
+// TestDeleteSessionArchives proves DELETE /session/{id} archives rather than
+// hard-deletes: it answers 200 true, stamps time.archived, hides the session
+// from /experimental/session, keeps it in /session, and 404s an unknown id.
+func TestDeleteSessionArchives(t *testing.T) {
+	env := promptEnvFor(t)
+	id := createPromptSession(t, env.baseURL)
+
+	// DELETE → 200, application/json, body "true".
+	req, _ := http.NewRequest(http.MethodDelete, env.baseURL+"/session/"+id, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("DELETE Content-Type = %q, want application/json", ct)
+	}
+	if got := strings.TrimSpace(string(body)); got != "true" {
+		t.Errorf("DELETE body = %q, want true", got)
+	}
+
+	// time.archived carries the archive timestamp on GET /session/{id}.
+	status, gbody := sessionRequest(t, "GET", env.baseURL, id, "")
+	if status != http.StatusOK {
+		t.Fatalf("GET /session/{id} status = %d, want 200", status)
+	}
+	dto := decodeDTO(t, gbody)
+	if dto.Time.Archived == nil {
+		t.Fatalf("GET /session/{id} time.archived absent after DELETE")
+	}
+	if *dto.Time.Archived <= 0 {
+		t.Errorf("time.archived = %d, want a positive ms stamp", *dto.Time.Archived)
+	}
+
+	// Absent from /experimental/session …
+	_, ebody := getRaw(t, env.baseURL, "/experimental/session")
+	var exp []sessionDTO
+	if err := json.Unmarshal(ebody, &exp); err != nil {
+		t.Fatalf("decode /experimental/session: %v", err)
+	}
+	for _, s := range exp {
+		if s.ID == id {
+			t.Errorf("archived session %q present in /experimental/session", id)
+		}
+	}
+
+	// … still present in /session.
+	_, lbody := getRaw(t, env.baseURL, "/session")
+	var list []sessionDTO
+	if err := json.Unmarshal(lbody, &list); err != nil {
+		t.Fatalf("decode /session: %v", err)
+	}
+	found := false
+	for _, s := range list {
+		if s.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("archived session %q missing from /session", id)
+	}
+
+	// Unknown id → 404.
+	if status, _ := sessionRequest(t, "DELETE", env.baseURL, "unknown-session", ""); status != http.StatusNotFound {
+		t.Errorf("DELETE unknown session status = %d, want 404", status)
 	}
 }
 

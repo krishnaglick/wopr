@@ -76,7 +76,7 @@ func (s *Server) directoryParam(r *http.Request) (string, *errorDTO, int) {
 	return s.sessionDir, nil, 0
 }
 
-// notImplemented is the shared stub for the five 501 routes.
+// notImplemented is the shared stub for the four 501 routes.
 func (s *Server) notImplemented(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusNotImplemented, errorDTO{Error: "not implemented"})
 }
@@ -141,8 +141,17 @@ func (s *Server) listPermissions(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, []any{})
 }
 
-// GET /session
+// GET /session — inclusive; archived sessions are listed.
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
+	s.listSessionsFiltered(w, r, true)
+}
+
+// GET /experimental/session — opencode's route excludes archived sessions.
+func (s *Server) listExperimentalSessions(w http.ResponseWriter, r *http.Request) {
+	s.listSessionsFiltered(w, r, false)
+}
+
+func (s *Server) listSessionsFiltered(w http.ResponseWriter, r *http.Request, includeArchived bool) {
 	limit := limitOf(r, defaultLimit, maxLimit)
 	dir, errDTO, status := s.directoryParam(r)
 	if errDTO != nil {
@@ -246,6 +255,9 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	// Build DTOs.
 	dtos := make([]sessionDTO, 0)
 	for _, sr := range sortableRecs {
+		if !includeArchived && sr.rec.Archived != nil {
+			continue
+		}
 		if len(dtos) >= limit {
 			break
 		}
@@ -348,19 +360,7 @@ func (s *Server) patchSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if hasTime {
-		var archiveData any
-		if body.Time.Archived != nil {
-			archiveData = map[string]any{"archived": *body.Time.Archived}
-		} else {
-			archiveData = map[string]any{"archived": nil}
-		}
-		var err error
-		if live != nil {
-			err = live.Inner().Inner().AppendCustomEntry("session_archive", archiveData)
-		} else {
-			err = sm.AppendCustomEntry(rec.Path, "session_archive", archiveData)
-		}
-		if err != nil {
+		if err := s.writeArchive(rec, live, body.Time.Archived); err != nil {
 			s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
 			return
 		}
@@ -381,7 +381,46 @@ func (s *Server) patchSession(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, info)
 }
 
-// DELETE /session/{id}, POST /session/{id}/fork, POST /session/{id}/revert, GET /session/{id}/diff
+// writeArchive is the single writer of the session_archive metadata:
+// PATCH {time:{archived}} and DELETE /session/{id} both route through it, so the
+// record shape cannot drift. archived is nil to clear the stamp (PATCH only).
+func (s *Server) writeArchive(rec sessionRecord, live *codinghost.Session, archived *int64) error {
+	var data map[string]any
+	if archived != nil {
+		data = map[string]any{"archived": *archived}
+	} else {
+		data = map[string]any{"archived": nil}
+	}
+	if live != nil {
+		return live.Inner().Inner().AppendCustomEntry("session_archive", data)
+	}
+	sm := icodingagent.NewSessionManagerWithDir(s.services.CWD(), s.sessionDir)
+	return sm.AppendCustomEntry(rec.Path, "session_archive", data)
+}
+
+// DELETE /session/{id}
+//
+// wopr has no host delete primitive and never removes transcript files, so a
+// delete archives: it stamps session_archive exactly as PATCH
+// {time:{archived:<ms>}} does, then answers true. A deliberate divergence from
+// opencode, whose DELETE hard-deletes. 404 for an unknown id.
+func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	live, _ := s.host.Get(id)
+	rec, ok := getSessionRecord(s.sessionDir, id, live)
+	if !ok {
+		s.writeJSON(w, http.StatusNotFound, errorDTO{Error: "session not found"})
+		return
+	}
+	now := time.Now().UnixMilli()
+	if err := s.writeArchive(rec, live, &now); err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, true)
+}
+
+// POST /session/{id}/fork, POST /session/{id}/revert, GET /session/{id}/diff
 // All share the same notImplemented stub.
 
 // project builds the served-root project DTO. time and sandboxes are always
