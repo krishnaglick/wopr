@@ -341,6 +341,12 @@ type eventMapper struct {
 	// persists, so deltas, part updates and the end burst all use the one id the
 	// transcript will report.
 	assistantID string
+	// parts records the start time (ms) of each assistant part the stream has
+	// already created — text, reasoning and tool ids alike — keyed by part id. A
+	// delta creates its part on first sight so a client materialises one part, not
+	// two. Cleared at each message start; part ids embed the message id so nothing
+	// collides.
+	parts map[string]int64
 	// turnUserID is the entry id of the user message that initiated the current
 	// turn, remembered when that message's MessageEndEvent is mapped. opencode
 	// parent-chains every assistant message of a turn to that user message, so
@@ -432,6 +438,9 @@ func (m *eventMapper) messageStart(ev agent.MessageStartEvent) []codinghost.Even
 		return nil
 	}
 	m.assistantID = ev.Message.Assistant.EntryID
+	// A new assistant message starts with no parts created; bounding the map to
+	// one message keeps it from growing across a session.
+	clear(m.parts)
 	return m.one(m.event(eventMessageUpdated, sseMessageUpdated{
 		SessionID: m.sessionID,
 		Info: messageInfo(m.sessionID, m.cwd, m.root, m.assistantID, "assistant", m.turnUserID, time.Now().UnixMilli(),
@@ -452,9 +461,13 @@ func (m *eventMapper) messageUpdate(ev agent.MessageUpdateEvent) ([]codinghost.E
 	// Three true deltas. A tool-call delta is an arguments delta: routing it to
 	// message.part.updated instead would emit a tool part with empty arguments.
 	case ai.TextDeltaEvent:
-		return m.one(m.delta(messageID, partID(messageID, "text", stream.ContentIndex, ""), "text", stream.Delta)), nil
+		p := textPart(messageID, m.sessionID, stream.ContentIndex, "")
+		create := m.createPart(p)
+		return append(create, m.delta(messageID, p.ID, "text", stream.Delta)), nil
 	case ai.ThinkingDeltaEvent:
-		return m.one(m.delta(messageID, partID(messageID, "reasoning", stream.ContentIndex, ""), "reasoning", stream.Delta)), nil
+		p := reasoningPart(messageID, m.sessionID, stream.ContentIndex, "")
+		create := m.createPart(p)
+		return append(create, m.delta(messageID, p.ID, "reasoning", stream.Delta)), nil
 	case ai.ToolCallDeltaEvent:
 		// The index is over the streamed message's content, so the call id has
 		// to come from there: a tool-call delta carries no id of its own.
@@ -465,11 +478,19 @@ func (m *eventMapper) messageUpdate(ev agent.MessageUpdateEvent) ([]codinghost.E
 		// completes, and the arguments still stream. Dropping it instead left
 		// the live tool bubble empty until the client refetched history.
 		callID := toolCallID(stream.Partial, stream.ContentIndex)
-		return m.one(m.delta(messageID, partID(messageID, "tool", stream.ContentIndex, callID), "arguments", stream.Delta)), nil
+		p := toolPart(m.sessionID, messageID, stream.ContentIndex, callID, "")
+		create := m.createPart(p)
+		return append(create, m.delta(messageID, p.ID, "arguments", stream.Delta)), nil
 	case ai.TextEndEvent:
-		return m.one(m.part(textPart(messageID, m.sessionID, stream.ContentIndex, stream.Content))), nil
+		p := textPart(messageID, m.sessionID, stream.ContentIndex, stream.Content)
+		// The create must be empty-text: pass an empty part, same id. It exists
+		// so a completion that skipped streaming still emits create then final.
+		create := m.createPart(textPart(messageID, m.sessionID, stream.ContentIndex, ""))
+		return append(create, m.part(m.finishPart(p, time.Now().UnixMilli()))), nil
 	case ai.ThinkingEndEvent:
-		return m.one(m.part(reasoningPart(messageID, m.sessionID, stream.ContentIndex, stream.Content))), nil
+		p := reasoningPart(messageID, m.sessionID, stream.ContentIndex, stream.Content)
+		create := m.createPart(reasoningPart(messageID, m.sessionID, stream.ContentIndex, ""))
+		return append(create, m.part(m.finishPart(p, time.Now().UnixMilli()))), nil
 	case ai.ToolCallEndEvent:
 		return m.one(m.part(toolPart(m.sessionID, messageID, stream.ContentIndex, stream.ToolCall.ID, stream.ToolCall.Name))), nil
 	}
@@ -513,10 +534,15 @@ func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]co
 		return nil, nil
 	}
 	blocks := ev.Message.Assistant.Content
+	info := messageInfo(m.sessionID, m.cwd, m.root, id, "assistant", m.turnUserID, now,
+		ev.Message.Assistant, m.providerID, m.modelID)
+	// The final assistant frame carries the completion clock. The placeholder
+	// frame at message start does not, so the client can tell a run in flight
+	// from a settled one.
+	info.Time.Completed = &now
 	events := []codinghost.Event{m.event(eventMessageUpdated, sseMessageUpdated{
 		SessionID: m.sessionID,
-		Info: messageInfo(m.sessionID, m.cwd, m.root, id, "assistant", m.turnUserID, now,
-			ev.Message.Assistant, m.providerID, m.modelID),
+		Info:      info,
 	})}
 	// The index runs over the full content slice, enumerated before any block is
 	// filtered out, so it equals ai.*Event.ContentIndex even where a block yields
@@ -590,6 +616,32 @@ func todosFromDetails(tool string, details any) []tools.Todo {
 		return nil
 	}
 	return todos
+}
+
+// createPart emits the empty create frame for a part not yet on the stream and
+// records the part's start time. A second call for the same id emits nothing.
+// Tool parts take no top-level time; their clock lives in state.
+func (m *eventMapper) createPart(p partDTO) []codinghost.Event {
+	if _, ok := m.parts[p.ID]; ok {
+		return nil
+	}
+	if m.parts == nil {
+		m.parts = make(map[string]int64)
+	}
+	start := time.Now().UnixMilli()
+	m.parts[p.ID] = start
+	if p.Type == "text" || p.Type == "reasoning" {
+		p.Time = &partTime{Start: start}
+	}
+	return m.one(m.part(p))
+}
+
+// finishPart stamps start+end, reusing the recorded start. Every caller first
+// calls createPart for the same id, so the recorded start is always present and
+// the `!ok` fallback is gone; the end-burst republish no longer calls this.
+func (m *eventMapper) finishPart(p partDTO, end int64) partDTO {
+	p.Time = &partTime{Start: m.parts[p.ID], End: end}
+	return p
 }
 
 func (m *eventMapper) delta(messageID, id, field, text string) codinghost.Event {

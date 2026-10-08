@@ -148,19 +148,35 @@ type messageTokens struct {
 
 type messageTime struct {
 	Created int64 `json:"created"`
+	// Completed is set only on the final assistant message.updated of a turn.
+	// It is a pointer so the placeholder frame and every read-path message omit
+	// it, keeping the persisted transcript shape unchanged.
+	Completed *int64 `json:"completed,omitempty"`
+}
+
+// partTime is a part's {start,end} clock. End is omitted while the part is
+// still open, so the create frame carries time:{start} and the final frame
+// time:{start,end}, matching opencode.
+type partTime struct {
+	Start int64 `json:"start"`
+	End   int64 `json:"end,omitempty"`
 }
 
 type partDTO struct {
-	ID        string          `json:"id"`
-	MessageID string          `json:"messageID"`
-	SessionID string          `json:"sessionID"`
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	Tool      string          `json:"tool,omitempty"`
-	CallID    string          `json:"callID,omitempty"`
-	Mime      string          `json:"mime,omitempty"`
-	URL       string          `json:"url,omitempty"`
-	State     json.RawMessage `json:"state,omitempty"`
+	ID        string `json:"id"`
+	MessageID string `json:"messageID"`
+	SessionID string `json:"sessionID"`
+	Type      string `json:"type"`
+	Text      string `json:"text,omitempty"`
+	Tool      string `json:"tool,omitempty"`
+	CallID    string `json:"callID,omitempty"`
+	Mime      string `json:"mime,omitempty"`
+	URL       string `json:"url,omitempty"`
+	// Time is set only on streamed text/reasoning parts. It is nil for every
+	// part built by entriesToMessages, so the POST/GET message bodies are
+	// unchanged, and for tool parts, whose clock lives under state.
+	Time  *partTime       `json:"time,omitempty"`
+	State json.RawMessage `json:"state,omitempty"`
 	// Snapshot follows fileNodeDTO.Ignored: wopr has no snapshot, so it is
 	// always "", present so a strict client decoding the part finds it.
 	Snapshot string `json:"snapshot"`
