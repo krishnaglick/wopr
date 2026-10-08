@@ -1422,7 +1422,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-transcript-parentid-multistep — transcript read API reports a toolResult message as a later assistant message's parentID
 
-- **Status:** READY — surfaced 2026-10-07 by the `serve-transcript-parentid-skips-metadata` spec fan.
+- **Status:** DONE — shipped on `wave-serve-transcript-parentid-multistep`. `nearestMessageAncestor` gained a `wantUser` flag; `entriesToMessages` passes `assistant != nil`, so assistant rows resolve `parentID` to the nearest **user-role** message ancestor while user/toolResult rows keep the nearest-message walk. A later assistant of a multi-step tool turn now reports the turn's initiating user message, matching `eventMapper.turnUserID`. Keep-minimal decision: user/toolResult rows are untouched, so no new values appear for rows the stream does not model. Gate: `TestEntriesToMessagesAssistantParentsOnTurnUserInMultiStepToolTurn` (`u1 → c1 → a1 → t1(toolResult) → c2 → a2`) asserts `a1` and `a2` both parent on `u1`; independently reproduced red pre-fix (`a2` was `t1`) and green post-fix. Serve suite + `make check` green. Residual (out of scope, pre-existing): a later **user** row still reports the prior assistant rather than the stream's `""`; surfaced as `serve-transcript-parentid-userturn` below.
 - **Why:** `nearestMessageAncestor` resolves to the nearest `Base.Type == "message"` ancestor. In a tool-using turn the
   persisted chain is `user → custom → A1 → T1 (toolResult message) → custom → A2`, so `A2`'s transcript `parentID`
   is `T1`, while the stream (`eventMapper.turnUserID`) reports the turn's initiating user message id for **every**
@@ -1432,6 +1432,18 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Files:** `internal/codingagent/serve/serve_handlers.go` (`nearestMessageAncestor`).
 - **Gates:** an assistant transcript `parentID` equals the turn's user message id for a multi-step `A1 → T1 → A2`
   fixture; the serve suite; `make check`.
+
+### serve-transcript-parentid-userturn — transcript read API reports the previous assistant as a later user message's parentID
+
+- **Status:** READY — surfaced 2026-10-07 by the `serve-transcript-parentid-multistep` spec + diff fans.
+- **Why:** the stream emits a user `message.updated` with `parentID: ""` (`internal/codingagent/serve/serve_sse.go`),
+  and captured opencode 1.18.34 frames agree (user messages carry no parentID). But `entriesToMessages` computes a
+  user row's `parentID` with the nearest-message walk, so a later user turn (`… → A_n → U2`) reports `A_n`. Read and
+  stream disagree for user rows; unpinned. Deliberately left out of scope by `serve-transcript-parentid-multistep`
+  to keep its blast radius to assistant rows.
+- **Files:** `internal/codingagent/serve/serve_handlers.go` (`entriesToMessages` parent resolution for user rows).
+- **Gates:** an assertion that a second-user-turn transcript `parentID` equals `""`, matching the stream; the serve
+  suite; `make check`.
 
 ### serve-tool-delta-test-vacuous-equality-loop — `TestToolCallDeltaReachesTheStream`'s cross-source check never runs
 

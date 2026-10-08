@@ -382,6 +382,50 @@ func TestEntriesToMessagesResolvesParentPastMetadata(t *testing.T) {
 	}
 }
 
+// TestEntriesToMessagesAssistantParentsOnTurnUserInMultiStepToolTurn pins that
+// every assistant of a multi-step tool turn reports the turn's initiating user
+// message as its transcript parentID, matching the stream's turnUserID. The
+// chain is u1 → c1 → a1 → t1(toolResult) → c2 → a2; a2's raw parent is c2, whose
+// nearest message ancestor is t1, so a nearest-message walk would report t1 for
+// a2 while a1 reports u1. custom and assistant/toolResult entries are
+// hand-written for explicit parent links (userEntry hardcodes parentId:null).
+func TestEntriesToMessagesAssistantParentsOnTurnUserInMultiStepToolTurn(t *testing.T) {
+	dir := t.TempDir()
+	id := "parent-multistep"
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	path := writeTestSession(t, dir, id, []string{
+		userEntry("u1", "hello"),
+		`{"type":"custom","id":"c1","parentId":"u1","timestamp":"` + ts + `","customType":"harness-online-context-state-v1","data":{}}`,
+		`{"type":"message","id":"a1","parentId":"c1","timestamp":"` + ts + `","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"echo hi"}}],"api":"faux","provider":"test-faux","model":"faux-1","usage":{"input":1,"output":1,"cache":{"read":0,"write":0}},"stopReason":"toolUse","timestamp":1704067201000}}`,
+		`{"type":"message","id":"t1","parentId":"a1","timestamp":"` + ts + `","message":{"role":"toolResult","toolCallId":"call_1","toolName":"bash","content":[{"type":"text","text":"hi\n"}],"isError":false,"timestamp":1704067202000}}`,
+		`{"type":"custom","id":"c2","parentId":"t1","timestamp":"` + ts + `","customType":"harness-online-context-state-v1","data":{}}`,
+		`{"type":"message","id":"a2","parentId":"c2","timestamp":"` + ts + `","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"api":"faux","provider":"test-faux","model":"faux-1","usage":{"input":1,"output":1,"cache":{"read":0,"write":0}},"stopReason":"stop","timestamp":1704067203000}}`,
+	})
+
+	entries, err := tailEntries(path, maxLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := entriesToMessages(entries, id, "/test", "/test", "", "")
+
+	parents := make(map[string]string, len(messages))
+	for _, m := range messages {
+		parents[m.Info.ID] = m.Info.ParentID
+	}
+	for _, tc := range []struct{ id, want string }{
+		{"a1", "u1"},
+		{"a2", "u1"},
+	} {
+		got, ok := parents[tc.id]
+		if !ok {
+			t.Fatalf("assistant %s not in transcript: %+v", tc.id, messages)
+		}
+		if got != tc.want {
+			t.Errorf("%s parentID: expected the turn's user message %q, got %q", tc.id, tc.want, got)
+		}
+	}
+}
+
 // BenchmarkServeListRead benchmarks the list sessions read path.
 func BenchmarkServeListRead(b *testing.B) {
 	for _, entriesPerSession := range []int{400, 800} {
