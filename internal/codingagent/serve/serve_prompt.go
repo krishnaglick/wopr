@@ -48,7 +48,8 @@ type modelRef struct {
 // 204 with no body once the session's single run slot is reserved; a prompt
 // while a run is in flight is queued to run next and answered 204; 404 for a
 // session this server did not start; 409 only while an ask_user question is
-// pending; 400 for a directory that is not the server root or a malformed body;
+// pending; 400 for a directory that is not the server root, a malformed body, or
+// a messageID that already names a persisted entry or an in-flight prompt;
 // 413 for a body over maxBodyBytes.
 func (s *Server) promptAsync(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.sessionPreconditions(w, r)
@@ -233,9 +234,9 @@ func (s *Server) decodePromptBody(w http.ResponseWriter, r *http.Request, body *
 
 // resolveMessageID validates the optional client-minted user message id. A
 // value not beginning with "msg" is 400, matching opencode's schema. A value
-// already an entry in this session is 400: wopr's transcript is append-only and
-// has no upsert, so accepting it would duplicate the wire message id. ok=false
-// means the response was already written.
+// already persisted in this session is 400 here: a fast pre-check. Host.Session
+// is authoritative for the in-flight window (a reserved-but-unpersisted id),
+// which this cannot see. ok=false means the response was already written.
 func (s *Server) resolveMessageID(w http.ResponseWriter, sess *codinghost.Session, id string) (string, bool) {
 	if id == "" {
 		return "", true
@@ -310,6 +311,10 @@ func (s *Server) applyModel(sess *codinghost.Session, ref modelRef) (*errorDTO, 
 func (s *Server) writePromptError(w http.ResponseWriter, err error) {
 	if errors.Is(err, codinghost.ErrSessionBusy) {
 		s.writeJSON(w, http.StatusConflict, errorDTO{Error: "session is busy"})
+		return
+	}
+	if errors.Is(err, codinghost.ErrDuplicateMessageID) {
+		s.writeJSON(w, http.StatusBadRequest, errorDTO{Error: "messageID already exists"})
 		return
 	}
 	s.writeJSON(w, http.StatusInternalServerError, errorDTO{Error: err.Error()})

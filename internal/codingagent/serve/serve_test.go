@@ -4234,3 +4234,64 @@ func TestQueuedPromptMessageIDPreserved(t *testing.T) {
 		t.Fatal("the queued prompt's id was not preserved into the transcript")
 	}
 }
+
+// TestPromptMessageIDDuplicateRejectedWhileBusy pins that two requests carrying
+// the same client messageID cannot both be accepted while the first is still in
+// flight: the id is claimed at accept, before its user message persists, so the
+// second is refused atomically with 400 rather than queued into a second
+// transcript entry under the same id.
+func TestPromptMessageIDDuplicateRejectedWhileBusy(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	// A occupies the run slot; waitForBusy returns while it still holds it.
+	first, body := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"TUI_LIVE_STREAM_PAUSE"}]}`)
+	if first != http.StatusNoContent {
+		t.Fatalf("first prompt_async: expected 204, got %d (%s)", first, body)
+	}
+	waitForBusy(t, baseURL, id)
+
+	// B is accepted and queued under msg_race; its user message has not persisted
+	// yet, so the id is only visible via host's in-flight reservation.
+	queued, body := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"messageID":"msg_race","parts":[{"type":"text","text":"reply with exactly: queued-race"}]}`)
+	if queued != http.StatusNoContent {
+		t.Fatalf("queued prompt_async: expected 204, got %d (%s)", queued, body)
+	}
+	// C carries the same id before B persists; it must be refused.
+	duplicate, body := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"messageID":"msg_race","parts":[{"type":"text","text":"reply with exactly: duplicate-race"}]}`)
+	if duplicate != http.StatusBadRequest {
+		t.Fatalf("duplicate prompt_async: expected 400, got %d (%s)", duplicate, body)
+	}
+	if got, want := strings.TrimSpace(string(body)), `{"error":"messageID already exists"}`; got != want {
+		t.Errorf("duplicate prompt_async body: expected %s, got %s", want, got)
+	}
+	t.Cleanup(func() { _, _ = postJSON(t, baseURL, "/session/"+id+"/abort", `{}`) })
+
+	// waitForIdle can observe the gap between the first run settling and the
+	// queued one starting, so poll the transcript for the persisted id.
+	deadline := time.Now().Add(30 * time.Second)
+	var entries []messageDTO
+	for time.Now().Before(deadline) && len(entries) == 0 {
+		for _, m := range readTranscript(t, baseURL, id) {
+			if m.Info.Role == "user" && m.Info.ID == "msg_race" {
+				entries = append(entries, m)
+			}
+		}
+		if len(entries) == 0 {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one user entry with id %q, got %d", "msg_race", len(entries))
+	}
+	text := ""
+	for _, p := range entries[0].Parts {
+		text += p.Text
+	}
+	if !strings.Contains(text, "queued-race") {
+		t.Errorf("persisted msg_race text: expected it to contain %q, got %q", "queued-race", text)
+	}
+}

@@ -17,6 +17,11 @@ type Services = coding.Services
 // ErrSessionBusy is returned when a session already has a run in flight.
 var ErrSessionBusy = errors.New("host: session already has a run in flight")
 
+// ErrDuplicateMessageID is returned when a client-minted entry id already names a
+// persisted entry or an in-flight prompt. wopr's transcript is append-only and has
+// no upsert, so exactly one entry may carry a given id.
+var ErrDuplicateMessageID = errors.New("host: messageID already exists")
+
 // ErrNoModel is returned when StartOptions.Model is not set.
 var ErrNoModel = errors.New("host: StartOptions.Model is required")
 
@@ -107,9 +112,10 @@ func (h *Host) Start(opts StartOptions) (*Session, error) {
 	}
 	id := sess.ID()
 	wrapped := &Session{
-		host: h,
-		id:   id,
-		sess: sess,
+		host:        h,
+		id:          id,
+		sess:        sess,
+		inFlightIDs: make(map[string]struct{}),
 	}
 	h.mu.Lock()
 	if _, exists := h.registry[id]; exists {
@@ -206,6 +212,15 @@ type Session struct {
 	queueMu sync.Mutex
 	queued  []queuedPrompt
 
+	// idsMu guards inFlightIDs: client-minted entry ids reserved by an accepted
+	// prompt that has not yet settled. It is a leaf lock: it may be taken while
+	// run is held (releaseEntryID runs under runAndRelease before releaseRun
+	// unlocks), but no path acquires run or queueMu while holding idsMu, so it
+	// cannot invert with the queueMu→run (PromptContent) / run→queueMu
+	// (releaseSlot) pair.
+	idsMu       sync.Mutex
+	inFlightIDs map[string]struct{}
+
 	// cancel aborts the reserved run — the run this Session started on its own
 	// reservation — from that reservation until releaseRun clears it. A non-nil
 	// cancel therefore means a reserved run is outstanding and has not yet been
@@ -232,6 +247,38 @@ func (s *Session) Inner() *coding.Session {
 	return s.sess
 }
 
+// reserveEntryID claims a client-minted entry id for a prompt about to be accepted.
+// The claim and the check are one critical section over both the persisted entry
+// map and the in-flight set, so two same-id requests arriving before the first
+// persists cannot both pass. An empty id is a no-op: server-minted ids cannot
+// collide with a client resend.
+func (s *Session) reserveEntryID(id string) error {
+	if id == "" {
+		return nil
+	}
+	s.idsMu.Lock()
+	defer s.idsMu.Unlock()
+	if _, exists := s.sess.EntryByID(id); exists {
+		return ErrDuplicateMessageID
+	}
+	if _, exists := s.inFlightIDs[id]; exists {
+		return ErrDuplicateMessageID
+	}
+	s.inFlightIDs[id] = struct{}{}
+	return nil
+}
+
+// releaseEntryID drops a reservation after persistence (or after acceptance failed
+// before a run owned it), so a later resend is rejected by the persisted check.
+func (s *Session) releaseEntryID(id string) {
+	if id == "" {
+		return
+	}
+	s.idsMu.Lock()
+	delete(s.inFlightIDs, id)
+	s.idsMu.Unlock()
+}
+
 // Prompt sends a prompt to the session. It returns ErrSessionBusy if the
 // session already has a run in flight.
 func (s *Session) Prompt(ctx context.Context, text string) error {
@@ -245,8 +292,10 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 
 // PromptContent reserves the session's single run slot and starts the run on a
 // goroutine it owns, returning as soon as the reservation lands. A taken slot
-// queues content to run when the current run settles, so this method always
-// returns nil. Everything after the reservation is reported on the event bus.
+// queues content to run when the current run settles, so a busy session returns
+// nil after queueing. It returns ErrDuplicateMessageID when entryID already names
+// a persisted entry or an in-flight prompt. Everything after the reservation is
+// reported on the event bus.
 //
 // entryID, when non-empty, is the client-minted transcript entry id the user
 // message persists under.
@@ -255,6 +304,9 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 // an http.Request.Context is cancelled the moment the handler returns, which
 // would kill the run this just accepted while the caller still answered 204.
 func (s *Session) PromptContent(ctx context.Context, content []ai.UserContentBlock, entryID string) error {
+	if err := s.reserveEntryID(entryID); err != nil {
+		return err
+	}
 	s.queueMu.Lock()
 	if !s.run.TryLock() {
 		s.queued = append(s.queued, queuedPrompt{content: content, entryID: entryID})
@@ -268,9 +320,14 @@ func (s *Session) PromptContent(ctx context.Context, content []ai.UserContentBlo
 }
 
 // runAndRelease runs one prompt to settlement, then releases the slot.
-// releaseRun is deferred so a panic cannot wedge the run slot.
+// releaseRun is deferred so a panic cannot wedge the run slot. releaseEntryID is
+// deferred after releaseRun, so it runs first (LIFO) once
+// SendContentWithPreflight has returned: an id whose run persisted a user entry
+// is still rejected afterward by the persisted EntryByID check, and an id whose
+// run ended before persisting is freed for a retry.
 func (s *Session) runAndRelease(ctx context.Context, cancel context.CancelFunc, content []ai.UserContentBlock, entryID string) {
 	defer s.releaseRun(cancel)
+	defer s.releaseEntryID(entryID)
 	_, _ = s.sess.SendContentWithPreflight(ctx, content, entryID, nil)
 }
 
@@ -296,9 +353,11 @@ func (s *Session) releaseSlot() {
 
 // PromptContentWait reserves the same single run slot and blocks until the run
 // settles, returning the messages it produced. It returns ErrSessionBusy when
-// the slot is taken. ctx is detached for the same reason as PromptContent's;
-// the caller abandons the wait on its own cancellation. entryID, when non-empty,
-// is the client-minted transcript entry id the user message persists under.
+// the slot is taken and ErrDuplicateMessageID when entryID already names a
+// persisted entry or an in-flight prompt. ctx is detached for the same reason as
+// PromptContent's; the caller abandons the wait on its own cancellation. entryID,
+// when non-empty, is the client-minted transcript entry id the user message
+// persists under.
 //
 // before, when non-nil, runs once the slot is held and before the turn starts.
 // A caller that mutates session-wide state needs it there: a model swap applied
@@ -306,6 +365,10 @@ func (s *Session) releaseSlot() {
 // refused. A before error aborts the turn, releases the slot, and is returned
 // as is.
 func (s *Session) PromptContentWait(ctx context.Context, content []ai.UserContentBlock, entryID string, before func() error) ([]agent.AgentMessage, error) {
+	if err := s.reserveEntryID(entryID); err != nil {
+		return nil, err
+	}
+	defer s.releaseEntryID(entryID) // covers ErrSessionBusy, before-failure, and success
 	if !s.run.TryLock() {
 		return nil, ErrSessionBusy
 	}
