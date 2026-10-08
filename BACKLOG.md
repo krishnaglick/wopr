@@ -1475,7 +1475,20 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-user-message-nested-model — KKCode crashes "Cannot read properties of undefined (reading 'providerID')"
 
-- **Status:** CLAIMED — wave-serve-user-message-nested-model; surfaced 2026-10-07 driving KKCode against `wopr serve` after the SSE lifecycle fixes.
+- **Status:** DONE — shipped on `wave-serve-user-message-nested-model`, merged into `main` (`--no-ff`). `messageInfoDTO`
+  (`internal/codingagent/serve/serve_dto.go`) gained a value-receiver `MarshalJSON` that branches on `role`: a
+  `"user"` message emits opencode's nested shape (`id,sessionID,role,time,summary:{diffs:[]},agent,model:{providerID,modelID}`)
+  and none of the flat fields, while every other role emits the unchanged flat shape through a methodless `plain` alias.
+  The value receiver is required because the SSE bus and `TestMessageDTODecode` marshal non-addressable values; the GET
+  path would have tolerated a pointer receiver. The existing `assertInfoShape` oracle now dispatches on role to a new
+  shared `assertUserInfoShape`, so `TestMessageInfoShapeMatchesOpencode` and `TestSSEMessageUpdatedShapeMatchesOpencode`
+  stay green on the user row. Gate `TestMessageInfoRoleShapes` covers both callers (`entriesToMessages` read path and
+  `eventMapper.messageEnd` SSE `message.updated`); independently reproduced red pre-fix (13 flat keys, no `model`) /
+  green post-fix. Accepted boundary: the inner `json.Marshal` re-enables HTML escaping, so a GET `path.cwd`/`root`
+  containing `&<>` emits `\u00XX` where it previously emitted raw (decoded values identical; SSE already escaped).
+  Spec: `docs/plans/2026-10-07-serve-user-message-nested-model.md` (planning artifact, not committed). Live KKCode
+  acceptance is deferred to the owner post-merge (non-hermetic, not part of the green gates). Surfaced 2026-10-07
+  driving KKCode against `wopr serve` after the SSE lifecycle fixes.
 - **Why:** opencode's **user** message info is a different shape from the assistant's. Verified live on opencode
   1.18.34: `{id,sessionID,role:"user",time:{created},summary:{diffs:[]},agent,model:{providerID,modelID}}` — a
   **nested** `model` and **no** flat `providerID`/`modelID`. wopr emits the assistant shape for every role: flat

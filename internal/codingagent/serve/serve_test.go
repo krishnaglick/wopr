@@ -2759,9 +2759,19 @@ func assertSessionShape(t *testing.T, body []byte) {
 }
 
 // assertInfoShape asserts every key and JSON kind of message info (sidecar
-// section 5) on an already-decoded info object.
+// section 5) on an already-decoded info object. The shape branches on role: a
+// user message carries opencode's nested model/summary shape, every other role
+// the flat shape.
 func assertInfoShape(t *testing.T, info map[string]json.RawMessage) {
 	t.Helper()
+	var role string
+	if raw, ok := info["role"]; ok {
+		_ = json.Unmarshal(raw, &role)
+	}
+	if role == "user" {
+		assertUserInfoShape(t, info)
+		return
+	}
 	for _, key := range []string{"id", "sessionID", "role", "parentID", "mode", "agent", "modelID", "providerID", "finish"} {
 		assertKind(t, info, key, "string")
 	}
@@ -2778,6 +2788,37 @@ func assertInfoShape(t *testing.T, info map[string]json.RawMessage) {
 	assertKind(t, cache, "write", "number")
 	tm := assertObject(t, info, "time")
 	assertKind(t, tm, "created", "number")
+}
+
+// assertUserInfoShape asserts the nested user-message info shape: exactly the
+// keys id, sessionID, role, time, summary, agent, model; a created time; a
+// summary whose diffs is an array (never null); and a model object. The exact
+// key count is what a flat user object fails on. Shared by assertInfoShape's
+// role branch and TestMessageInfoRoleShapes so the user wire shape has one
+// definition.
+func assertUserInfoShape(t *testing.T, info map[string]json.RawMessage) {
+	t.Helper()
+	want := []string{"id", "sessionID", "role", "time", "summary", "agent", "model"}
+	if len(info) != len(want) {
+		keys := make([]string, 0, len(info))
+		for k := range info {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		t.Fatalf("user info keys = %v, want %v", keys, want)
+	}
+	for _, key := range []string{"id", "sessionID", "role", "agent"} {
+		assertKind(t, info, key, "string")
+	}
+	tm := assertObject(t, info, "time")
+	assertKind(t, tm, "created", "number")
+	summary := assertObject(t, info, "summary")
+	if diffs := assertArray(t, summary, "diffs"); len(diffs) != 0 {
+		t.Errorf("user info summary.diffs = %v, want []", diffs)
+	}
+	model := assertObject(t, info, "model")
+	assertKind(t, model, "providerID", "string")
+	assertKind(t, model, "modelID", "string")
 }
 
 // assertMessageShape asserts one {info, parts} message and every part's keys.
@@ -3067,6 +3108,96 @@ func TestSSEMessageUpdatedShapeMatchesOpencode(t *testing.T) {
 	if !found {
 		t.Fatalf("no message.updated frame carried an info object; frames: %s", summarize(frames))
 	}
+}
+
+// TestMessageInfoRoleShapes pins the one place the wire shape branches on role:
+// a user message carries a nested model and summary; an assistant message keeps
+// the flat shape. Both builder callers are covered because the client crashed on
+// the GET read path and the SSE path alike: entriesToMessages for the read path,
+// eventMapper.messageEnd for the SSE user message.updated. Assertions go through
+// assertInfoShape, which decodes the marshaled top-level keys, so a flat user
+// object fails even though the Go struct still has the fields.
+func TestMessageInfoRoleShapes(t *testing.T) {
+	assertModel := func(t *testing.T, info map[string]json.RawMessage) {
+		t.Helper()
+		var model struct {
+			ProviderID string `json:"providerID"`
+			ModelID    string `json:"modelID"`
+		}
+		if err := json.Unmarshal(info["model"], &model); err != nil {
+			t.Fatalf("decode user model: %v", err)
+		}
+		if model.ProviderID != "prov" || model.ModelID != "model" {
+			t.Errorf("user info model = %+v, want prov/model", model)
+		}
+	}
+	infoOf := func(t *testing.T, msg any) map[string]json.RawMessage {
+		t.Helper()
+		top := objKeys(t, mustMarshal(t, msg))
+		info, ok := top["info"]
+		if !ok {
+			t.Fatalf("message has no info key: %s", mustMarshal(t, msg))
+		}
+		return objKeys(t, info)
+	}
+
+	// Read path: GET /session/{id}/message projects entriesToMessages.
+	t.Run("read", func(t *testing.T) {
+		dir := t.TempDir()
+		ts := time.Now().UTC().Format(time.RFC3339Nano)
+		path := writeTestSession(t, dir, "shape", []string{
+			userEntry("u1", "hi"),
+			`{"type":"message","id":"a1","parentId":"u1","timestamp":"` + ts + `","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"api":"faux","provider":"test-faux","model":"faux-1","usage":{"input":1,"output":1,"cache":{"read":0,"write":0}},"stopReason":"stop","timestamp":1704067201000}}`,
+		})
+		entries, err := tailEntries(path, maxLimit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		byID := map[string]messageDTO{}
+		for _, m := range entriesToMessages(entries, "shape", "/test", "/test", "prov", "model") {
+			byID[m.Info.ID] = m
+		}
+		if _, ok := byID["u1"]; !ok {
+			t.Fatalf("user u1 not in transcript: %+v", byID)
+		}
+		userInfo := infoOf(t, byID["u1"])
+		assertInfoShape(t, userInfo) // branches to the nested user shape
+		assertModel(t, userInfo)
+		if _, ok := byID["a1"]; !ok {
+			t.Fatalf("assistant a1 not in transcript: %+v", byID)
+		}
+		assertInfoShape(t, infoOf(t, byID["a1"])) // flat assistant shape
+	})
+
+	// SSE path: the user message.updated the client crashed on. messageEnd emits
+	// the message.updated AND a message.part.updated for each text block
+	// (serve_sse.go:493-503), so locate the updated frame rather than assuming it
+	// is the only event.
+	t.Run("sse_user", func(t *testing.T) {
+		m := &eventMapper{sessionID: "shape", cwd: "/test", root: "/test", providerID: "prov", modelID: "model"}
+		got, err := m.translate(agent.MessageEndEvent{Message: agent.AgentMessage{
+			User: &agent.UserMessage{Role: "user", Content: []ai.UserContentBlock{ai.TextContent{Text: "hi"}}},
+		}}, "u1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) == 0 || got[0].Type != eventMessageUpdated {
+			t.Fatalf("want message.updated first, got %+v", got)
+		}
+		var updated any
+		for _, e := range got {
+			if e.Type == eventMessageUpdated {
+				updated = e.Data
+				break
+			}
+		}
+		if updated == nil {
+			t.Fatalf("no message.updated among %d events: %+v", len(got), got)
+		}
+		info := infoOf(t, updated)
+		assertInfoShape(t, info)
+		assertModel(t, info)
+	})
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────
