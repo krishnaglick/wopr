@@ -1118,7 +1118,7 @@ func TestToolCallDeltaReachesTheStream(t *testing.T) {
 	}
 
 	frames := readSSEUntil(t, resp, func(frames []sseFrame) bool {
-		return toolDeltaPartID(frames) != ""
+		return toolDeltaPartID(frames) != "" && toolUpdatedPartID(frames) != ""
 	})
 	cancel()
 
@@ -1140,19 +1140,25 @@ func TestToolCallDeltaReachesTheStream(t *testing.T) {
 	if !ok || callID == "" {
 		t.Fatalf("a tool delta's partID must carry the call id, got %q", partID)
 	}
+	toolPartSeen := false
 	for _, f := range frames {
 		if f.Name != eventMessagePartUpdated {
 			continue
 		}
-		var payload struct {
-			Part partDTO `json:"part"`
-		}
+		var payload ssePartUpdated
 		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
 			continue
 		}
-		if payload.Part.Type == "tool" && payload.Part.CallID == callID && payload.Part.ID != partID {
+		if payload.Part.Type != "tool" || payload.Part.CallID != callID {
+			continue
+		}
+		toolPartSeen = true
+		if payload.Part.ID != partID {
 			t.Errorf("the tool part and the delta must name one part: %q against %q", payload.Part.ID, partID)
 		}
+	}
+	if !toolPartSeen {
+		t.Fatalf("no tool message.part.updated for call id %q reached the stream; frames: %s", callID, summarize(frames))
 	}
 }
 
@@ -1168,6 +1174,24 @@ func toolDeltaPartID(frames []sseFrame) string {
 		}
 		if payload.Field == "arguments" {
 			return payload.PartID
+		}
+	}
+	return ""
+}
+
+// toolUpdatedPartID returns the id of the first streamed tool
+// message.part.updated, or "" when none has arrived.
+func toolUpdatedPartID(frames []sseFrame) string {
+	for _, f := range frames {
+		if f.Name != eventMessagePartUpdated {
+			continue
+		}
+		var payload ssePartUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Part.Type == "tool" {
+			return payload.Part.ID
 		}
 	}
 	return ""
