@@ -1649,7 +1649,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-async-queue-when-busy — a second `prompt_async` while running returns `409`; opencode returns `204`
 
-- **Status:** READY — surfaced 2026-10-08 in the KKCode proxy log (`prompt_async` → `409` twice) and verified live:
+- **Status:** IN PROGRESS (claimed 2026-10-08, `wave-serve-prompt-async-queue-when-busy`) — surfaced 2026-10-08 in the KKCode proxy log (`prompt_async` → `409` twice) and verified live:
   opencode's `POST /session/{id}/prompt_async` on a busy session returns `204` (accepts/queues), wopr returns `409`
   `application/json`.
 - **Why:** the client allows sending while running (it has no queue UI) and wopr's `409 busy` surfaces as an error.
