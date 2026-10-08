@@ -1539,7 +1539,18 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-sse-turn-frame-parity — KKCode still double-renders and never idles: assistant part is created after its delta, and the message never completes
 
-- **Status:** READY — surfaced 2026-10-08 driving KKCode after `serve-sse-message-lifecycle-parity`: one prompt shows
+- **Status:** DONE — shipped on `wave-serve-sse-turn-frame-parity`, merged into `main` (`--no-ff`). The mapper now emits
+  opencode's per-part frame order: a `message.part.updated` create (empty text, `time:{start}`) precedes each
+  text/reasoning/tool delta, and the block's end emits the final `message.part.updated` with `time:{start,end}`; the final
+  assistant `message.updated` carries `time:{created,completed}` (was `{created}` only), so the client sees the run finish
+  instead of staying busy. `partDTO.Time` and `messageTime.Completed` are `omitempty` pointers set only on the stream, so
+  the persisted transcript and POST/GET message JSON are byte-unchanged. Gate `TestSSETurnFrameParity` asserts the literal
+  part id across create→delta→final in that order, `time:{start}` on create and `{start,end}` on final, and the final
+  assistant `message.updated` with `time.completed` set (the placeholder has none); proven non-vacuous under four
+  mutations (delta-first, dropped part time, dropped completion, drifted id). Spec:
+  `docs/plans/2026-10-08-serve-sse-turn-frame-parity.md` (planning artifact, not committed). Out of scope by decision:
+  `step-start`/`step-finish` (wopr has no snapshot hash or step boundary), `session.diff` (no diff source), and the
+  placeholder `finish` key. Surfaced 2026-10-08 driving KKCode after `serve-sse-message-lifecycle-parity`: one prompt shows
   the reply twice and the client never returns to idle for the next command.
 - **Why:** comparing a full turn's `/global/event` frames from opencode 1.18.34 (`/tmp/oc-turn2.txt`) and wopr
   (`/tmp/wopr-turn2.txt`; regenerate against a running server, do not commit), the per-turn frame lifecycle still

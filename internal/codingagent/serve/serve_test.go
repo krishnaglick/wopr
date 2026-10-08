@@ -1049,7 +1049,11 @@ func TestSSETurnLifecycleParity(t *testing.T) {
 	}
 
 	// 5. A message.part.updated publishes the delta's part under the same id.
+	// The first such frame for the id is now the empty create (Text == ""), so
+	// the final content is asserted once the frame carrying it arrives rather
+	// than on every frame for the id.
 	partSeen := false
+	sawFinal := false
 	for _, f := range frames {
 		if f.Name != eventMessagePartUpdated {
 			continue
@@ -1065,12 +1069,16 @@ func TestSSETurnLifecycleParity(t *testing.T) {
 		if payload.Part.Type != "text" {
 			t.Errorf("part type: expected text, got %q", payload.Part.Type)
 		}
-		if payload.Part.Text != "parity-ok" {
-			t.Errorf("part text: expected %q, got %q", "parity-ok", payload.Part.Text)
+		if payload.Part.Text == "parity-ok" {
+			sawFinal = true
 		}
 	}
 	if !partSeen {
 		t.Fatalf("no message.part.updated for the delta part %q; frames: %s", deltaPartID, summarize(frames))
+	}
+	if !sawFinal {
+		t.Errorf("no message.part.updated carried the final text %q for part %q; frames: %s",
+			"parity-ok", deltaPartID, summarize(frames))
 	}
 
 	// 6. The turn settled.
@@ -1090,6 +1098,158 @@ func TestSSETurnLifecycleParity(t *testing.T) {
 	}
 	if transcriptPartID != deltaPartID {
 		t.Errorf("transcript part id: expected %q, got %q", deltaPartID, transcriptPartID)
+	}
+}
+
+// TestSSETurnFrameParity pins the per-part frame order a client needs to
+// materialise exactly one part per streamed block: an empty create
+// message.part.updated carrying time:{start}, then the text delta, then one
+// timed message.part.updated carrying time:{start,end} when the block ends. It
+// also pins the assistant message's completion clock. Without the create-first
+// order and the timestamps a client (KKCode) shows the reply twice and never
+// returns to idle.
+//
+// Non-vacuity: dropping the delta's createPart leaves the TextEndEvent's create
+// present but after the delta, failing the order check
+// (createIdx < deltaIdx < finalIdx); dropping the part Time stamp leaves no
+// finalIdx for step 2; dropping info.Time.Completed fails step 5; minting a
+// fresh part id per frame fails step 1.
+func TestSSETurnFrameParity(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resp := openSSE(t, baseURL, ctx)
+	defer func() { _ = resp.Body.Close() }()
+
+	status, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"reply with exactly: parity-ok"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async: expected 204, got %d", status)
+	}
+
+	frames := readSSEUntil(t, resp, func(frames []sseFrame) bool {
+		for _, f := range frames {
+			if f.Name == eventSessionIdle {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+
+	assistantID := assistantMessageUpdatedID(frames)
+	if assistantID == "" {
+		t.Fatalf("no assistant message.updated; frames: %s", summarize(frames))
+	}
+	// The literal id, not partID's own output: asserting against the helper
+	// would pass for any helper that is self-consistent.
+	partID := assistantID + "-text-0"
+
+	// 1. Stable id and 2. order. The create, the first delta and the final
+	// timed frame must all name the one literal part id, in that order.
+	createIdx, deltaIdx, finalIdx := -1, -1, -1
+	var createPart, finalPart *partDTO
+	for i, f := range frames {
+		switch f.Name {
+		case eventMessagePartUpdated:
+			var payload ssePartUpdated
+			if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+				continue
+			}
+			if payload.Part.ID != partID {
+				continue
+			}
+			switch {
+			case payload.Part.Time != nil && payload.Part.Time.End == 0:
+				if createIdx == -1 {
+					createIdx = i
+					p := payload.Part
+					createPart = &p
+				}
+			case payload.Part.Time != nil && payload.Part.Time.End > 0 && payload.Part.Text == "parity-ok":
+				if finalIdx == -1 {
+					finalIdx = i
+					p := payload.Part
+					finalPart = &p
+				}
+			}
+		case eventMessagePartDelta:
+			var payload ssePartDelta
+			if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+				continue
+			}
+			if payload.PartID == partID && deltaIdx == -1 {
+				deltaIdx = i
+			}
+		}
+	}
+	if createIdx == -1 || deltaIdx == -1 || finalIdx == -1 {
+		t.Fatalf("part %q: expected create, delta and final frames, got create=%d delta=%d final=%d; frames: %s",
+			partID, createIdx, deltaIdx, finalIdx, summarize(frames))
+	}
+	if createIdx >= deltaIdx || deltaIdx >= finalIdx {
+		t.Errorf("part %q frame order: create=%d delta=%d final=%d, want create < delta < final",
+			partID, createIdx, deltaIdx, finalIdx)
+	}
+
+	// 3. Create time: opencode's empty part with time:{start}.
+	if createPart.Text != "" {
+		t.Errorf("create frame text: expected empty, got %q", createPart.Text)
+	}
+	if createPart.Time.Start <= 0 {
+		t.Errorf("create frame time.start: expected > 0, got %d", createPart.Time.Start)
+	}
+	if createPart.Time.End != 0 {
+		t.Errorf("create frame time.end: expected 0 (omitted), got %d", createPart.Time.End)
+	}
+
+	// 4. Final time: same start, end at or after it.
+	if finalPart.Time.Start != createPart.Time.Start {
+		t.Errorf("final frame time.start: expected %d, got %d", createPart.Time.Start, finalPart.Time.Start)
+	}
+	if finalPart.Time.End < finalPart.Time.Start {
+		t.Errorf("final frame time.end %d precedes time.start %d", finalPart.Time.End, finalPart.Time.Start)
+	}
+
+	// 5. Message completion: the placeholder carries no completed time, the
+	// last assistant message.updated does.
+	var assistantUpdates []sseMessageUpdated
+	for _, f := range frames {
+		if f.Name != eventMessageUpdated {
+			continue
+		}
+		var payload sseMessageUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Info.Role == "assistant" {
+			assistantUpdates = append(assistantUpdates, payload)
+		}
+	}
+	if len(assistantUpdates) < 2 {
+		t.Fatalf("expected a placeholder and a completion assistant message.updated, got %d; frames: %s",
+			len(assistantUpdates), summarize(frames))
+	}
+	first := assistantUpdates[0]
+	last := assistantUpdates[len(assistantUpdates)-1]
+	if first.Info.Time.Completed != nil {
+		t.Errorf("placeholder assistant message.updated carries completed=%d, want nil", *first.Info.Time.Completed)
+	}
+	if last.Info.Time.Completed == nil || *last.Info.Time.Completed <= 0 {
+		t.Errorf("final assistant message.updated completed = %v, want > 0; frames: %s",
+			last.Info.Time.Completed, summarize(frames))
+	}
+	// The created clock is the message's own, stamped at start and carried
+	// unchanged onto the completion frame, so the two assistant frames agree.
+	if last.Info.Time.Created != first.Info.Time.Created {
+		t.Errorf("final assistant message.updated created = %d, want the placeholder's %d; frames: %s",
+			last.Info.Time.Created, first.Info.Time.Created, summarize(frames))
+	}
+	if last.Info.Time.Completed != nil && *last.Info.Time.Completed < last.Info.Time.Created {
+		t.Errorf("final assistant message.updated completed %d precedes created %d; frames: %s",
+			*last.Info.Time.Completed, last.Info.Time.Created, summarize(frames))
 	}
 }
 
@@ -1240,17 +1400,24 @@ func TestToolCallDeltaAgreesWithThePartItCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	if len(got) != 1 || got[0].Type != eventMessagePartDelta {
-		t.Fatalf("an id-less tool call must still stream its arguments, got %+v", got)
+	// The first frame creates the part on first sight and the second streams its
+	// arguments; a delta before its create is the frame order the client
+	// mis-renders.
+	if len(got) != 2 || got[0].Type != eventMessagePartUpdated || got[1].Type != eventMessagePartDelta {
+		t.Fatalf("an id-less tool call must create then stream its arguments, got %+v", got)
+	}
+	var createPayload ssePartUpdated
+	if err := json.Unmarshal(mustMarshal(t, got[0].Data), &createPayload); err != nil {
+		t.Fatalf("decode the create: %v", err)
 	}
 	var payload ssePartDelta
-	if err := json.Unmarshal(mustMarshal(t, got[0].Data), &payload); err != nil {
+	if err := json.Unmarshal(mustMarshal(t, got[1].Data), &payload); err != nil {
 		t.Fatalf("decode the delta: %v", err)
 	}
 	// The same empty call id toolPart and the transcript produce, so the delta
 	// matches the part it completes.
-	if want := "sess-guard-tool-"; payload.PartID != want {
-		t.Errorf("partID: expected %q, got %q", want, payload.PartID)
+	if want := "sess-guard-tool-"; createPayload.Part.ID != want || payload.PartID != want {
+		t.Errorf("partID: expected %q on both create and delta, got create %q delta %q", want, createPayload.Part.ID, payload.PartID)
 	}
 
 	streamed := &ai.AssistantMessage{Content: []ai.AssistantContentBlock{ai.ToolCall{ID: "call-9", Name: "bash"}}}
@@ -1259,10 +1426,10 @@ func TestToolCallDeltaAgreesWithThePartItCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	if len(got) != 1 || got[0].Type != eventMessagePartDelta {
-		t.Fatalf("a delta with a resolvable call id must emit one message.part.delta, got %+v", got)
+	if len(got) != 2 || got[0].Type != eventMessagePartUpdated || got[1].Type != eventMessagePartDelta {
+		t.Fatalf("a delta with a resolvable call id must create then emit one message.part.delta, got %+v", got)
 	}
-	if err := json.Unmarshal(mustMarshal(t, got[0].Data), &payload); err != nil {
+	if err := json.Unmarshal(mustMarshal(t, got[1].Data), &payload); err != nil {
 		t.Fatalf("decode the delta: %v", err)
 	}
 	if want := "sess-guard-tool-call-9"; payload.PartID != want {
