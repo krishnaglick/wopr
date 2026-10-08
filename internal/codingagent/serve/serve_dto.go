@@ -88,6 +88,49 @@ type messageInfoDTO struct {
 	Finish     string        `json:"finish"`
 }
 
+// messageModel is the nested model object opencode's user Message carries.
+type messageModel struct {
+	ProviderID string `json:"providerID"`
+	ModelID    string `json:"modelID"`
+}
+
+// messageSummary is the user Message's file-diff summary. wopr records no
+// per-message diffs, so Diffs is always the empty array the client requires,
+// never null.
+type messageSummary struct {
+	Diffs []json.RawMessage `json:"diffs"`
+}
+
+// MarshalJSON emits opencode's user Message shape for role "user" and the flat
+// assistant shape for every other role. The shapes are structurally different:
+// the client reads userMessage.model.providerID, which the flat shape cannot
+// supply. The receiver is a value receiver because the SSE bus and
+// TestMessageDTODecode marshal non-addressable messageInfoDTO values, where a
+// pointer-receiver MarshalJSON would be skipped.
+func (m messageInfoDTO) MarshalJSON() ([]byte, error) {
+	if m.Role == "user" {
+		return json.Marshal(struct {
+			ID        string         `json:"id"`
+			SessionID string         `json:"sessionID"`
+			Role      string         `json:"role"`
+			Time      messageTime    `json:"time"`
+			Summary   messageSummary `json:"summary"`
+			Agent     string         `json:"agent"`
+			Model     messageModel   `json:"model"`
+		}{
+			ID:        m.ID,
+			SessionID: m.SessionID,
+			Role:      m.Role,
+			Time:      m.Time,
+			Summary:   messageSummary{Diffs: []json.RawMessage{}},
+			Agent:     m.Agent,
+			Model:     messageModel{ProviderID: m.ProviderID, ModelID: m.ModelID},
+		})
+	}
+	type plain messageInfoDTO
+	return json.Marshal(plain(m))
+}
+
 // messagePath is the message's {cwd,root} object. cwd is the session's own
 // working directory, or the resolved server root when the session has none.
 type messagePath struct {
