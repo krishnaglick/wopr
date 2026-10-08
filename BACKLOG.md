@@ -1778,7 +1778,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-message-id-duplicate-race — a same-`messageID` resend before the first prompt persists is accepted twice
 
-- **Status:** DONE — 2026-10-08, merged into `main` (see RESUME.md for the merge commit).
+- **Status:** DONE — shipped 2026-10-08 on `wave-serve-prompt-message-id-duplicate-race` (merge recorded in RESUME.md).
 - **Why:** `resolveMessageID` (`internal/codingagent/serve/serve_prompt.go`) rejects a duplicate client id by
   checking the persisted entry map (`codinghost.Session.Inner().EntryByID`). A prompt accepted while the session is
   busy is only queued (`host.Session.PromptContent`), and even a running prompt's user message is absent from `byID`

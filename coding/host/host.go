@@ -213,10 +213,11 @@ type Session struct {
 	queued  []queuedPrompt
 
 	// idsMu guards inFlightIDs: client-minted entry ids reserved by an accepted
-	// prompt that has not yet settled. It is only ever taken alone — never while
-	// holding run or queueMu — because PromptContent takes queueMu then run,
-	// releaseSlot takes queueMu under run, and putting the id set under queueMu
-	// would create run → queueMu against queueMu → run.
+	// prompt that has not yet settled. It is a leaf lock: it may be taken while
+	// run is held (releaseEntryID runs under runAndRelease before releaseRun
+	// unlocks), but no path acquires run or queueMu while holding idsMu, so it
+	// cannot invert with the queueMu→run (PromptContent) / run→queueMu
+	// (releaseSlot) pair.
 	idsMu       sync.Mutex
 	inFlightIDs map[string]struct{}
 
@@ -320,8 +321,10 @@ func (s *Session) PromptContent(ctx context.Context, content []ai.UserContentBlo
 
 // runAndRelease runs one prompt to settlement, then releases the slot.
 // releaseRun is deferred so a panic cannot wedge the run slot. releaseEntryID is
-// deferred after releaseRun (LIFO: it runs first), so the id is dropped only once
-// SendContentWithPreflight has returned and the user entry is in byID.
+// deferred after releaseRun, so it runs first (LIFO) once
+// SendContentWithPreflight has returned: an id whose run persisted a user entry
+// is still rejected afterward by the persisted EntryByID check, and an id whose
+// run ended before persisting is freed for a retry.
 func (s *Session) runAndRelease(ctx context.Context, cancel context.CancelFunc, content []ai.UserContentBlock, entryID string) {
 	defer s.releaseRun(cancel)
 	defer s.releaseEntryID(entryID)
