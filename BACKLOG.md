@@ -1778,7 +1778,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-message-id-duplicate-race — a same-`messageID` resend before the first prompt persists is accepted twice
 
-- **Status:** IN PROGRESS — claimed 2026-10-08 on `wave-serve-prompt-message-id-duplicate-race`.
+- **Status:** DONE — 2026-10-08, merged into `main` (see RESUME.md for the merge commit).
 - **Why:** `resolveMessageID` (`internal/codingagent/serve/serve_prompt.go`) rejects a duplicate client id by
   checking the persisted entry map (`codinghost.Session.Inner().EntryByID`). A prompt accepted while the session is
   busy is only queued (`host.Session.PromptContent`), and even a running prompt's user message is absent from `byID`
@@ -1790,3 +1790,24 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   (`PromptContent`/`PromptContentWait` — the atomic seam if a host-side in-flight-id set is chosen).
 - **Gates:** a test that sends the same `messageID` twice across the busy window and pins the chosen semantics
   (reject the second, or make it idempotent); the serve and host suites; `make check`.
+- **Landed:** Rejection is now atomic. `host.Session` gained `idsMu` + `inFlightIDs`; `reserveEntryID` checks the
+  persisted `EntryByID` map and the in-flight set in one critical section and claims the id, so two same-id requests
+  cannot both pass before the first persists. `PromptContent` reserves before the queue/run decision (the id survives
+  the busy window); `PromptContentWait` reserves before `run.TryLock` and releases via one `defer`; `runAndRelease`
+  releases after `SendContentWithPreflight` returns (persistence done). serve keeps its persisted `EntryByID`
+  pre-check as a fast path; `writePromptError` maps the new `ErrDuplicateMessageID` to `400 {"error":"messageID
+  already exists"}`. `idsMu` is taken alone, avoiding the `queueMu→run`/`run→queueMu` inversion.
+- **Gate:** `TestPromptMessageIDDuplicateRejectedWhileBusy` (serve) holds A via `TUI_LIVE_STREAM_PAUSE`, queues B with
+  `messageID:"msg_race"`, then sends C with the same id before B persists → C is `400` and the transcript holds exactly
+  one `msg_race` user entry (B's text). Independently reproduced red by neutralizing `reserveEntryID` (C 204s) then
+  green; `-race` clean; all gates green.
+- **Observed (opencode divergence, recorded):** probed opencode 1.18.34 live at `http://100.109.237.16:4096` — it
+  does NOT refuse a duplicate `messageID`: both `/prompt_async` calls return `204` and the second request's parts are
+  merged into the one id-keyed user message (upsert), with the run not repeated; the same holds on the synchronous
+  `/message`. wopr keeps its ratified **reject** semantics (append-only transcript, no upsert); matching opencode's
+  merge is out of scope.
+- **Ratified behavior changes:** a same-id `/message` while its own run is active now answers `400` (duplicate) rather
+  than `409` (busy) — a duplicate id is the more specific error; a busy `/message` with a fresh id briefly claims then
+  releases the id, so two concurrent same-id busy requests may answer `400` instead of `409` (both rejections of a run
+  that never happened). No existing test pinned either case. The host `reserveEntryID` `EntryByID` branch is untested
+  (serve's pre-check masks it); the in-flight branch is covered by the gate.
