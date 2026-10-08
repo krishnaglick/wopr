@@ -1356,7 +1356,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-session-model-from-change-entry — disk-only session `model` reports the server default, not the session's own last model
 
-- **Status:** READY — surfaced 2026-10-07 by the `serve-kkcode-dto-shape-parity` wave.
+- **Status:** DONE — shipped on `wave-serve-session-model-from-change-entry`, merged into `main`. `sessionRecord` now carries `ModelID`/`ModelProvider`, read from the same `walkBack` tail `sessionRecordAt` already parses for the session list (no second file read), and `buildSessionDTO` reports it between the live `Model()` and the server `modelSpec` fallback. Gate `TestDiskSessionModelFromChangeEntry`: disk-only session with `model_change` `anthropic/claude-x` reports that model, and one with no `model_change` still reports the server default `test-faux/faux-1`; independently reproduced red pre-fix / green post-fix. Accepted boundaries: an empty-provider `model_change` is reported verbatim (`providerID:""`), and a `model_change` beyond the 32 KiB `metaProbeBytes` tail bound is not seen. Surfaced 2026-10-07 by the `serve-kkcode-dto-shape-parity` wave.
 - **Why:** `buildSessionDTO` has no model in `sessionRecord` (`serve_read.go`), so a session with no live
   counterpart reports the server's current `modelSpec` as `session.model`. A session last used with another
   model, or created by another server run, is misreported. The transcript already records it in the newest

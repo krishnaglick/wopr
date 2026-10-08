@@ -132,13 +132,15 @@ func walkBack(path string, byteLimit int64, stop walkStop) ([][]byte, error) {
 // ─── sessionRecord types ─────────────────────────────────────────────────
 
 type sessionRecord struct {
-	ID       string
-	Header   icodingagent.SessionHeader
-	Name     string
-	Archived *int64
-	Path     string
-	ModTime  time.Time
-	HasFile  bool
+	ID            string
+	Header        icodingagent.SessionHeader
+	Name          string
+	Archived      *int64
+	ModelID       string
+	ModelProvider string
+	Path          string
+	ModTime       time.Time
+	HasFile       bool
 }
 
 // sessionPath maps a session id to its transcript file in dir.
@@ -204,6 +206,7 @@ func sessionRecordAt(path string) (sessionRecord, bool) {
 
 	var name string
 	var archived *int64
+	var modelID, modelProvider string
 	// archivedSet records that a session_archive entry carrying an "archived"
 	// key has been consumed, whether or not it latched a value: the writer
 	// clears the stamp with a null, which latches nothing.
@@ -218,6 +221,12 @@ func sessionRecordAt(path string) (sessionRecord, bool) {
 			var sie icodingagent.SessionInfoEntry
 			if err := json.Unmarshal(rec, &sie); err == nil {
 				name = sie.Name
+			}
+		}
+		if base.Type == "model_change" && modelID == "" {
+			var mce icodingagent.ModelChangeEntry
+			if err := json.Unmarshal(rec, &mce); err == nil && mce.ModelID != "" {
+				modelID, modelProvider = mce.ModelID, mce.Provider
 			}
 		}
 		if base.Type == "custom" && !archivedSet {
@@ -276,13 +285,15 @@ func sessionRecordAt(path string) (sessionRecord, bool) {
 	}
 
 	return sessionRecord{
-		ID:       header.ID,
-		Header:   header,
-		Name:     name,
-		Archived: archived,
-		Path:     path,
-		ModTime:  stat.ModTime(),
-		HasFile:  true,
+		ID:            header.ID,
+		Header:        header,
+		Name:          name,
+		Archived:      archived,
+		ModelID:       modelID,
+		ModelProvider: modelProvider,
+		Path:          path,
+		ModTime:       stat.ModTime(),
+		HasFile:       true,
 	}, true
 }
 

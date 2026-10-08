@@ -69,6 +69,11 @@ func userEntry(id, text string) string {
 	return `{"type":"message","id":"` + id + `","parentId":null,"timestamp":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","message":{"role":"user","content":[{"type":"text","text":"` + text + `"}],"timestamp":` + strconv.FormatInt(time.Now().UnixMilli(), 10) + `}}`
 }
 
+// modelChangeEntry returns a model_change entry JSON.
+func modelChangeEntry(id, provider, modelID string) string {
+	return `{"type":"model_change","id":"` + id + `","parentId":null,"timestamp":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","provider":"` + provider + `","modelId":"` + modelID + `"}`
+}
+
 // infoEntry returns a session_info entry JSON.
 func infoEntry(id, name string) string {
 	return `{"type":"session_info","id":"` + id + `","parentId":null,"timestamp":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","name":"` + name + `"}`
