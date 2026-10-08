@@ -344,6 +344,22 @@ func TestMessageAnswers200WithTheFinishedAssistantMessage(t *testing.T) {
 	if want := dto.Info.ID + "-text-0"; dto.Parts[0].ID != want {
 		t.Errorf("parts[0].id: expected %q, got %q", want, dto.Parts[0].ID)
 	}
+
+	// The /message response threads the assistant reply onto the initiating
+	// user message, so POST, GET and the stream agree on the parentID.
+	var userID string
+	for _, m := range readTranscript(t, baseURL, id) {
+		if m.Info.Role == "user" {
+			userID = m.Info.ID
+			break
+		}
+	}
+	if userID == "" {
+		t.Fatal("no user message in the transcript")
+	}
+	if dto.Info.ParentID != userID {
+		t.Errorf("info.parentID: expected the initiating user message %q, got %q", userID, dto.Info.ParentID)
+	}
 }
 
 // TestMessageAnswers404ForAnUnknownSession verifies the not-live case.

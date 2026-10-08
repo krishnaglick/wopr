@@ -1062,12 +1062,41 @@ func finishFromStopReason(reason ai.StopReason) string {
 	return string(reason)
 }
 
+// nearestMessageAncestor returns the id of the nearest ancestor entry whose
+// Base.Type is "message", following parentId links through non-message entries.
+// Online Context Compact interposes a custom harness-online-context-state-v1
+// entry between the user message and the assistant, so the assistant's raw
+// parentId names a non-message entry. It returns "" when the chain leaves byID
+// or ends without a message ancestor, and walks at most len(byID) hops so a
+// cycle cannot spin.
+func nearestMessageAncestor(byID map[string]icodingagent.SessionEntry, e icodingagent.SessionEntry) string {
+	for range len(byID) {
+		if e.Base.ParentID == nil {
+			return ""
+		}
+		parent, ok := byID[*e.Base.ParentID]
+		if !ok {
+			return ""
+		}
+		if parent.Base.Type == "message" {
+			return parent.Base.ID
+		}
+		e = parent
+	}
+	return ""
+}
+
 // entriesToMessages projects transcript entries into messageDTOs. It reads no
 // Server state: cwd/root and the model fallback are passed by the caller.
 func entriesToMessages(entries []icodingagent.SessionEntry, sessionID, cwd, root,
 	fallbackProvider, fallbackModel string) []messageDTO {
 	messages := make([]messageDTO, 0)
 	var pendingTool map[string]*messageDTO // callID -> messageDTO with pending tool part
+
+	byID := make(map[string]icodingagent.SessionEntry, len(entries))
+	for _, e := range entries {
+		byID[e.Base.ID] = e
+	}
 
 	for _, e := range entries {
 		if e.Base.Type != "message" {
@@ -1116,10 +1145,7 @@ func entriesToMessages(entries []icodingagent.SessionEntry, sessionID, cwd, root
 			content = nil
 		}
 
-		parentID := ""
-		if e.Base.ParentID != nil {
-			parentID = *e.Base.ParentID
-		}
+		parentID := nearestMessageAncestor(byID, e)
 		created := parseRFC3339NanoToMillis(e.Base.Timestamp)
 
 		msg := messageDTO{

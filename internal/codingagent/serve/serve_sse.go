@@ -346,8 +346,11 @@ type eventMapper struct {
 	// parent-chains every assistant message of a turn to that user message, so
 	// each assistant message.updated reports it as parentID. It is deliberately
 	// NOT the raw persisted parent: the per-request
-	// harness-online-context-state-v1 custom entry is interposed between the two,
-	// so entriesToMessages (the transcript read API) reports a different value.
+	// harness-online-context-state-v1 custom entry is interposed between the two.
+	// The transcript read API resolves past that entry to the same user id in the
+	// single-assistant case, so stream and read agree there; a later assistant of
+	// a multi-step tool turn still parents on its toolResult in the read API
+	// (tracked as serve-transcript-parentid-multistep).
 	// It is per-session, not per-run: a run that emits no new user message_end
 	// (no Continue endpoint exists today) leaves the previous turn's value, and
 	// an assistant frame then reports whatever turn last set it.

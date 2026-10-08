@@ -343,6 +343,45 @@ func TestResolveInRoot(t *testing.T) {
 	}
 }
 
+// TestEntriesToMessagesResolvesParentPastMetadata pins that an assistant
+// message reports the nearest MESSAGE ancestor as its parentID, not the raw
+// parentId. Online Context Compact interposes a custom
+// harness-online-context-state-v1 entry between the user message and the
+// assistant, so the raw parentId names a non-message entry. userEntry cannot
+// build the custom/assistant entries or their parent links (it hardcodes
+// type:message and parentId:null), so those two are hand-written.
+func TestEntriesToMessagesResolvesParentPastMetadata(t *testing.T) {
+	dir := t.TempDir()
+	id := "parent-past-metadata"
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	path := writeTestSession(t, dir, id, []string{
+		userEntry("u1", "hello"),
+		`{"type":"custom","id":"c1","parentId":"u1","timestamp":"` + ts + `","customType":"harness-online-context-state-v1","data":{}}`,
+		`{"type":"message","id":"a1","parentId":"c1","timestamp":"` + ts + `","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"api":"faux","provider":"test-faux","model":"faux-1","usage":{"input":1,"output":1,"cache":{"read":0,"write":0}},"stopReason":"stop","timestamp":1704067201000}}`,
+	})
+
+	entries, err := tailEntries(path, maxLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := entriesToMessages(entries, id, "/test", "/test", "", "")
+
+	var got string
+	found := false
+	for _, m := range messages {
+		if m.Info.ID == "a1" {
+			got = m.Info.ParentID
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("assistant a1 not in transcript: %+v", messages)
+	}
+	if got != "u1" {
+		t.Errorf("a1 parentID: expected the nearest message ancestor %q, got %q", "u1", got)
+	}
+}
+
 // BenchmarkServeListRead benchmarks the list sessions read path.
 func BenchmarkServeListRead(b *testing.B) {
 	for _, entriesPerSession := range []int{400, 800} {
