@@ -1506,7 +1506,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-delete-session-archives — `DELETE /session/{id}` answers 501; archive on delete and hide archived from `/experimental/session`
 
-- **Status:** READY — surfaced 2026-10-07 in the KKCode proxy log (two `DELETE /session/{id}` → `501`). Owner decision
+- **Status:** CLAIMED — wave-serve-delete-session-archives; surfaced 2026-10-07 in the KKCode proxy log (two `DELETE /session/{id}` → `501`). Owner decision
   2026-10-08: **archive on delete** rather than hard-delete, so a mistaken delete is recoverable; KKCode has an archive.
 - **Why:** opencode implements `DELETE /session/{id}` (`200 application/json true`) as a **hard delete**. wopr answers
   `501`, so the client's delete silently fails. wopr already has archiving: `PATCH /session/{id}` with
