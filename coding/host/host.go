@@ -192,6 +192,13 @@ type Session struct {
 	sess *coding.Session
 	run  sync.Mutex
 
+	// queueMu serializes accepting a prompt and handing the run slot off, so a
+	// prompt cannot be appended after s.run is released but before the releasing
+	// run observes it. queued holds prompts that arrived while the slot was held,
+	// oldest first.
+	queueMu sync.Mutex
+	queued  [][]ai.UserContentBlock
+
 	// cancel aborts the run this Session owns, from the reservation until the
 	// run settles. RequestAbort only reaches a run whose cancel coding has
 	// already stored, which happens after beginAgentRun — inside sendContent,
@@ -217,29 +224,54 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 	if !s.run.TryLock() {
 		return ErrSessionBusy
 	}
-	defer s.run.Unlock()
+	defer s.releaseSlot()
 	_, err := s.sess.Send(ctx, text)
 	return err
 }
 
 // PromptContent reserves the session's single run slot and starts the run on a
-// goroutine it owns, returning as soon as the reservation lands. It returns
-// ErrSessionBusy synchronously when the slot is taken. Everything after the
-// reservation is reported on the event bus.
+// goroutine it owns, returning as soon as the reservation lands. A taken slot
+// queues content to run when the current run settles, so this method always
+// returns nil. Everything after the reservation is reported on the event bus.
 //
 // ctx is detached inside this method: an accepted run outlives its caller, and
 // an http.Request.Context is cancelled the moment the handler returns, which
 // would kill the run this just accepted while the caller still answered 204.
 func (s *Session) PromptContent(ctx context.Context, content []ai.UserContentBlock) error {
+	s.queueMu.Lock()
 	if !s.run.TryLock() {
-		return ErrSessionBusy
+		s.queued = append(s.queued, content)
+		s.queueMu.Unlock()
+		return nil
 	}
-	runCtx, cancel := s.ownRun(ctx)
-	go func() {
-		defer s.releaseRun(cancel)
-		_, _ = s.sess.SendContentWithPreflight(runCtx, content, nil)
-	}()
+	runCtx, cancel := s.ownRun(ctx) // set s.cancel before returning 204
+	s.queueMu.Unlock()
+	go s.runAndRelease(runCtx, cancel, content)
 	return nil
+}
+
+// runAndRelease runs one prompt to settlement, then releases the slot.
+// releaseRun is deferred so a panic cannot wedge the run slot.
+func (s *Session) runAndRelease(ctx context.Context, cancel context.CancelFunc, content []ai.UserContentBlock) {
+	defer s.releaseRun(cancel)
+	_, _ = s.sess.SendContentWithPreflight(ctx, content, nil)
+}
+
+// releaseSlot gives the slot to the next queued prompt instead of leaving it
+// idle. Callers hold s.run.
+func (s *Session) releaseSlot() {
+	s.queueMu.Lock()
+	if len(s.queued) > 0 {
+		content := s.queued[0]
+		s.queued[0] = nil // drop the backing array's reference to the run content
+		s.queued = s.queued[1:]
+		runCtx, cancel := s.ownRun(context.Background())
+		s.queueMu.Unlock()
+		go s.runAndRelease(runCtx, cancel, content)
+		return
+	}
+	s.run.Unlock() // under queueMu, paired with PromptContent's TryLock under queueMu
+	s.queueMu.Unlock()
 }
 
 // PromptContentWait reserves the same single run slot and blocks until the run
@@ -274,7 +306,7 @@ func (s *Session) withReservation(before func() error) error {
 	keepSlot := false
 	defer func() {
 		if !keepSlot {
-			s.run.Unlock()
+			s.releaseSlot()
 		}
 	}()
 	if err := before(); err != nil {
@@ -296,13 +328,13 @@ func (s *Session) ownRun(ctx context.Context) (context.Context, context.CancelFu
 	return runCtx, cancel
 }
 
-// releaseRun clears the stored cancel and returns the run slot.
+// releaseRun clears the stored cancel and returns the run slot to the queue.
 func (s *Session) releaseRun(cancel context.CancelFunc) {
 	s.cancelMu.Lock()
 	s.cancel = nil
 	s.cancelMu.Unlock()
 	cancel()
-	s.run.Unlock()
+	s.releaseSlot()
 }
 
 // Abort cancels the run this Session owns when the reservation is still

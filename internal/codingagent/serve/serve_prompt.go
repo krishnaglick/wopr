@@ -44,10 +44,11 @@ type modelRef struct {
 
 // POST /session/{id}/prompt_async
 //
-// 204 with no body once the session's single run slot is reserved; 404 for a
-// session this server did not start; 409 while a run is in flight; 400 for a
-// directory that is not the server root or a malformed body; 413 for a body
-// over maxBodyBytes.
+// 204 with no body once the session's single run slot is reserved; a prompt
+// while a run is in flight is queued to run next and answered 204; 404 for a
+// session this server did not start; 409 only while an ask_user question is
+// pending; 400 for a directory that is not the server root or a malformed body;
+// 413 for a body over maxBodyBytes.
 func (s *Server) promptAsync(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.sessionPreconditions(w, r)
 	if !ok {
@@ -62,6 +63,14 @@ func (s *Server) promptAsync(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, http.StatusBadRequest, errDTO)
 		return
 	}
+	// A pending ask_user holds the run slot while the model waits for the client.
+	// Unlike a run in flight, a prompt must not queue behind it: the blocked-input
+	// state has no turn to settle, and this 409 is the deliberate invariant
+	// docs/plans/2026-10-04-serve-5.md DoD 11 / §Q4 pins.
+	if s.questions.hasPending(sess.ID()) {
+		s.writePromptError(w, codinghost.ErrSessionBusy) // {"error":"session is busy"}, 409
+		return
+	}
 	if err := sess.PromptContent(r.Context(), content); err != nil {
 		s.writePromptError(w, err)
 		return
@@ -71,8 +80,10 @@ func (s *Server) promptAsync(w http.ResponseWriter, r *http.Request) {
 
 // POST /session/{id}/message
 //
-// 200 with the finished assistant message as {info, parts}. 404, 409, 400 and
-// 413 as for prompt_async, plus 400 for a model this server does not offer.
+// 200 with the finished assistant message as {info, parts}. 404, 400 and 413 as
+// for prompt_async, plus 400 for a model this server does not offer. Unlike
+// prompt_async it blocks for the run slot rather than queueing, so a busy
+// session is 409.
 func (s *Server) sessionMessage(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.sessionPreconditions(w, r)
 	if !ok {
