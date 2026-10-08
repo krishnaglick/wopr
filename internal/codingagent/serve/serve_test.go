@@ -848,12 +848,12 @@ func TestSSEStreamDropsAStalledConnectionAtTheByteBound(t *testing.T) {
 	// test passes even if the queue were discarded on drop.
 }
 
-// TestStreamPartIDsMatchTranscriptPartIDs is the topology gate: the final burst
-// and the persisted transcript must report the same literal part ids for the
-// same message. Deltas and the end burst both stream under the assistant entry
-// id the Session mints at message start, so both sides build the ids from that
-// one id. Elementwise, not as a set — a duplicate collapses in a set on both
-// sides, which is how serve-3's duplicate-part-id defect passed green.
+// TestStreamPartIDsMatchTranscriptPartIDs is the topology gate: the parts the
+// stream published and the persisted transcript must report the same literal
+// part ids for the same message. Deltas stream under the assistant entry id the
+// Session mints at message start, so both sides build the ids from that one id.
+// First-appearance order, de-duplicated — a repeated part id collapses in a set
+// on both sides, which is how serve-3's duplicate-part-id defect passed green.
 func TestStreamPartIDsMatchTranscriptPartIDs(t *testing.T) {
 	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
@@ -878,9 +878,27 @@ func TestStreamPartIDsMatchTranscriptPartIDs(t *testing.T) {
 	})
 	cancel()
 
-	entryID, streamed := burstFrom(frames)
+	entryID := assistantMessageUpdatedID(frames)
 	if entryID == "" {
 		t.Fatalf("no message.updated for the assistant message; frames: %s", summarize(frames))
+	}
+	var streamed []string
+	for _, f := range frames {
+		if f.Name != eventMessagePartUpdated {
+			continue
+		}
+		var payload ssePartUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Part.MessageID != entryID {
+			continue
+		}
+		// First appearance only: the streamed create and its final frame carry
+		// the one part id, so what is compared is the id topology, not frame count.
+		if !slices.Contains(streamed, payload.Part.ID) {
+			streamed = append(streamed, payload.Part.ID)
+		}
 	}
 	// The literal form, not partID's own output: asserting against the helper
 	// would pass for any helper that is self-consistent.
@@ -1250,6 +1268,86 @@ func TestSSETurnFrameParity(t *testing.T) {
 	if last.Info.Time.Completed != nil && *last.Info.Time.Completed < last.Info.Time.Created {
 		t.Errorf("final assistant message.updated completed %d precedes created %d; frames: %s",
 			*last.Info.Time.Completed, last.Info.Time.Created, summarize(frames))
+	}
+}
+
+// TestMessageEndDoesNotRepublishStreamedPart pins the end-of-turn contract: the
+// messageEnd burst must not re-send a part the stream already published. A
+// republished text or reasoning part is rebuilt with no Time, so a frame after
+// the final message.updated overwrites the streamed part's {start,end} with a
+// timeless one and gives the client a second part update opencode never emits.
+func TestMessageEndDoesNotRepublishStreamedPart(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resp := openSSE(t, baseURL, ctx)
+	defer func() { _ = resp.Body.Close() }()
+
+	status, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"reply with exactly: parity-ok"}]}`)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async: expected 204, got %d", status)
+	}
+
+	// Stop on session.idle: messageEnd emits its burst before it, so the frames
+	// include the whole turn up to and including the republish window.
+	frames := readSSEUntil(t, resp, func(frames []sseFrame) bool {
+		return slices.ContainsFunc(frames, func(f sseFrame) bool { return f.Name == eventSessionIdle })
+	})
+	cancel()
+
+	assistantID := assistantMessageUpdatedID(frames)
+	if assistantID == "" {
+		t.Fatalf("no assistant message.updated; frames: %s", summarize(frames))
+	}
+	partID := assistantID + "-text-0"
+
+	// finalMsgIdx is the completion frame: the last assistant message.updated,
+	// which messageEnd emits before its part loop.
+	finalMsgIdx := -1
+	for i, f := range frames {
+		if f.Name != eventMessageUpdated {
+			continue
+		}
+		var payload sseMessageUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Info.Role == "assistant" {
+			finalMsgIdx = i
+		}
+	}
+	if finalMsgIdx == -1 {
+		t.Fatalf("no assistant message.updated; frames: %s", summarize(frames))
+	}
+
+	sawTimedEnd := false
+	for i, f := range frames {
+		if f.Name != eventMessagePartUpdated {
+			continue
+		}
+		var payload ssePartUpdated
+		if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
+			continue
+		}
+		if payload.Part.ID != partID {
+			continue
+		}
+		if payload.Part.Time == nil {
+			t.Errorf("frame %d for part %q carries no time; frames: %s", i, partID, summarize(frames))
+		} else if payload.Part.Time.End > 0 {
+			sawTimedEnd = true
+		}
+		if i > finalMsgIdx {
+			t.Errorf("frame %d for part %q follows the completion message.updated at %d (republish); frames: %s",
+				i, partID, finalMsgIdx, summarize(frames))
+		}
+	}
+	if !sawTimedEnd {
+		t.Errorf("no frame for part %q carried time.end > 0; the streamed end did not survive; frames: %s",
+			partID, summarize(frames))
 	}
 }
 
@@ -1646,43 +1744,6 @@ func readSSE(t *testing.T, body io.Reader, stop func([]sseFrame) bool) []sseFram
 			return frames
 		}
 	}
-}
-
-// burstFrom returns the assistant reconciliation burst: the entry id the final
-// message.updated announced, and the literal part ids of the
-// message.part.updated frames that carry parts of that same message.
-func burstFrom(frames []sseFrame) (string, []string) {
-	entryID := ""
-	var parts []string
-	for _, f := range frames {
-		switch f.Name {
-		case "message.updated":
-			var payload struct {
-				Info messageInfoDTO `json:"info"`
-			}
-			if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
-				continue
-			}
-			if payload.Info.Role != "assistant" {
-				continue
-			}
-			entryID, parts = payload.Info.ID, parts[:0]
-		case "message.part.updated":
-			if entryID == "" {
-				continue
-			}
-			var payload struct {
-				Part partDTO `json:"part"`
-			}
-			if err := json.Unmarshal([]byte(f.Data), &payload); err != nil {
-				continue
-			}
-			if payload.Part.MessageID == entryID {
-				parts = append(parts, payload.Part.ID)
-			}
-		}
-	}
-	return entryID, parts
 }
 
 // readHead reads an HTTP response head up to and including its blank line.
