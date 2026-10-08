@@ -1405,7 +1405,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-transcript-parentid-skips-metadata — transcript read API reports the interposed online-context custom entry as an assistant message's parentID
 
-- **Status:** READY — surfaced 2026-10-07 by the `serve-stream-parentid-parity` diff-verification fan.
+- **Status:** DONE — shipped on `wave-serve-transcript-parentid-skips-metadata`. `entriesToMessages` now resolves an assistant's `parentID` to the nearest ancestor whose `Base.Type == "message"` by walking a full id→entry map built from the entries it is given (never slice order), and `assistantMessageDTO` passes the full transcript instead of `entries[start:]`. `GET /session/{id}/message` and the POST `/message` response now report the initiating user message id, matching the stream. Gates: `TestEntriesToMessagesResolvesParentPastMetadata` (deterministic, custom-entry-interposed fixture) and the parentID assertion in `TestMessageAnswers200WithTheFinishedAssistantMessage`; both independently proven red pre-fix and green post-fix. The multi-step divergence is surfaced as `serve-transcript-parentid-multistep` below.
 - **Why:** `entriesToMessages` reads the persisted entry's raw `Base.ParentID`
   (`internal/codingagent/serve/serve_handlers.go:1119-1121`). Online Context Compact appends a
   `harness-online-context-state-v1` custom entry per provider request
@@ -1419,6 +1419,19 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   "nearest preceding message" tracker returns `""`).
 - **Gates:** resolve the nearest `message` ancestor via a full id→entry map (not slice order) and assert an
   assistant's transcript parentID equals the user message id; the serve suite; `make check`.
+
+### serve-transcript-parentid-multistep — transcript read API reports a toolResult message as a later assistant message's parentID
+
+- **Status:** READY — surfaced 2026-10-07 by the `serve-transcript-parentid-skips-metadata` spec fan.
+- **Why:** `nearestMessageAncestor` resolves to the nearest `Base.Type == "message"` ancestor. In a tool-using turn the
+  persisted chain is `user → custom → A1 → T1 (toolResult message) → custom → A2`, so `A2`'s transcript `parentID`
+  is `T1`, while the stream (`eventMapper.turnUserID`) reports the turn's initiating user message id for **every**
+  assistant message. The named gate for `serve-transcript-parentid-skips-metadata` covers only the single-assistant
+  interposed case, where nearest-message and user coincide. Resolving to the nearest **user-role** message ancestor
+  would restore read/stream parity across multi-step turns.
+- **Files:** `internal/codingagent/serve/serve_handlers.go` (`nearestMessageAncestor`).
+- **Gates:** an assistant transcript `parentID` equals the turn's user message id for a multi-step `A1 → T1 → A2`
+  fixture; the serve suite; `make check`.
 
 ### serve-tool-delta-test-vacuous-equality-loop — `TestToolCallDeltaReachesTheStream`'s cross-source check never runs
 

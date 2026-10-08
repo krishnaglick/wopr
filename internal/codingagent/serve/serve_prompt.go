@@ -11,7 +11,6 @@ import (
 	"github.com/alexrudloff/wopr/agent"
 	"github.com/alexrudloff/wopr/ai"
 	codinghost "github.com/alexrudloff/wopr/coding/host"
-	icodingagent "github.com/alexrudloff/wopr/internal/codingagent"
 )
 
 // promptBody is the body both prompt endpoints accept. system, format and
@@ -295,22 +294,19 @@ func lastPersistedAssistantID(sess *codinghost.Session, msgs []agent.AgentMessag
 
 // assistantMessageDTO renders one transcript entry through entriesToMessages,
 // so the /message response and GET /session/{id}/message cannot disagree on
-// part IDs, the tool-part state upgrade, or the info shape. The slice starts at
-// the assistant entry so the toolResult entries that follow still upgrade its
-// tool parts, and ends there so nothing later is walked.
+// part IDs, the tool-part state upgrade, or the info shape. It passes the full
+// transcript so the projection can resolve an assistant entry's parentID past
+// interposed non-message entries (e.g. Online Context Compact metadata); the
+// caller selects its entry by id from the result.
 func (s *Server) assistantMessageDTO(sess *codinghost.Session, entryID string) (messageDTO, bool) {
 	entries := sess.Inner().Entries()
-	start := slices.IndexFunc(entries, func(e icodingagent.SessionEntry) bool { return e.Base.ID == entryID })
-	if start < 0 {
-		return messageDTO{}, false
-	}
 	root, _ := filepath.EvalSymlinks(s.services.CWD())
 	cwd := sess.Inner().CWD()
 	if cwd == "" {
 		cwd = root
 	}
 	providerID, modelID, _ := s.sessionModelParts()
-	for _, dto := range entriesToMessages(entries[start:], sess.ID(), cwd, root, providerID, modelID) {
+	for _, dto := range entriesToMessages(entries, sess.ID(), cwd, root, providerID, modelID) {
 		if dto.Info.ID == entryID {
 			return dto, true
 		}
