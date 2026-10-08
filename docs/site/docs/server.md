@@ -34,7 +34,7 @@ The endpoint table below was derived from `grapeot/opencode_ios_client` at commi
 
 ## Endpoints
 
-The server registers 34 routes. Twenty-nine are implemented; five answer `501` with `{"error":"not implemented"}` for an operation the client can request but the server does not implement yet. A `501` is a supported answer the client treats as not implemented.
+The server registers 34 routes. Thirty are implemented; four answer `501` with `{"error":"not implemented"}` for an operation the client can request but the server does not implement yet. A `501` is a supported answer the client treats as not implemented.
 
 | Method | Path | Status | Behavior |
 |---|---|---|---|
@@ -42,11 +42,11 @@ The server registers 34 routes. Twenty-nine are implemented; five answer `501` w
 | `GET` | /api/health | 200 | `{healthy: true}`, no `version`. KKCode's first connect probe. `directory` ignored. |
 | `GET` | /global/event | SSE | One event stream for every session: `server.connected` first, then `server.heartbeat` every 15 seconds, and a terminal `session.error` with `data: [DONE]` when the byte budget drops. Answers 503 past 16 concurrent streams. |
 | `GET` | /session | 200 | `sessionDTO[]` merged from disk and live sessions. Each entry carries `{id, slug, projectID, directory, path, title, agent, model:{id,providerID,variant}, version, summary:{additions,deletions,files}, cost, tokens:{input,output,reasoning,total,cache:{read,write}}, time, project:{id,worktree}}`; `model`, `summary`, `tokens`, and `project` are objects even when unknown. Query `directory`; `limit` default 50, max 200; 400 on a directory mismatch. |
-| `GET` | /experimental/session | 200 | Identical to `GET /session` by construction (same handler): `sessionDTO[]` with the same expanded keys, `directory` validated, `limit` default 50, max 200. |
+| `GET` | /experimental/session | 200 | Same `sessionDTO[]` keys as `GET /session`, but archived sessions are omitted; `directory` validated, `limit` default 50, max 200. |
 | `POST` | /session | 200 | Starts a host session, installs the `ask_user` asker, and returns the expanded `sessionDTO`; 500 when the server has no usable model. No `directory` parameter. |
 | `GET` | /session/{id} | 200 | The expanded `sessionDTO`; 404 unknown. |
 | `PATCH` | /session/{id} | 200 | Body is exactly one of `{title}` or `{time:{archived}}`; renames or archives, returns the same expanded `sessionDTO`, and publishes `session.updated`; 400, 404, or 500. |
-| `DELETE` | /session/{id} | **501 stub** | `{"error":"not implemented"}`. |
+| `DELETE` | /session/{id} | 200 | Archives the session (the same `session_archive` write as `PATCH {time:{archived}}`) and returns `true`; transcript files are never removed; 404 unknown. |
 | `POST` | /session/{id}/fork | **501 stub** | Not implemented. |
 | `POST` | /session/{id}/revert | **501 stub** | Not implemented. |
 | `GET` | /session/{id}/diff | **501 stub** | Not implemented. |
@@ -95,7 +95,7 @@ The stream on `GET /global/event` carries 12 of the 17 event names the client sw
 Five names have no live trigger and are deliberately not emitted:
 
 - `permission.asked`, `permission.replied` — no approval policy or blocking hook exists.
-- `session.deleted` — deleting a session is a 501 stub.
+- `session.deleted` — `DELETE /session/{id}` archives rather than deletes, so nothing is removed and the event has no trigger.
 - `message.removed`, `message.part.removed` — nothing removes a message or a part; a failed tool sets `state.status` to `error` on a part that stays.
 
 ## Limits

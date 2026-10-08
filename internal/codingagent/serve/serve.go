@@ -66,11 +66,11 @@ func New(addr string, h *host.Host, sessionDir, modelSpec string) (*http.Server,
 
 	// Sessions
 	mux.HandleFunc("GET /session", s.listSessions)
-	mux.HandleFunc("GET /experimental/session", s.listSessions)
+	mux.HandleFunc("GET /experimental/session", s.listExperimentalSessions)
 	mux.HandleFunc("POST /session", s.createSession)
 	mux.HandleFunc("GET /session/{id}", s.getSession)
 	mux.HandleFunc("PATCH /session/{id}", s.patchSession)
-	mux.HandleFunc("DELETE /session/{id}", s.notImplemented)
+	mux.HandleFunc("DELETE /session/{id}", s.deleteSession)
 	mux.HandleFunc("POST /session/{id}/fork", s.notImplemented)
 	mux.HandleFunc("POST /session/{id}/revert", s.notImplemented)
 	mux.HandleFunc("GET /session/{id}/diff", s.notImplemented)

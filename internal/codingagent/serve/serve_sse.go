@@ -28,8 +28,8 @@ import (
 // wopr. The other five have none, and none is invented for them:
 // permission.asked and permission.replied need an approval policy and a
 // blocking hook, which do not exist and are not designed (serve-7);
-// session.deleted needs a session deletion, and DELETE /session/{id} is a 501
-// stub; message.removed and message.part.removed need a removal, and nothing in
+// session.deleted needs a session deletion, and DELETE /session/{id} archives
+// rather than deletes; message.removed and message.part.removed need a removal, and nothing in
 // wopr removes either — a failed tool is state.status = "error" on a part that
 // stays. Emitting a placeholder for one would render an empty permission prompt
 // or a phantom deletion the client cannot reconcile.

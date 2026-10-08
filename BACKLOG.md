@@ -1506,8 +1506,18 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-delete-session-archives — `DELETE /session/{id}` answers 501; archive on delete and hide archived from `/experimental/session`
 
-- **Status:** CLAIMED — wave-serve-delete-session-archives; surfaced 2026-10-07 in the KKCode proxy log (two `DELETE /session/{id}` → `501`). Owner decision
-  2026-10-08: **archive on delete** rather than hard-delete, so a mistaken delete is recoverable; KKCode has an archive.
+- **Status:** DONE — shipped on `wave-serve-delete-session-archives`, merged into `main` (`--no-ff`). `DELETE /session/{id}`
+  now archives: it stamps the existing `session_archive` entry with `time.Now().UnixMilli()` through a new single writer
+  `writeArchive` (shared with `PATCH {time:{archived}}` — no second metadata format), then answers `200 application/json`
+  body `true`; `404` for an unknown id; it never removes a transcript file. `GET /experimental/session` now calls
+  `listSessionsFiltered(..., false)`, which skips sessions with `Archived != nil` **before** the `limit` cap, while
+  `GET /session` stays inclusive (`listSessionsFiltered(..., true)`) — opencode parity. Gate `TestDeleteSessionArchives`
+  asserts DELETE→200/`true`, `time.archived` present on `GET /session/{id}`, the id absent from `/experimental/session`
+  but present in `/session`, and `404` for an unknown id; independently reproduced red pre-fix (501) / green post-fix,
+  and mutation-checked (filter regression and a non-stamping DELETE both turn it red). Spec:
+  `docs/plans/2026-10-08-serve-delete-session-archives.md` (planning artifact, not committed). Surfaced 2026-10-07 in the
+  KKCode proxy log (two `DELETE /session/{id}` → `501`); owner decision 2026-10-08: **archive on delete** rather than
+  hard-delete, so a mistaken delete is recoverable; KKCode has an archive.
 - **Why:** opencode implements `DELETE /session/{id}` (`200 application/json true`) as a **hard delete**. wopr answers
   `501`, so the client's delete silently fails. wopr already has archiving: `PATCH /session/{id}` with
   `{time:{archived:<ms>}}` sets it (`serve_handlers.go` `patchSession`), `sessionRecord.Archived` reads it back
