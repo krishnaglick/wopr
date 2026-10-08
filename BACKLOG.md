@@ -1472,3 +1472,33 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   assertion. Delivered the "extend the read and keep a check that can fail" option, not deletion.
 - **Files:** `internal/codingagent/serve/serve_test.go`.
 - **Gates:** the serve suite; `make check`.
+
+### serve-user-message-nested-model — KKCode crashes "Cannot read properties of undefined (reading 'providerID')"
+
+- **Status:** READY — surfaced 2026-10-07 driving KKCode against `wopr serve` after the SSE lifecycle fixes.
+- **Why:** opencode's **user** message info is a different shape from the assistant's. Verified live on opencode
+  1.18.34: `{id,sessionID,role:"user",time:{created},summary:{diffs:[]},agent,model:{providerID,modelID}}` — a
+  **nested** `model` and **no** flat `providerID`/`modelID`. wopr emits the assistant shape for every role: flat
+  `providerID`/`modelID` plus `cost/tokens/mode/path/parentID/finish`, and no `model`. The client reads
+  `userMessage.model.providerID`, `model` is undefined, and it throws. The assistant message keeps flat
+  `providerID`/`modelID` (opencode assistant info verified: `agent,cost,finish,id,mode,modelID,parentID,path,
+  providerID,role,sessionID,time,tokens`).
+- **Files:** `internal/codingagent/serve/serve_handlers.go` (`messageInfoDTO`), `internal/codingagent/serve/serve_sse.go`
+  (the user `message.updated` info), `internal/codingagent/serve/serve_dto.go` if the info builder lives there.
+- **Gates:** a test that a user-role message info equals the opencode shape — `model:{providerID,modelID}` present,
+  no flat `providerID`/`modelID`, `summary` present — while the assistant info is unchanged; the serve suite;
+  `make check`. Live: KKCode opens a session and prompts without throwing.
+- **Notes:** the same info builder feeds both `GET /session/{id}/message` and the SSE `message.updated`, so branch on
+  `role` once, in the one place both callers route through.
+
+### serve-delete-session-501 — `DELETE /session/{id}` answers 501
+
+- **Status:** READY — surfaced 2026-10-07 in the KKCode proxy log (two `DELETE /session/{id}` → `501`).
+- **Why:** opencode implements `DELETE /session/{id}` (returns `200 application/json true`); wopr answers `501`, so the
+  client's session deletion silently fails and sessions accumulate. Verified in `/tmp/wopr-proxy.log`.
+- **Files:** `internal/codingagent/serve/serve.go` (route), `internal/codingagent/serve/serve_handlers.go` (handler),
+  possibly `coding/host/host.go` for a delete/forget operation.
+- **Gates:** a test that `DELETE /session/{id}` returns 200 `true` and the session no longer appears in
+  `GET /experimental/session`; 404 for unknown id; `make check`.
+- **Notes:** confirm the opencode contract (status and body) against the live server before implementing; wopr must not
+  delete the transcript file unless that matches opencode.
