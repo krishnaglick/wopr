@@ -184,6 +184,13 @@ func (h *Host) Get(id string) (*Session, bool) {
 	return s, ok
 }
 
+// queuedPrompt is a prompt accepted while the run slot was held, carrying the
+// client-minted entry id so it survives until the prompt runs.
+type queuedPrompt struct {
+	content []ai.UserContentBlock
+	entryID string
+}
+
 // Session is one session the host owns. It does not embed *coding.Session: an
 // exported field would let a caller reach Send and bypass the run rule below.
 type Session struct {
@@ -197,7 +204,7 @@ type Session struct {
 	// run observes it. queued holds prompts that arrived while the slot was held,
 	// oldest first.
 	queueMu sync.Mutex
-	queued  [][]ai.UserContentBlock
+	queued  []queuedPrompt
 
 	// cancel aborts the run this Session owns, from the reservation until the
 	// run settles. RequestAbort only reaches a run whose cancel coding has
@@ -234,27 +241,30 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 // queues content to run when the current run settles, so this method always
 // returns nil. Everything after the reservation is reported on the event bus.
 //
+// entryID, when non-empty, is the client-minted transcript entry id the user
+// message persists under.
+//
 // ctx is detached inside this method: an accepted run outlives its caller, and
 // an http.Request.Context is cancelled the moment the handler returns, which
 // would kill the run this just accepted while the caller still answered 204.
-func (s *Session) PromptContent(ctx context.Context, content []ai.UserContentBlock) error {
+func (s *Session) PromptContent(ctx context.Context, content []ai.UserContentBlock, entryID string) error {
 	s.queueMu.Lock()
 	if !s.run.TryLock() {
-		s.queued = append(s.queued, content)
+		s.queued = append(s.queued, queuedPrompt{content: content, entryID: entryID})
 		s.queueMu.Unlock()
 		return nil
 	}
 	runCtx, cancel := s.ownRun(ctx) // set s.cancel before returning 204
 	s.queueMu.Unlock()
-	go s.runAndRelease(runCtx, cancel, content)
+	go s.runAndRelease(runCtx, cancel, content, entryID)
 	return nil
 }
 
 // runAndRelease runs one prompt to settlement, then releases the slot.
 // releaseRun is deferred so a panic cannot wedge the run slot.
-func (s *Session) runAndRelease(ctx context.Context, cancel context.CancelFunc, content []ai.UserContentBlock) {
+func (s *Session) runAndRelease(ctx context.Context, cancel context.CancelFunc, content []ai.UserContentBlock, entryID string) {
 	defer s.releaseRun(cancel)
-	_, _ = s.sess.SendContentWithPreflight(ctx, content, nil)
+	_, _ = s.sess.SendContentWithPreflight(ctx, content, entryID, nil)
 }
 
 // releaseSlot gives the slot to the next queued prompt instead of leaving it
@@ -262,12 +272,12 @@ func (s *Session) runAndRelease(ctx context.Context, cancel context.CancelFunc, 
 func (s *Session) releaseSlot() {
 	s.queueMu.Lock()
 	if len(s.queued) > 0 {
-		content := s.queued[0]
-		s.queued[0] = nil // drop the backing array's reference to the run content
+		next := s.queued[0]
+		s.queued[0] = queuedPrompt{} // drop the backing array's reference to the run content
 		s.queued = s.queued[1:]
 		runCtx, cancel := s.ownRun(context.Background())
 		s.queueMu.Unlock()
-		go s.runAndRelease(runCtx, cancel, content)
+		go s.runAndRelease(runCtx, cancel, next.content, next.entryID)
 		return
 	}
 	s.run.Unlock() // under queueMu, paired with PromptContent's TryLock under queueMu
@@ -277,14 +287,15 @@ func (s *Session) releaseSlot() {
 // PromptContentWait reserves the same single run slot and blocks until the run
 // settles, returning the messages it produced. It returns ErrSessionBusy when
 // the slot is taken. ctx is detached for the same reason as PromptContent's;
-// the caller abandons the wait on its own cancellation.
+// the caller abandons the wait on its own cancellation. entryID, when non-empty,
+// is the client-minted transcript entry id the user message persists under.
 //
 // before, when non-nil, runs once the slot is held and before the turn starts.
 // A caller that mutates session-wide state needs it there: a model swap applied
 // before the reservation swaps the model of a session that is about to be
 // refused. A before error aborts the turn, releases the slot, and is returned
 // as is.
-func (s *Session) PromptContentWait(ctx context.Context, content []ai.UserContentBlock, before func() error) ([]agent.AgentMessage, error) {
+func (s *Session) PromptContentWait(ctx context.Context, content []ai.UserContentBlock, entryID string, before func() error) ([]agent.AgentMessage, error) {
 	if !s.run.TryLock() {
 		return nil, ErrSessionBusy
 	}
@@ -295,7 +306,7 @@ func (s *Session) PromptContentWait(ctx context.Context, content []ai.UserConten
 	}
 	runCtx, cancel := s.ownRun(ctx)
 	defer s.releaseRun(cancel)
-	return s.sess.SendContentWithPreflight(runCtx, content, nil)
+	return s.sess.SendContentWithPreflight(runCtx, content, entryID, nil)
 }
 
 // withReservation runs before with the run slot held and gives the slot back if

@@ -34,6 +34,10 @@ type UserMessage struct {
 	Role      string                `json:"role"` // "user"
 	Content   []ai.UserContentBlock `json:"content"`
 	Timestamp int64                 `json:"timestamp"`
+	// EntryID is the session entry id this message persists under. A client that
+	// minted the id for optimistic rendering sets it so the stream and the
+	// transcript share one id; it is runtime-only and never serialized.
+	EntryID string `json:"-"`
 }
 
 // AssistantMessage is a streamed response from the LLM.
@@ -715,11 +719,12 @@ func (a *Agent) finishRun() {
 // stops calling tools. Steering and follow-up messages queued via
 // Steer/FollowUp are polled at the appropriate points in the loop.
 func (a *Agent) Send(ctx context.Context, content string) ([]AgentMessage, error) {
-	return a.SendContent(ctx, []ai.UserContentBlock{ai.TextContent{Text: content}})
+	return a.SendContent(ctx, []ai.UserContentBlock{ai.TextContent{Text: content}}, "")
 }
 
-// SendContent is the structured-content variant of Send.
-func (a *Agent) SendContent(ctx context.Context, content []ai.UserContentBlock) ([]AgentMessage, error) {
+// SendContent is the structured-content variant of Send. entryID, when non-empty,
+// is the session entry id the user message persists under.
+func (a *Agent) SendContent(ctx context.Context, content []ai.UserContentBlock, entryID string) ([]AgentMessage, error) {
 	if err := a.beginRun(ErrAlreadyProcessingPrompt); err != nil {
 		return nil, err
 	}
@@ -734,6 +739,7 @@ func (a *Agent) SendContent(ctx context.Context, content []ai.UserContentBlock) 
 			Role:      RoleUser,
 			Content:   append([]ai.UserContentBlock(nil), content...),
 			Timestamp: time.Now().UnixMilli(),
+			EntryID:   entryID,
 		},
 	}
 	msgs := append([]AgentMessage{userMsg}, a.takePendingNextTurn()...)
