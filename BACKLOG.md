@@ -1458,10 +1458,17 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-tool-delta-test-vacuous-equality-loop — `TestToolCallDeltaReachesTheStream`'s cross-source check never runs
 
-- **Status:** READY — surfaced 2026-10-07 by the `serve-sse-message-lifecycle-parity` diff-verification fan.
-- **Why:** the test stops at the first tool `arguments` delta, but the matching tool `message.part.updated` is
-  emitted later, so the loop that claims to prove the delta and the tool part share an id
-  (`internal/codingagent/serve/serve_test.go`) never executes. Pre-existing; the diff only changed the prefix
-  assertion. Either extend the read to the tool part or delete the vacuous loop and its comment.
+- **Status:** DONE — shipped on `wave-serve-tool-delta-test-vacuous-equality-loop` (test-only). The `readSSEUntil`
+  predicate in `TestToolCallDeltaReachesTheStream` now stops only once a tool `arguments` delta **and** a tool
+  `message.part.updated` have arrived; a new `toolUpdatedPartID` helper drives it. The post-loop check gained a
+  `toolPartSeen` guard (`t.Fatalf` when no part matches the delta's call id) so the equality `t.Errorf` runs and can
+  fail. Proven non-vacuous by a throwaway mutation: `serve_sse.go:474` `stream.ToolCall.ID` → `+"mut"` turns the test
+  red at the guard; restored. Serve suite 89 passed, `make check` all green (build, vet, lint, test-race, integration,
+  go-fix, docs-drift). Spec: `docs/plans/2026-10-07-serve-tool-delta-test-vacuous-equality-loop.md` (planning artifact,
+  not committed).
+- **Why:** the test stopped at the first tool `arguments` delta, but the matching tool `message.part.updated` is
+  emitted later, so the loop that claimed to prove the delta and the tool part share an id
+  (`internal/codingagent/serve/serve_test.go`) never executed. Pre-existing; the earlier diff only changed the prefix
+  assertion. Delivered the "extend the read and keep a check that can fail" option, not deletion.
 - **Files:** `internal/codingagent/serve/serve_test.go`.
 - **Gates:** the serve suite; `make check`.
