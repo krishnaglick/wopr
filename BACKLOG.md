@@ -1435,7 +1435,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-transcript-parentid-userturn — transcript read API reports the previous assistant as a later user message's parentID
 
-- **Status:** READY — surfaced 2026-10-07 by the `serve-transcript-parentid-multistep` spec + diff fans.
+- **Status:** CLAIMED — wave `wave-serve-transcript-parentid-userturn`, 2026-10-07.
 - **Why:** the stream emits a user `message.updated` with `parentID: ""` (`internal/codingagent/serve/serve_sse.go`),
   and captured opencode 1.18.34 frames agree (user messages carry no parentID). But `entriesToMessages` computes a
   user row's `parentID` with the nearest-message walk, so a later user turn (`… → A_n → U2`) reports `A_n`. Read and
