@@ -1639,13 +1639,15 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### kkcode-double-render-cause — diagnose the remaining KKCode message double-render
 
-- **Status:** READY (investigation, needs live QA) — surfaced 2026-10-08.
-- **Why:** driving KKCode, each sent message renders twice. The frame captures rule out the user-message sequence
-  (opencode emits more user updates than wopr and does not double; wopr emits one and does). Candidate causes are
-  unproven: the client's optimistic render not reconciling with the echoed `message.updated`, or a residual
-  assistant/part frame path. Needs the real KKCode client and a fresh capture with client-side render logging.
-- **Files:** TBD (client-side; capture against `internal/codingagent/serve`).
-- **Gates:** a capture that shows the duplicate's source; then a server-side fix with a hermetic test.
+- **Status:** DONE — resolved 2026-10-08 by `serve-prompt-message-id` (merged `b9db06d`); closed as a tracker
+  correction, no code of its own.
+- **Why:** driving KKCode, each sent message rendered twice. Cause established from the request-body capture
+  (`/tmp/wopr-proxy.log`): KKCode sends `"messageID":"msg_optimistic_…"` in the prompt body and renders that bubble
+  optimistically, reconciling it against the SSE `message.updated` id. wopr ignored `messageID` and minted its own
+  entry id, so the echo never matched and the client showed two. Fixed by honoring the client id end-to-end.
+- **Files:** fixed in `internal/codingagent/serve/serve_prompt.go` (`resolveMessageID`).
+- **Gates:** covered by `serve-prompt-message-id`'s tests (client id round-trips through SSE and
+  `GET /session/{id}/message`).
 
 ### serve-prompt-async-queue-when-busy — a second `prompt_async` while running returns `409`; opencode returns `204`
 
