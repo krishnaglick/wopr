@@ -1066,10 +1066,14 @@ func finishFromStopReason(reason ai.StopReason) string {
 // Base.Type is "message", following parentId links through non-message entries.
 // Online Context Compact interposes a custom harness-online-context-state-v1
 // entry between the user message and the assistant, so the assistant's raw
-// parentId names a non-message entry. It returns "" when the chain leaves byID
-// or ends without a message ancestor, and walks at most len(byID) hops so a
-// cycle cannot spin.
-func nearestMessageAncestor(byID map[string]icodingagent.SessionEntry, e icodingagent.SessionEntry) string {
+// parentId names a non-message entry. When wantUser is true only a user-role
+// message qualifies; the stream (eventMapper.turnUserID) reports the turn's
+// initiating user message for every assistant of a turn, so this is what makes
+// an assistant's parentID match the stream, including later assistants of a
+// multi-step tool turn whose nearest message ancestor is a toolResult. It
+// returns "" when the chain leaves byID or ends without a qualifying ancestor,
+// and walks at most len(byID) hops so a cycle cannot spin.
+func nearestMessageAncestor(byID map[string]icodingagent.SessionEntry, e icodingagent.SessionEntry, wantUser bool) string {
 	for range len(byID) {
 		if e.Base.ParentID == nil {
 			return ""
@@ -1079,7 +1083,12 @@ func nearestMessageAncestor(byID map[string]icodingagent.SessionEntry, e icoding
 			return ""
 		}
 		if parent.Base.Type == "message" {
-			return parent.Base.ID
+			if !wantUser {
+				return parent.Base.ID
+			}
+			if me, ok := parent.AsMessage(); ok && me.Message.User != nil {
+				return parent.Base.ID
+			}
 		}
 		e = parent
 	}
@@ -1145,7 +1154,9 @@ func entriesToMessages(entries []icodingagent.SessionEntry, sessionID, cwd, root
 			content = nil
 		}
 
-		parentID := nearestMessageAncestor(byID, e)
+		// Assistant rows resolve to the turn's user message so the transcript
+		// matches the stream; user and toolResult rows keep the nearest message.
+		parentID := nearestMessageAncestor(byID, e, assistant != nil)
 		created := parseRFC3339NanoToMillis(e.Base.Timestamp)
 
 		msg := messageDTO{
