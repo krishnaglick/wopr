@@ -1356,7 +1356,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-session-model-from-change-entry — disk-only session `model` reports the server default, not the session's own last model
 
-- **Status:** READY — surfaced 2026-10-07 by the `serve-kkcode-dto-shape-parity` wave.
+- **Status:** CLAIMED — wave-serve-session-model-from-change-entry; surfaced 2026-10-07 by the `serve-kkcode-dto-shape-parity` wave.
 - **Why:** `buildSessionDTO` has no model in `sessionRecord` (`serve_read.go`), so a session with no live
   counterpart reports the server's current `modelSpec` as `session.model`. A session last used with another
   model, or created by another server run, is misreported. The transcript already records it in the newest
