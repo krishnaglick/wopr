@@ -1109,10 +1109,11 @@ func TestSSETurnLifecycleParity(t *testing.T) {
 // order and the timestamps a client (KKCode) shows the reply twice and never
 // returns to idle.
 //
-// Non-vacuity: reverting createPart so the delta comes first leaves step 2 with
-// no createIdx; dropping the part Time stamp fails steps 3/4; dropping
-// info.Time.Completed fails step 5; minting a fresh part id per frame fails
-// step 1.
+// Non-vacuity: dropping the delta's createPart leaves the TextEndEvent's create
+// present but after the delta, failing the order check
+// (createIdx < deltaIdx < finalIdx); dropping the part Time stamp leaves no
+// finalIdx for step 2; dropping info.Time.Completed fails step 5; minting a
+// fresh part id per frame fails step 1.
 func TestSSETurnFrameParity(t *testing.T) {
 	baseURL, _ := promptServer(t)
 	id := createPromptSession(t, baseURL)
@@ -1231,12 +1232,24 @@ func TestSSETurnFrameParity(t *testing.T) {
 		t.Fatalf("expected a placeholder and a completion assistant message.updated, got %d; frames: %s",
 			len(assistantUpdates), summarize(frames))
 	}
-	if first := assistantUpdates[0]; first.Info.Time.Completed != nil {
+	first := assistantUpdates[0]
+	last := assistantUpdates[len(assistantUpdates)-1]
+	if first.Info.Time.Completed != nil {
 		t.Errorf("placeholder assistant message.updated carries completed=%d, want nil", *first.Info.Time.Completed)
 	}
-	if last := assistantUpdates[len(assistantUpdates)-1]; last.Info.Time.Completed == nil || *last.Info.Time.Completed <= 0 {
+	if last.Info.Time.Completed == nil || *last.Info.Time.Completed <= 0 {
 		t.Errorf("final assistant message.updated completed = %v, want > 0; frames: %s",
 			last.Info.Time.Completed, summarize(frames))
+	}
+	// The created clock is the message's own, stamped at start and carried
+	// unchanged onto the completion frame, so the two assistant frames agree.
+	if last.Info.Time.Created != first.Info.Time.Created {
+		t.Errorf("final assistant message.updated created = %d, want the placeholder's %d; frames: %s",
+			last.Info.Time.Created, first.Info.Time.Created, summarize(frames))
+	}
+	if last.Info.Time.Completed != nil && *last.Info.Time.Completed < last.Info.Time.Created {
+		t.Errorf("final assistant message.updated completed %d precedes created %d; frames: %s",
+			*last.Info.Time.Completed, last.Info.Time.Created, summarize(frames))
 	}
 }
 

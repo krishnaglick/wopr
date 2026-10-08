@@ -341,6 +341,12 @@ type eventMapper struct {
 	// persists, so deltas, part updates and the end burst all use the one id the
 	// transcript will report.
 	assistantID string
+	// assistantCreated is the assistant message's creation clock (ms), set at
+	// its MessageStartEvent and reused as the created time on every later
+	// assistant message.updated, so the placeholder and the completion frame
+	// report one creation time. It is zero until a start is observed; the end
+	// burst falls back to its own clock then.
+	assistantCreated int64
 	// parts records the start time (ms) of each assistant part the stream has
 	// already created — text, reasoning and tool ids alike — keyed by part id. A
 	// delta creates its part on first sight so a client materialises one part, not
@@ -441,9 +447,11 @@ func (m *eventMapper) messageStart(ev agent.MessageStartEvent) []codinghost.Even
 	// A new assistant message starts with no parts created; bounding the map to
 	// one message keeps it from growing across a session.
 	clear(m.parts)
+	created := time.Now().UnixMilli()
+	m.assistantCreated = created
 	return m.one(m.event(eventMessageUpdated, sseMessageUpdated{
 		SessionID: m.sessionID,
-		Info: messageInfo(m.sessionID, m.cwd, m.root, m.assistantID, "assistant", m.turnUserID, time.Now().UnixMilli(),
+		Info: messageInfo(m.sessionID, m.cwd, m.root, m.assistantID, "assistant", m.turnUserID, created,
 			ev.Message.Assistant, m.providerID, m.modelID),
 	}))
 }
@@ -534,7 +542,14 @@ func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]co
 		return nil, nil
 	}
 	blocks := ev.Message.Assistant.Content
-	info := messageInfo(m.sessionID, m.cwd, m.root, id, "assistant", m.turnUserID, now,
+	// created is the assistant message's own creation clock, recorded at its
+	// start, so the completion frame agrees with the placeholder. Fall back to
+	// the end clock when no start was observed.
+	created := now
+	if m.assistantCreated != 0 {
+		created = m.assistantCreated
+	}
+	info := messageInfo(m.sessionID, m.cwd, m.root, id, "assistant", m.turnUserID, created,
 		ev.Message.Assistant, m.providerID, m.modelID)
 	// The final assistant frame carries the completion clock. The placeholder
 	// frame at message start does not, so the client can tell a run in flight
@@ -637,8 +652,7 @@ func (m *eventMapper) createPart(p partDTO) []codinghost.Event {
 }
 
 // finishPart stamps start+end, reusing the recorded start. Every caller first
-// calls createPart for the same id, so the recorded start is always present and
-// the `!ok` fallback is gone; the end-burst republish no longer calls this.
+// calls createPart for the same id, so the recorded start is always present.
 func (m *eventMapper) finishPart(p partDTO, end int64) partDTO {
 	p.Time = &partTime{Start: m.parts[p.ID], End: end}
 	return p
