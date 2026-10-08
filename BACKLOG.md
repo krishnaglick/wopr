@@ -1778,7 +1778,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-message-id-duplicate-race — a same-`messageID` resend before the first prompt persists is accepted twice
 
-- **Status:** DONE — shipped 2026-10-08 on `wave-serve-prompt-message-id-duplicate-race` (merge recorded in RESUME.md).
+- **Status:** DONE — shipped 2026-10-08 on `wave-serve-prompt-message-id-duplicate-race`.
 - **Why:** `resolveMessageID` (`internal/codingagent/serve/serve_prompt.go`) rejects a duplicate client id by
   checking the persisted entry map (`codinghost.Session.Inner().EntryByID`). A prompt accepted while the session is
   busy is only queued (`host.Session.PromptContent`), and even a running prompt's user message is absent from `byID`
@@ -1796,7 +1796,8 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   the busy window); `PromptContentWait` reserves before `run.TryLock` and releases via one `defer`; `runAndRelease`
   releases after `SendContentWithPreflight` returns (persistence done). serve keeps its persisted `EntryByID`
   pre-check as a fast path; `writePromptError` maps the new `ErrDuplicateMessageID` to `400 {"error":"messageID
-  already exists"}`. `idsMu` is taken alone, avoiding the `queueMu→run`/`run→queueMu` inversion.
+  already exists"}`. `idsMu` is a leaf lock (no path takes `run`/`queueMu` while holding it), avoiding the
+  `queueMu→run`/`run→queueMu` inversion.
 - **Gate:** `TestPromptMessageIDDuplicateRejectedWhileBusy` (serve) holds A via `TUI_LIVE_STREAM_PAUSE`, queues B with
   `messageID:"msg_race"`, then sends C with the same id before B persists → C is `400` and the transcript holds exactly
   one `msg_race` user entry (B's text). Independently reproduced red by neutralizing `reserveEntryID` (C 204s) then
