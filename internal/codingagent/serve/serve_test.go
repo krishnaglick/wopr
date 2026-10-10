@@ -144,6 +144,7 @@ type promptEnv struct {
 	baseURL    string
 	host       *codinghost.Host
 	services   *coding.Services
+	agentDir   string
 	sessionDir string
 }
 
@@ -172,7 +173,7 @@ func promptEnvFor(t *testing.T) promptEnv {
 	}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	return promptEnv{baseURL: "http://" + ln.Addr().String(), host: host, services: services, sessionDir: sessionDir}
+	return promptEnv{baseURL: "http://" + ln.Addr().String(), host: host, services: services, agentDir: agentDir, sessionDir: sessionDir}
 }
 
 // createPromptSession creates a live session and returns its id.
@@ -283,6 +284,75 @@ func TestPromptAsyncAnswers413ForABodyOverTheCap(t *testing.T) {
 	if status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("prompt_async oversize body: expected 413, got %d", status)
 	}
+}
+
+// TestPromptAsyncAppliesTheClientModel covers the model a phone names per
+// prompt. KKCode sends `model` on prompt_async, and the handler used to decode
+// it and drop it, so every turn ran on whatever model the server started with
+// while the client showed the one it picked.
+//
+// The queued half is the reason the swap runs inside the run slot rather than at
+// accept time: B is accepted (204) while A is still running, and A's model must
+// still be faux-1 at that moment. A swap at accept time would answer 204 having
+// already changed the model of the turn in flight.
+func TestPromptAsyncAppliesTheClientModel(t *testing.T) {
+	env := promptEnvFor(t)
+	baseURL := env.baseURL
+	// A stored key is what puts test-faux in the models the server offers; with
+	// none, AvailableModels is empty and every model reference is unoffered.
+	if err := os.WriteFile(filepath.Join(env.agentDir, "auth.json"),
+		[]byte(`{"test-faux":{"type":"api_key","key":"sk-test"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := createPromptSession(t, baseURL)
+
+	// A model this server does not offer is refused, not accepted and ignored.
+	unknown, unknownBody := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"hi"}],"model":{"providerID":"nope","modelID":"nope"}}`)
+	if unknown != http.StatusBadRequest {
+		t.Fatalf("prompt_async naming an unoffered model: got %d (%s), want 400", unknown, unknownBody)
+	}
+	if !strings.Contains(string(unknownBody), "model not found") {
+		t.Errorf("a refused model must say so, got %q", unknownBody)
+	}
+
+	// A on the default model, long enough to still hold the run slot below.
+	first, _ := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"TUI_LIVE_STREAM_PAUSE"}]}`)
+	if first != http.StatusNoContent {
+		t.Fatalf("first prompt_async: expected 204, got %d", first)
+	}
+	waitForBusy(t, baseURL, id)
+
+	// B names faux-2 and is queued behind A.
+	second, secondBody := postJSON(t, baseURL, "/session/"+id+"/prompt_async",
+		`{"parts":[{"type":"text","text":"reply with exactly: second"}],"model":{"providerID":"test-faux","modelID":"faux-2"}}`)
+	if second != http.StatusNoContent {
+		t.Fatalf("queued prompt_async naming faux-2: got %d (%s), want 204", second, secondBody)
+	}
+	if got := sessionModelOf(t, baseURL, id); got.ID != "faux-1" {
+		t.Fatalf("a queued prompt changed the running turn's model to %q", got.ID)
+	}
+
+	// B's own turn runs on the model it asked for.
+	waitForIdle(t, baseURL, id)
+	if got := sessionModelOf(t, baseURL, id); got.ID != "faux-2" || got.ProviderID != "test-faux" {
+		t.Fatalf("session model after the queued turn = %+v, want {faux-2 test-faux}", got)
+	}
+}
+
+// sessionModelOf is the model GET /session/{id} reports for a session.
+func sessionModelOf(t *testing.T, baseURL, id string) sessionModel {
+	t.Helper()
+	status, body := getRaw(t, baseURL, "/session/"+id)
+	if status != http.StatusOK {
+		t.Fatalf("GET /session/%s: got %d (%s)", id, status, body)
+	}
+	var dto sessionDTO
+	if err := json.Unmarshal(body, &dto); err != nil {
+		t.Fatalf("decode session %s: %v", id, err)
+	}
+	return dto.Model
 }
 
 // TestPromptAsyncQueuesWhileTheSessionIsBusy verifies the queue contract: a

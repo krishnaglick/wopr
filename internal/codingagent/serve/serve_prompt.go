@@ -48,9 +48,9 @@ type modelRef struct {
 // 204 with no body once the session's single run slot is reserved; a prompt
 // while a run is in flight is queued to run next and answered 204; 404 for a
 // session this server did not start; 409 only while an ask_user question is
-// pending; 400 for a directory that is not the server root, a malformed body, or
-// a messageID that already names a persisted entry or an in-flight prompt;
-// 413 for a body over maxBodyBytes.
+// pending; 400 for a directory that is not the server root, a malformed body, a
+// model this server does not offer, or a messageID that already names a
+// persisted entry or an in-flight prompt; 413 for a body over maxBodyBytes.
 func (s *Server) promptAsync(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.sessionPreconditions(w, r)
 	if !ok {
@@ -77,7 +77,26 @@ func (s *Server) promptAsync(w http.ResponseWriter, r *http.Request) {
 		s.writePromptError(w, codinghost.ErrSessionBusy) // {"error":"session is busy"}, 409
 		return
 	}
-	if err := sess.PromptContent(r.Context(), content, msgID); err != nil {
+	// The client names the model per prompt and KKCode sends it here, so it is
+	// resolved before the 204 — a request naming a model this server does not
+	// offer is refused rather than answered as accepted — and swapped once the
+	// run holds the slot, so a prompt queued behind a running turn does not
+	// change that turn's model.
+	var model *ai.Model
+	if body.Model != nil {
+		m, errDTO, status := s.resolveModel(sess, *body.Model)
+		if errDTO != nil {
+			s.writeJSON(w, status, errDTO)
+			return
+		}
+		model = m
+	}
+	if err := sess.PromptContent(r.Context(), content, msgID, func() error {
+		if model == nil {
+			return nil
+		}
+		return sess.Inner().SetModel(model)
+	}); err != nil {
 		s.writePromptError(w, err)
 		return
 	}
@@ -286,22 +305,33 @@ func dataURLPayload(url string) string {
 	return url
 }
 
-// applyModel resolves the client's model reference against the models this
-// server offers and swaps the session onto it. SetModel has already stored the
-// new model when its audit append fails, so that case answers 500 and is
-// recorded rather than hidden.
-func (s *Server) applyModel(sess *codinghost.Session, ref modelRef) (*errorDTO, int) {
+// resolveModel turns the client's model reference into the model this server
+// would run. It mutates nothing, so a caller can refuse a request that names a
+// model this server does not offer before accepting it.
+func (s *Server) resolveModel(sess *codinghost.Session, ref modelRef) (*ai.Model, *errorDTO, int) {
 	models, err := codinghost.AvailableModels(s.services, sess.Inner().Model())
 	if err != nil {
-		return &errorDTO{Error: err.Error()}, http.StatusInternalServerError
+		return nil, &errorDTO{Error: err.Error()}, http.StatusInternalServerError
 	}
 	i := slices.IndexFunc(models, func(candidate *ai.Model) bool {
 		return codinghost.ModelProviderID(candidate) == ref.ProviderID && candidate.ID == ref.ModelID
 	})
 	if i < 0 {
-		return &errorDTO{Error: "model not found: " + ref.ProviderID + "/" + ref.ModelID}, http.StatusBadRequest
+		return nil, &errorDTO{Error: "model not found: " + ref.ProviderID + "/" + ref.ModelID}, http.StatusBadRequest
 	}
-	if err := sess.Inner().SetModel(models[i]); err != nil {
+	return models[i], nil, 0
+}
+
+// applyModel is resolveModel plus the swap, for the routes that can only
+// resolve once the run slot is held. SetModel has already stored the new model
+// when its audit append fails, so that case answers 500 and is recorded rather
+// than hidden.
+func (s *Server) applyModel(sess *codinghost.Session, ref modelRef) (*errorDTO, int) {
+	model, errDTO, status := s.resolveModel(sess, ref)
+	if errDTO != nil {
+		return errDTO, status
+	}
+	if err := sess.Inner().SetModel(model); err != nil {
 		return &errorDTO{Error: err.Error()}, http.StatusInternalServerError
 	}
 	return nil, 0

@@ -1748,6 +1748,29 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   `/tmp/wopr-proxy.log`), so the client does send `messageID` and wopr drops it. The body also carries `agent` and
   `model`; honoring `agent` is a separate concern (log it if it diverges).
 
+### serve-prompt-async-drops-model — `prompt_async` decodes the client's `model` and never applies it, so KKCode's model choice is ignored
+
+- **Status:** DONE — shipped 2026-10-10 on `main`, direct on the owner's request rather than on a wave. `prompt_async`
+  now honors the model the client names per prompt, the way `POST /session/{id}/message` always has. The reference is
+  **resolved before the 204** (an unoffered model is `400 {"error":"model not found: …"}` rather than a silent
+  accept-and-ignore) and **swapped once the run holds the slot**, so a prompt queued behind a running turn does not
+  change that turn's model. `applyModel` split into `resolveModel` (pure) plus the swap; `host.Session.PromptContent`
+  gained the `before func() error` that `PromptContentWait` already had, and `queuedPrompt` carries it, so the swap
+  happens when the queued run starts. Gate `TestPromptAsyncAppliesTheClientModel`, independently reproduced red both
+  ways.
+- **Why:** `promptBody.Model` was read by `sessionMessage` and dropped by `promptAsync`, which called
+  `PromptContent(ctx, content, msgID)` with no model. KKCode prompts over `prompt_async`, so every turn ran on the
+  server's startup model while the phone showed the one it picked. Caught live in `/tmp/wopr-proxy.log`:
+  `prompt_async … "model":{"providerID":"opencode-go","modelID":"space-bunny"}` → `204`, answered by deepseek-v4.1-flash.
+- **Gate:** a `400` for an unoffered model; a queued `faux-2` prompt accepted while `faux-1` is still running leaves the
+  session on `faux-1` at accept time (red if the swap moves to accept time) and lands on `faux-2` once that turn settles
+  (red if the model handling is dropped at all).
+- **Accepted boundary:** a model that becomes unresolvable between the 204 and the queued run starting abandons the turn
+  silently — the response is long gone. Unreachable in practice: the reference is resolved from the same
+  `AvailableModels` a moment earlier.
+- **Still open:** `prompt_async` still drops the body's `agent` field, so KKCode's agent choice is not honored (see the
+  note under `serve-prompt-message-id`).
+
 ### serve-prompt-async-abort-handoff-race — a late abort can cancel the just-handed-off queued prompt
 
 - **Status:** DONE — shipped 2026-10-08 on `wave-serve-prompt-async-abort-handoff-race`. A late abort no longer cancels

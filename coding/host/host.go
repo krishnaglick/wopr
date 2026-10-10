@@ -195,6 +195,7 @@ func (h *Host) Get(id string) (*Session, bool) {
 type queuedPrompt struct {
 	content []ai.UserContentBlock
 	entryID string
+	before  func() error
 }
 
 // Session is one session the host owns. It does not embed *coding.Session: an
@@ -303,31 +304,42 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 // ctx is detached inside this method: an accepted run outlives its caller, and
 // an http.Request.Context is cancelled the moment the handler returns, which
 // would kill the run this just accepted while the caller still answered 204.
-func (s *Session) PromptContent(ctx context.Context, content []ai.UserContentBlock, entryID string) error {
+//
+// before, when non-nil, runs once this run holds the slot and before the turn
+// starts, a queued one included. A caller that mutates session-wide state needs
+// it there: a model swap applied at accept time changes the model of the turn
+// already running, which is why the queued prompt carries its own. A before
+// error abandons the turn; the caller has already been answered, so the run
+// ends as it would after any other failed start.
+func (s *Session) PromptContent(ctx context.Context, content []ai.UserContentBlock, entryID string, before func() error) error {
 	if err := s.reserveEntryID(entryID); err != nil {
 		return err
 	}
 	s.queueMu.Lock()
 	if !s.run.TryLock() {
-		s.queued = append(s.queued, queuedPrompt{content: content, entryID: entryID})
+		s.queued = append(s.queued, queuedPrompt{content: content, entryID: entryID, before: before})
 		s.queueMu.Unlock()
 		return nil
 	}
 	runCtx, cancel := s.ownRun(ctx) // set s.cancel before returning 204
 	s.queueMu.Unlock()
-	go s.runAndRelease(runCtx, cancel, content, entryID)
+	go s.runAndRelease(runCtx, cancel, content, entryID, before)
 	return nil
 }
 
 // runAndRelease runs one prompt to settlement, then releases the slot.
-// releaseRun is deferred so a panic cannot wedge the run slot. releaseEntryID is
-// deferred after releaseRun, so it runs first (LIFO) once
+// releaseRun is deferred so a panic cannot wedge the run slot, and it is what
+// hands a queued prompt the slot when before abandons this turn. releaseEntryID
+// is deferred after releaseRun, so it runs first (LIFO) once
 // SendContentWithPreflight has returned: an id whose run persisted a user entry
 // is still rejected afterward by the persisted EntryByID check, and an id whose
 // run ended before persisting is freed for a retry.
-func (s *Session) runAndRelease(ctx context.Context, cancel context.CancelFunc, content []ai.UserContentBlock, entryID string) {
+func (s *Session) runAndRelease(ctx context.Context, cancel context.CancelFunc, content []ai.UserContentBlock, entryID string, before func() error) {
 	defer s.releaseRun(cancel)
 	defer s.releaseEntryID(entryID)
+	if before != nil && before() != nil {
+		return
+	}
 	_, _ = s.sess.SendContentWithPreflight(ctx, content, entryID, nil)
 }
 
@@ -344,7 +356,7 @@ func (s *Session) releaseSlot() {
 		if s.handoffBarrier != nil {
 			s.handoffBarrier() // test-only; nil in production
 		}
-		go s.runAndRelease(runCtx, cancel, next.content, next.entryID)
+		go s.runAndRelease(runCtx, cancel, next.content, next.entryID, next.before)
 		return
 	}
 	s.run.Unlock() // under queueMu, paired with PromptContent's TryLock under queueMu

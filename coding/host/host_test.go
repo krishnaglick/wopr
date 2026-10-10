@@ -274,13 +274,13 @@ func TestAbortInHandoffWindowDoesNotCancelQueuedPrompt(t *testing.T) {
 	defer cancel()
 
 	// A: accepted, blocks in the provider, holds the slot.
-	if err := sessA.PromptContent(ctx, coding.BuildUserContent("A", nil), ""); err != nil {
+	if err := sessA.PromptContent(ctx, coding.BuildUserContent("A", nil), "", nil); err != nil {
 		t.Fatalf("PromptContent A: %v", err)
 	}
 	waitArrived(t, arrived, 0)
 
 	// B: queued behind A, must be accepted.
-	if err := sessA.PromptContent(ctx, coding.BuildUserContent("B", nil), ""); err != nil {
+	if err := sessA.PromptContent(ctx, coding.BuildUserContent("B", nil), "", nil); err != nil {
 		t.Fatalf("PromptContent B: %v", err)
 	}
 
