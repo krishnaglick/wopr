@@ -57,9 +57,10 @@ Each is one feature, gates green, independently committable.
 ### S1 — the inventory, and a pointer added to docs
 
 - `automation/gen-opencode-contract.py`: parse `HttpApiEndpoint.<method>("<name>", <Prefix>Paths.<key>)` across
-  `server/routes/instance/httpapi/groups/*.ts`, resolving each `<Prefix>Paths` map. **The maps mix three value forms**
+  `packages/opencode/src/server/routes/instance/httpapi/groups/*.ts`, resolving each `<Prefix>Paths` map. **The maps mix three value forms**
   — plain quoted strings (`file.ts`: `list: "/file"`), template literals, and a bare `root` alias — and a parser that
-  handles only one of them silently drops whole group files. The guard: abort if `resolved < raw count`.
+  handles only one of them silently drops whole group files. The guard: abort if `resolved < raw count` where **raw**
+  is the total `HttpApiEndpoint.` occurrences in the same source tree.
 - Emit `internal/codingagent/serve/testdata/opencode-v1-contract.json`: `{pinned:{repo,tag,commit},
   endpoints:[{method,path,name,group,phone,disposition,waiver,backlog}]}`. `disposition` is `mounted` | `stubbed` |
   `absent` — the four 501s (`fork`, `revert`, `diff`, `permissions`) are `stubbed` with a waiver, because a 501 on a
@@ -69,11 +70,6 @@ Each is one feature, gates green, independently committable.
   The `routes` field is read by `TestWoprRoutesMatchInventory` (see below).
 - **No new test in S1.** The inventory is generated and committed; `docs/site/docs/server.md` gains a pointer to it.
   Adding a test over this artifact is the banned category and is not proposed again.
-- **Test: `TestWoprRoutesMatchInventory`** — the generated inventory is the source of truth. This test iterates
-  `routeMux.routes` and asserts every entry has a matching entry in the inventory with `disposition: "mounted"`.
-  If a route is removed from `serve.go`, it disappears from `routeMux.routes` and the test fails; if a route is
-  added without being in the inventory, the test fails. This is a *runtime* route check, not a static artifact
-  check, so it cannot be silenced by editing the JSON.
 - **Known gap this leaves:** nothing in the repo catches a route being *removed* from `serve.go`.
   `TestNewRegistersEveryRouteWithoutPanicking` checks only `/permission` and `/question`; roughly eight routes have no
   behavioral test at all. That is a pre-existing hole, recorded here rather than silently inherited — closing it means
@@ -88,13 +84,14 @@ per-session agent state**: `sessionDTO.Agent` exists (`serve_dto.go:24`) and is 
 populates an existing field rather than inventing one.
 
 - `promptBody` gains `Agent *string` (optional) alongside `Model *modelRef`. The `before` hook in `promptAsync`
-  resolves it exactly like `body.Model` — against the available models from `AvailableModels`.
+  resolves it against the **hardcoded agent list** (`explore`, `general`, `propose`, `build` — the names served by
+  `GET /agent`, `serve_handlers.go:533`). This list is **not** from `AvailableModels` (which returns models, not agents).
 - unknown agent → `400 {"error":"agent not found: …"}`, no fallback (owner decision 2026-10 — a deliberate divergence
   from opencode, which falls back to the default; recorded as such);
 - known agent → applied in the same run-slot `before` hook the model uses, and `GET /session/{id}` reports it.
 
-**Gate:** `TestPromptAsyncAppliesTheClientAgent` — a prompt naming `explore` leaves `GET /session/{id}` reporting
-`agent: "explore"`, and an unknown name is `400`. **The test waits for the run to complete** (`waitForIdle`)
+**Gate:** `TestPromptAsyncAppliesTheClientAgent` — a prompt naming `general` leaves `GET /session/{id}` reporting
+`agent: "general"`, and an unknown name is `400`. **The test waits for the run to complete** (`waitForIdle`)
 before asserting `GET /session/{id}` reports the agent, because the model swap happens inside the run slot.
 **Mutation that must turn it red:** make the run-slot `before` hook ignore `body.Agent`, or delete the `Agent`
 assignment in `buildSessionDTO` — either leaves `"agent":""` while the test asserts the requested name. If the gate
