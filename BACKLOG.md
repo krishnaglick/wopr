@@ -1807,27 +1807,30 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   - **Archive needs no decision.** `PATCH /session/{id}` with `time.archived` is a separate opencode feature
     (`Session.setArchived`) and keeps working untouched; only the shared running-session refusal above is new. What
     the old item got wrong was implying the two might fold together. They do not.
-  - **Half-deleted trees: how they actually arise, and how to make the state unreachable.** With the busy refusal in
+  - **Half-deleted trees: make the state unreachable by ordering, not by storing trash.** With the busy refusal in
     place, three sources remain — (i) the recursive cascade unlinks the parent and a child's `os.Remove` returns
     `EACCES`/`EBUSY` (open handle, permissions, NFS); (ii) the process dies between two unlinks; (iii) `ENOSPC`/`EIO`
-    part-way down the tree. The symptom is concrete and checkable: **`serve_read.go` lists sessions by walking session
-    files and never follows `parentID`**, so an orphaned child does not crash the reader — it reappears in
-    `GET /session` as an ordinary session whose `parentID` points at nothing. A silent ghost, not an error, which is
-    worse. opencode tolerates this by logging and swallowing. **wopr should make the state unreachable instead:
-    rename the session (and its children) to a trash name in one step, then unlink.** After the rename there is no
-    half-tree the reader can observe; a failed unlink leaves a `.trash/` entry nothing lists, and recovery is a rename
-    back. Gate on that, not on the error path.
+    part-way down the tree. The symptom is concrete: **`serve_read.go` lists sessions by walking session files under
+    `~/.wopr/agent/sessions/<mangled-cwd>/` and never follows `parentID`**, so an orphaned child does not fail the
+    reader — it reappears in `GET /session` as an ordinary session whose `parentID` points at nothing. A silent ghost.
+    opencode tolerates this by logging and swallowing. **wopr orders instead: read the whole subtree from disk first
+    (reading it as you walk loses the siblings once the first is gone), then unlink children-first, parent-last,
+    stopping at the first error.** The invariant that buys is *a session file exists ⟹ its parent exists, or it was a
+    root*, because a parent is only unlinked once every child is gone. A failed unlink or a crash then leaves the
+    **parent in place** — the subtree stays discoverable and the delete is retryable, which is the same guarantee as
+    any other failed filesystem call. No trash directory: it would need its own lifecycle (what prunes it, what lists
+    it, how it is recovered) to solve a state that ordering removes. Gate on the ordering, not on the error path.
 - **Gates:** a behavioral test that deleting an idle session removes it from `GET /session` and
   `GET /experimental/session` and that its transcript file is gone from disk; that a session with a child removes the
   child; that **deleting a session with a run in flight is `409 {"error":"session is busy"}` and deletes nothing**;
-  that deleting an unknown id is `404`; and that a child whose unlink fails leaves **no session in `GET /session`** —
-  the trash-rename assertion, not an error-code assertion. Every gate must name the mutation that turns it red. Plus
+  that deleting an unknown id is `404`; and that **a child whose unlink fails leaves its parent listed and intact**
+  — the ordering assertion, not an error-code assertion. Every gate must name the mutation that turns it red. Plus
   `go build ./...`, `go vet ./...`, `go test -count=1 ./coding/host/ ./internal/codingagent/serve/`,
   `golangci-lint` on both, `go fix -diff ./...` empty, `bash -lc 'make check'`.
 - **Risks:** this is the first wopr code path that destroys user data. A regression loses transcripts. That is the
-  "lose data" bar `AGENTS.md` sets for tests — it means this slice gets the fuller gate set. The busy refusal plus the
-  rename-then-unlink ordering are what keep it recoverable: nothing is destroyed under a live run, and every failure
-  after the rename is a `.trash/` entry rather than a half-live tree.
+  "lose data" bar `AGENTS.md` sets for tests — it means this slice gets the fuller gate set. Two things keep it
+  recoverable, and both are already specified above: nothing is destroyed under a live run, and children-first ordering
+  means every failure leaves the parent listed and the delete retryable.
 - **Deferred in the same area:** `POST /session/{id}/share` and `DELETE /session/{id}/share` are unmounted in wopr and
   filed under the absent-endpoint inventory. opencode's `Session.share` is a link-generating operation with its own
   lifecycle; it is not implied by this item.
