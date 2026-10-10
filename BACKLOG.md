@@ -1771,6 +1771,35 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Still open:** `prompt_async` still drops the body's `agent` field, so KKCode's agent choice is not honored (see the
   note under `serve-prompt-message-id`).
 
+### serve-auto-evict-idle-sessions — auto-archive and evict sessions idle > N hours
+
+- **Status:** READY — filed 2026-10-10. Addresses the unbounded live-session registry (audit CRITICAL #1).
+- **Why:** wopr's `Host.registry` never evicts; every session created stays resident until process restart,
+  each holding its full transcript in RAM. A long-lived `wopr serve` handling hundreds of sessions will OOM.
+  opencode has no auto-eviction; sessions persist until deleted. The fix: after configurable idle time
+  (default 48h), **archive + evict** — set `time.archived`, remove from `Host.registry`, call
+  `Session.Close()` to drop the transcript from memory. The session stays on disk, restorable on next
+  access (`GET /session/{id}` loads from disk). `GET /experimental/session` excludes it (matching
+  opencode's archive filter). Restorable on next access via lazy reload from disk.
+- **What opencode does:** opencode v1.18.34 has no auto-archive/eviction — sessions persist until
+  explicitly deleted. This is a wopr improvement for long-lived serve deployments.
+- **Implementation:** new `automation/session_sweeper.go` (or add to `serve.go`):
+  - Config: `ServerOptions.IdleTimeout` (duration, default 48h), exposed via `wopr serve --idle-timeout`.
+  - Background ticker (1h) iterates `host.Sessions()`, checks `now.Sub(sess.LastActiveTime()) > idleTimeout`.
+  - For each idle: `archiveSession(id)` (writes `time.archived`), then `host.CloseSession(id)`.
+  - `GET /experimental/session` already filters `Archived != nil` (`serve_handlers.go:670`).
+- **Open questions:**
+  - Should the sweeper run at a fixed interval (e.g., 1h) or on every `Start`/`prompt_async`?
+  - Does an evicted session need to appear in `GET /session` (yes, per opencode) or only `GET /session` full list?
+- **Gates:** behavioral test — create session, wait >idleTimeout, assert `GET /session/{id}` loads from disk and
+  `GET /experimental/session` excludes it; `go build ./...`, `go vet ./...`, `go test -count=1 ./internal/codingagent/serve/`,
+  `golangci-lint`, `go fix -diff ./...` empty, `bash -lc 'make check'`.
+- **Risks:** configurable idle timeout avoids accidental eviction of active sessions; lazy reload on access
+  preserves the "always available" illusion. Race: sweep vs active session starting — resolved by checking
+  `IsIdle()` before eviction (same signal used for 409 on delete).
+
+### serve-auto-evict-idle-sessions — auto-archive and evict sessions idle > N hours
+
 ### serve-delete-hard-delete — `DELETE /session/{id}` archives; opencode removes the session and its children
 
 - **Status:** READY — filed 2026-10-09. Supersedes the archive-on-delete owner decision of 2026-10-08
