@@ -30,6 +30,8 @@ func TestAuthenticatedProviders(t *testing.T) {
 		{"oauth without refresh", nil, map[string]any{"openai-codex": oauth("")}, "openai-codex", false},
 		{"ollama host", map[string]string{"OLLAMA_HOST": "http://localhost:11434"}, nil, "ollama", true},
 		{"opencode-go api key in auth.json", nil, map[string]any{"opencode-go": map[string]any{"type": "api_key", "key": "sk-x"}}, "opencode-go", true},
+		{"opencode-go key authenticates Zen too", nil, map[string]any{"opencode-go": map[string]any{"type": "api_key", "key": "sk-x"}}, "opencode", true},
+		{"Zen key authenticates opencode-go too", nil, map[string]any{"opencode": map[string]any{"type": "api_key", "key": "sk-x"}}, "opencode-go", true},
 		{"opencode-go oauth without refresh", nil, map[string]any{"opencode-go": oauth("")}, "opencode-go", false},
 	}
 	for _, tc := range cases {

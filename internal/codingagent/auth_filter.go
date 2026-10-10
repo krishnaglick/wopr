@@ -84,11 +84,16 @@ func AuthenticatedProviders(agentDir string) map[string]bool {
 		// provider the allow-lists above never named — opencode-go, opencode, a
 		// custom id — must appear too, or its models are invisible in the
 		// picker and in GET /config/providers. OAuth stays out of this loop:
-		// an OAuth entry without a refresh token is not usable offline.
+		// an OAuth entry without a refresh token is not usable offline. A
+		// credential shared with another provider id (opencode Zen and Go are
+		// one account) authenticates both.
 		if infos, err := auth.List(context.Background()); err == nil {
 			for _, info := range infos {
 				if info.ProviderID != "" && info.Type != ai.CredentialOAuth {
 					out[info.ProviderID] = true
+					for _, shared := range ai.SharedCredentialProviders(info.ProviderID) {
+						out[shared] = true
+					}
 				}
 			}
 		}
