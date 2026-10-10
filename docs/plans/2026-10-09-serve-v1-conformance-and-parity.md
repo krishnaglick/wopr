@@ -67,7 +67,7 @@ Each is one feature, gates green, independently committable.
   phone route is a tracked gap and `mounted` would hide it.
 - `serve.go`: add `type routeMux struct { *http.ServeMux; routes []route }` with a recording `HandleFunc`. All 34
   existing call sites are unchanged text; the embedded method still registers, so the bad-pattern panic still fires.
-  The `routes` field is read by `TestWoprRoutesMatchInventory` (see below).
+  The `routes` field is exposed for potential future tooling.
 - **No new test in S1.** The inventory is generated and committed; `docs/site/docs/server.md` gains a pointer to it.
   Adding a test over this artifact is the banned category and is not proposed again.
 - **Known gap this leaves:** nothing in the repo catches a route being *removed* from `serve.go`.
@@ -83,9 +83,10 @@ per-session agent state**: `sessionDTO.Agent` exists (`serve_dto.go:24`) and is 
 `buildSessionDTO` never assigns it, and `agent.UserMessage` has no agent field (`agent/agent.go:33-41`). So the slice
 populates an existing field rather than inventing one.
 
-- `promptBody` gains `Agent *string` (optional) alongside `Model *modelRef`. The `before` hook in `promptAsync`
-  resolves it against the **hardcoded agent list** (`explore`, `general`, `propose`, `build` — the names served by
-  `GET /agent`, `serve_handlers.go:533`). This list is **not** from `AvailableModels` (which returns models, not agents).
+- `promptBody` gains `Agent *string` (optional) alongside `Model *modelRef`. The agent is **validated before the 204**
+  (exactly like `body.Model`), resolved against the **hardcoded agent list** (`explore`, `general`, `propose`, `build` —
+  the names served by `GET /agent`, `serve_handlers.go:533`). This list is **not** from `AvailableModels` (which
+  returns models, not agents).
 - unknown agent → `400 {"error":"agent not found: …"}`, no fallback (owner decision 2026-10 — a deliberate divergence
   from opencode, which falls back to the default; recorded as such);
 - known agent → applied in the same run-slot `before` hook the model uses, and `GET /session/{id}` reports it.

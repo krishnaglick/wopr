@@ -1816,10 +1816,6 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   same session transcript.) Should the cap apply per-turn or only at compaction boundaries? Per-turn
   keeps the bound tight; compaction boundary is the current behavior.
 
-### serve-limit-history-tokens — cap in-memory transcript per session
-
-### serve-prune-learner-map — bound the learner model-outcome map
-
 ### serve-prompt-system — per-prompt system prompt override
 
 - **Status:** READY — filed 2026-10-10. `PromptInput.system` is an optional string that overrides the session's
@@ -1857,7 +1853,6 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   into session permission rules (`prompt.ts:1060-1067`): `{permission: t, action: enabled ? "allow" :
   "deny", pattern: "*"}`, written to the session. wopr has no permission subsystem (three non-test files,
   all in serve, all stubs). This is a subsystem item, not a field item. Nothing sends `tools` today. Filed
-  as `serve-prompt-tools-permissions`.
 
 ### serve-prompt-format-json-schema — structured output via `format`
 
@@ -1868,135 +1863,6 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 ### serve-auto-evict-idle-sessions — auto-archive and evict sessions idle > N hours
 
 
-
-### serve-auto-evict-idle-sessions
- — auto-archive and evict sessions idle > N hours
-
-- **Status:** READY — filed 2026-10-10. Addresses the unbounded live-session registry (audit CRITICAL #1).
-- **Why:** wopr's `Host.registry` never evicts; every session created stays resident until process restart,
-  each holding its full transcript in RAM. A long-lived `wopr serve` handling hundreds of sessions will OOM.
-  opencode has no auto-eviction; sessions persist until deleted. The fix: after configurable idle time
-  (default 48h), **archive + evict** — set `time.archived`, remove from `Host.registry`, call
-  `Session.Close()` to drop the transcript from memory. The session stays on disk, restorable on next
-  access (`GET /session/{id}` loads from disk). `GET /experimental/session` excludes it (matching
-  opencode's archive filter). Restorable on next access via lazy reload from disk.
-- **What opencode does:** opencode v1.18.34 has no auto-archive/eviction — sessions persist until
-  explicitly deleted. This is a wopr improvement for long-lived serve deployments.
-- **Implementation:** new `automation/session_sweeper.go` (or add to `serve.go`):
-  - Config: `ServerOptions.IdleTimeout` (duration, default 48h), exposed via `wopr serve --idle-timeout`.
-  - Background ticker (1h) iterates `host.Sessions()`, checks `now.Sub(sess.LastActiveTime()) > idleTimeout`.
-  - For each idle: `archiveSession(id)` (writes `time.archived`), then `host.CloseSession(id)`.
-  - `GET /experimental/session` already filters `Archived != nil` (`serve_handlers.go:670`).
-- **Open questions:**
-  - Should the sweeper run at a fixed interval (e.g., 1h) or on every `Start`/`prompt_async`?
-  - Does an evicted session need to appear in `GET /session` (yes, per opencode) or only `GET /session` full list?
-- **Gates:** behavioral test — create session, wait >idleTimeout, assert `GET /session/{id}` loads from disk and
-  `GET /experimental/session` excludes it; `go build ./...`, `go vet ./...`, `go test -count=1 ./internal/codingagent/serve/`,
-  `golangci-lint`, `go fix -diff ./...` empty, `bash -lc 'make check'`.
-- **Risks:** configurable idle timeout avoids accidental eviction of active sessions; lazy reload on access
-  preserves the "always available" illusion. Race: sweep vs active session starting — resolved by checking
-  `IsIdle()` before eviction (same signal used for 409 on delete).
-
-### serve-missing-route-tests — eight routes lack behavioral tests
-
-- **Status:** READY — filed 2026-10-10.
-- **Why:** `TestNewRegistersEveryRouteWithoutPanicking` (the only route-wide test) covers only `/permission` and `/question`. The following mounted routes have no behavioral test and would silently regress if removed from `serve.go`:
-  - `GET /project/current`
-  - `GET /provider`
-  - `GET /find/file`
-  - `GET /file/status`
-  - `POST /session/{id}/fork` (501)
-  - `POST /session/{id}/revert` (501)
-  - `GET /session/{id}/diff` (501)
-  - `POST /session/{id}/permissions/{permissionID}` (501)
-- **Gate:** add a behavioral test per route (or a single parameterized test) asserting the route exists, returns the correct status, and the response shape matches the contract. Each must name the mutation (route removal) that turns it red.
-- **Open question:** are the four 501s (`fork`, `revert`, `diff`, `permissions`) permanently stubbed, or will they become implemented? The test should assert the current 501 but stay green when implemented.
-
-### serve-prune-learner-map — bound the learner model-outcome map
-
-- **Status:** READY — filed 2026-10-10.
-- **Why:** `internal/codingagent/learn.go:175-189` (`Learner.models` map) accumulates every unique
-  `provider/model` spec ever seen, with no TTL, max-entries, or decay. The router uses this history
-  to score models, but stale entries never drop. Over months of a serve deployment encountering
-  hundreds of models, the map grows linearly.
-- **Fix:** add a bounded eviction policy — **both**:
-  - **TTL**: drop entries with no outcome update for N days (configurable, default 90 days).
-  - **Max entries**: cap the map at N entries (configurable, default 500); evict LRU when exceeded.
-  Both configs exposed via `wopr serve --learn-max-models` / `--learn-ttl` and `ServerOptions`.
-  Gate: unit test that inserts N+1 entries, asserts the oldest is dropped; `go test -count=1 ./internal/codingagent/`.
-- **Open question:** should the router's score decay over time (exponential decay) so stale entries
-  self-deprecate before hitting the cap? Not required for MVP; decay can be a follow-up.
-
-### serve-limit-history-tokens — cap in-memory transcript per session
-
-- **Status:** READY — filed 2026-10-10. Audit HIGH #2: agent's in-memory message history grows until
-  compaction, with no entry-count or byte cap between compactions. Subagent turns add to the same
-  session. A 10k-turn session can hold 100–500 MiB in RAM.
-- **Fix:** add `ServerOptions.MaxHistoryTokens` (default: 80% of the model's context window, read
-  from `model.Capabilities.ContextWindow`). In `session.go` `prepareNextTurn`/`prepareNextPrompt`,
-  after appending the new turn, if `tokenCount > MaxHistoryTokens`, trim oldest messages (keep
-  system + most recent) until under budget. `model.Capabilities.ContextWindow` is already exposed.
-  Configurable via `wopr serve --max-history-tokens` and `ServerOptions.MaxHistoryTokens` (0 = no limit).
-  Gate: test that a session with >N tokens trims to N and the oldest non-system messages are dropped.
-  **Open question:** should subagent turns count toward the same budget? (Yes — they write to the
-  same session transcript.) Should the cap apply per-turn or only at compaction boundaries? Per-turn
-  keeps the bound tight; compaction boundary is the current behavior.
-
-### serve-limit-history-tokens — cap in-memory transcript per session
-
-### serve-prune-learner-map — bound the learner model-outcome map
-
-### serve-prompt-system — per-prompt system prompt override
-
-- **Status:** READY — filed 2026-10-10. `PromptInput.system` is an optional string that overrides the session's
-  system prompt for one turn. The hook point is `createUserMessage` in `prompt.ts` (which already reads
-  `input.system`). The gate is a behavioral test: a prompt with `system: "You are a poet"` produces a user
-  message whose system field is the override, and the model's response reflects it.
-
-### serve-prompt-no-reply — persist user message without an assistant turn
-
-- **Status:** READY — filed 2026-10-10. `PromptInput.noReply` is an optional boolean. When true, the session
-  appends the user message and returns immediately without running the agent loop. The gate: a prompt with
-  `noReply:true` produces a user message in the transcript and no assistant message; the session model is
-  unchanged. Gate: assert the transcript has +1 user entry, 0 assistant entries.
-
-### serve-prompt-parts-agent-subtask — support `agent` and `subtask` part types in prompt parts
-
-- **Status:** READY — filed 2026-10-10. `PromptInput.parts` accepts `agent` and `subtask` part types
-  (in addition to `text` and `file`). The `agent` part spawns a subagent task; `subtask` is a nested
-  sub-task. The gate: a prompt with an `agent` part spawns a subagent task that appears in the transcript;
-  the parent turn continues after the subtask completes.
-
-### serve-variant-wire-alias — emit real variant from models.dev reasoning options
-
-- **Status:** READY — filed 2026-10-10. opencode derives variants from models.dev `reasoning_options`
-  (`provider/transform.ts:1717`): one variant per effort value, or a thinking toggle, or a token budget.
-  `variant: "high"` is the *same model at high reasoning effort*. wopr already has this as `ai.ThinkingLevel`
-  (`coding/session.go:897`, clamped per model). Missing: the wire alias. `sessionModel.Variant` is a hardcoded
-  `"default"` and `providerModelDTO.Variants` an empty map. The slice emits the real variant — the shapes
-  sidecar's "captured `default`" no longer justifies it. Gate: a prompt with `variant: "high"` causes the
-  run to use the high-effort reasoning level, and `GET /session/{id}` reports the variant.
-
-### serve-prompt-tools-permissions — map deprecated `tools` to session permissions
-
-- **Status:** READY — filed 2026-10-10. `tools` is a per-prompt `{toolName: bool}` that opencode converts
-  into session permission rules (`prompt.ts:1060-1067`): `{permission: t, action: enabled ? "allow" :
-  "deny", pattern: "*"}`, written to the session. wopr has no permission subsystem (three non-test files,
-  all in serve, all stubs). This is a subsystem item, not a field item. Nothing sends `tools` today. Filed
-  as `serve-prompt-tools-permissions`.
-
-### serve-prompt-format-json-schema — structured output via `format`
-
-- **Status:** READY — filed 2026-10-10. `format` is an optional `SessionV1.Format` (JSON schema). Needs a
-  structured-output tool; wopr's own system prompt already promises the capability. Filed as
-  `serve-prompt-format-json-schema`.
-
-### serve-auto-evict-idle-sessions — auto-archive and evict sessions idle > N hours
-
-
-
-### serve-auto-evict-idle-sessions
- — auto-archive and evict sessions idle > N hours
 
 ### serve-delete-hard-delete — `DELETE /session/{id}` archives; opencode removes the session and its children
 
