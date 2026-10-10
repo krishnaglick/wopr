@@ -1771,7 +1771,23 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Still open:** `prompt_async` still drops the body's `agent` field, so KKCode's agent choice is not honored (see the
   note under `serve-prompt-message-id`).
 
-### serve-auto-evict-idle-sessions — auto-archive and evict sessions idle > N hours
+### serve-missing-route-tests — eight routes lack behavioral tests
+
+- **Status:** READY — filed 2026-10-10.
+- **Why:** `TestNewRegistersEveryRouteWithoutPanicking` (the only route-wide test) covers only `/permission` and `/question`. The following mounted routes have no behavioral test and would silently regress if removed from `serve.go`:
+  - `GET /project/current`
+  - `GET /provider`
+  - `GET /find/file`
+  - `GET /file/status`
+  - `POST /session/{id}/fork` (501)
+  - `POST /session/{id}/revert` (501)
+  - `GET /session/{id}/diff` (501)
+  - `POST /session/{id}/permissions/{permissionID}` (501)
+- **Gate:** add a behavioral test per route (or a single parameterized test) asserting the route exists, returns the correct status, and the response shape matches the contract. Each must name the mutation (route removal) that turns it red.
+- **Open question:** are the four 501s (`fork`, `revert`, `diff`, `permissions`) permanently stubbed, or will they become implemented? The test should assert the current 501 but stay green when implemented.
+
+### serve-auto-evict-idle-sessions
+ — auto-archive and evict sessions idle > N hours
 
 - **Status:** READY — filed 2026-10-10. Addresses the unbounded live-session registry (audit CRITICAL #1).
 - **Why:** wopr's `Host.registry` never evicts; every session created stays resident until process restart,
@@ -1798,7 +1814,23 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   preserves the "always available" illusion. Race: sweep vs active session starting — resolved by checking
   `IsIdle()` before eviction (same signal used for 409 on delete).
 
-### serve-auto-evict-idle-sessions — auto-archive and evict sessions idle > N hours
+### serve-missing-route-tests — eight routes lack behavioral tests
+
+- **Status:** READY — filed 2026-10-10.
+- **Why:** `TestNewRegistersEveryRouteWithoutPanicking` (the only route-wide test) covers only `/permission` and `/question`. The following mounted routes have no behavioral test and would silently regress if removed from `serve.go`:
+  - `GET /project/current`
+  - `GET /provider`
+  - `GET /find/file`
+  - `GET /file/status`
+  - `POST /session/{id}/fork` (501)
+  - `POST /session/{id}/revert` (501)
+  - `GET /session/{id}/diff` (501)
+  - `POST /session/{id}/permissions/{permissionID}` (501)
+- **Gate:** add a behavioral test per route (or a single parameterized test) asserting the route exists, returns the correct status, and the response shape matches the contract. Each must name the mutation (route removal) that turns it red.
+- **Open question:** are the four 501s (`fork`, `revert`, `diff`, `permissions`) permanently stubbed, or will they become implemented? The test should assert the current 501 but stay green when implemented.
+
+### serve-auto-evict-idle-sessions
+ — auto-archive and evict sessions idle > N hours
 
 ### serve-delete-hard-delete — `DELETE /session/{id}` archives; opencode removes the session and its children
 
