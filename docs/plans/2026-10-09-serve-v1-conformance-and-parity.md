@@ -60,14 +60,14 @@ Each is one feature, gates green, independently committable.
   `packages/opencode/src/server/routes/instance/httpapi/groups/*.ts`, resolving each `<Prefix>Paths` map. **The maps mix three value forms**
   — plain quoted strings (`file.ts`: `list: "/file"`), template literals, and a bare `root` alias — and a parser that
   handles only one of them silently drops whole group files. The guard: abort if `resolved < raw count` where **raw**
-  is the total `HttpApiEndpoint.` occurrences in the same source tree.
+  is the total `HttpApiEndpoint.` occurrences in the same source tree (`packages/opencode/src`, **127** across **19 of 21** group files).
 - Emit `internal/codingagent/serve/testdata/opencode-v1-contract.json`: `{pinned:{repo,tag,commit},
   endpoints:[{method,path,name,group,phone,disposition,waiver,backlog}]}`. `disposition` is `mounted` | `stubbed` |
   `absent` — the four 501s (`fork`, `revert`, `diff`, `permissions`) are `stubbed` with a waiver, because a 501 on a
   phone route is a tracked gap and `mounted` would hide it.
-- `serve.go`: add `type routeMux struct { *http.ServeMux; routes []route }` with a recording `HandleFunc`. All 34
+- `serve.go`: add `type routeMux struct { *http.ServeMux; routes []routeSpec }` with a recording `HandleFunc`. All 34
   existing call sites are unchanged text; the embedded method still registers, so the bad-pattern panic still fires.
-  The `routes` field is exposed for potential future tooling.
+  The `routes` field is exposed for potential future tooling. `type routeSpec struct { Method, Pattern string; Handler http.HandlerFunc }` is added.
 - **No new test in S1.** The inventory is generated and committed; `docs/site/docs/server.md` gains a pointer to it.
   Adding a test over this artifact is the banned category and is not proposed again.
 - **Known gap this leaves:** nothing in the repo catches a route being *removed* from `serve.go`.

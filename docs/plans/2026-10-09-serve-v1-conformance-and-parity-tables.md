@@ -36,7 +36,7 @@ A parser that resolves only `<Prefix>Paths` references and template literals rep
 `config.ts`, `project.ts`, `provider.ts`, `question.ts`, `permission.ts`, `project-copy.ts`, `control-plane.ts`.
 
 **The generator's guard is the deliverable, not the parser:** abort when the resolved count is below the raw
-`HttpApiEndpoint(` occurrence count. That check is what would have caught both failures.
+`HttpApiEndpoint.` occurrence count. That check is what would have caught both failures.
 
 ## `PromptInput` — the request contract for both prompt endpoints
 
