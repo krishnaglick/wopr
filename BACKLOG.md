@@ -1798,24 +1798,36 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   exist today (the vocabulary at `serve_sse.go:46-50` has `session.updated`, `session.diff`, `session.error`,
   `session.status`, `session.idle`, and no delete).
 - **Open questions, for the implementer to settle before coding — not owner decisions:**
-  - Does `writeArchive` survive as the `PATCH {time:{archived}}` path, or does archiving fold into delete? Archiving is
-    a separate opencode feature (`PATCH /session/{id}` sets `time.archived`) and should keep working.
-  - What happens to a **live** session with a run in flight? opencode cancels background jobs first; wopr's analogue is
-    `Session.Abort` plus draining the run slot. Deleting under a live run must not leave a goroutine writing to a
-    removed transcript.
-  - A partially-deleted tree (parent gone, a child's file unremovable) must leave the session list readable — wopr's
-    disk read path (`serve_read.go`) walks session files, so a half-deleted tree is a real failure mode, not a
-    hypothetical.
-- **Gates:** a behavioral test that deleting a session removes it from `GET /session` and `GET /experimental/session`
-  and that its transcript file is gone from disk; that a session with a child removes the child; that deleting an
-  unknown id is `404`; that an unremovable file still answers `200 true` with the error logged (opencode's swallow).
-  Every gate must name the mutation that turns it red. Plus `go build ./...`, `go vet ./...`,
-  `go test -count=1 ./coding/host/ ./internal/codingagent/serve/`, `golangci-lint` on both, `go fix -diff ./...` empty,
-  `bash -lc 'make check'`.
+  - **Delete and archive both refuse while a run is in flight** — owner decision 2026-09. `409 {"error":"session is
+    busy"}`, matching the convention already used by `prompt_async` and `/message` (`serve_prompt.go:77,343`). The busy
+    signal is `s.host.Sessions()` → `Inner().IsIdle()`, the same one `sessionStatus` reads
+    (`serve_handlers.go:552`). This **removes** the cancel-and-drain machinery: a delete can no longer race a turn
+    writing to a transcript it is about to unlink, which was the worst half-delete source. opencode cancels background
+    jobs instead; refusing is a deliberate divergence, and a safer one — nothing is destroyed while work is in flight.
+  - **Archive needs no decision.** `PATCH /session/{id}` with `time.archived` is a separate opencode feature
+    (`Session.setArchived`) and keeps working untouched; only the shared running-session refusal above is new. What
+    the old item got wrong was implying the two might fold together. They do not.
+  - **Half-deleted trees: how they actually arise, and how to make the state unreachable.** With the busy refusal in
+    place, three sources remain — (i) the recursive cascade unlinks the parent and a child's `os.Remove` returns
+    `EACCES`/`EBUSY` (open handle, permissions, NFS); (ii) the process dies between two unlinks; (iii) `ENOSPC`/`EIO`
+    part-way down the tree. The symptom is concrete and checkable: **`serve_read.go` lists sessions by walking session
+    files and never follows `parentID`**, so an orphaned child does not crash the reader — it reappears in
+    `GET /session` as an ordinary session whose `parentID` points at nothing. A silent ghost, not an error, which is
+    worse. opencode tolerates this by logging and swallowing. **wopr should make the state unreachable instead:
+    rename the session (and its children) to a trash name in one step, then unlink.** After the rename there is no
+    half-tree the reader can observe; a failed unlink leaves a `.trash/` entry nothing lists, and recovery is a rename
+    back. Gate on that, not on the error path.
+- **Gates:** a behavioral test that deleting an idle session removes it from `GET /session` and
+  `GET /experimental/session` and that its transcript file is gone from disk; that a session with a child removes the
+  child; that **deleting a session with a run in flight is `409 {"error":"session is busy"}` and deletes nothing**;
+  that deleting an unknown id is `404`; and that a child whose unlink fails leaves **no session in `GET /session`** —
+  the trash-rename assertion, not an error-code assertion. Every gate must name the mutation that turns it red. Plus
+  `go build ./...`, `go vet ./...`, `go test -count=1 ./coding/host/ ./internal/codingagent/serve/`,
+  `golangci-lint` on both, `go fix -diff ./...` empty, `bash -lc 'make check'`.
 - **Risks:** this is the first wopr code path that destroys user data. A regression loses transcripts. That is the
-  "lose data" bar `AGENTS.md` sets for tests — it means this slice gets the fuller gate set, and the delete must be
-  recoverable-by-abort until it is not. Consider a trash step (rename, then unlink) if the implementer judges the
-  window too wide.
+  "lose data" bar `AGENTS.md` sets for tests — it means this slice gets the fuller gate set. The busy refusal plus the
+  rename-then-unlink ordering are what keep it recoverable: nothing is destroyed under a live run, and every failure
+  after the rename is a `.trash/` entry rather than a half-live tree.
 - **Deferred in the same area:** `POST /session/{id}/share` and `DELETE /session/{id}/share` are unmounted in wopr and
   filed under the absent-endpoint inventory. opencode's `Session.share` is a link-generating operation with its own
   lifecycle; it is not implied by this item.
