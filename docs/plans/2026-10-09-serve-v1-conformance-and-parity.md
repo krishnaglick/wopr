@@ -14,7 +14,7 @@ Ratified by the owner 2026-10-09 and written into `AGENTS.md`.
 
 - **Files touched (S1 only):**
   - `automation/gen-opencode-contract.py` — **new**. Extracts the endpoint inventory from a pinned opencode checkout.
-    **It must fail loudly when the resolved count is below the raw `HttpApiEndpoint(` count.** That guard is the whole
+    **It must fail loudly when the resolved count is below the raw `HttpApiEndpoint.` count.** That guard is the whole
     point: a hand parser dropped endpoints across two attempts and under-counted silently both times.
   - `internal/codingagent/serve/testdata/opencode-v1-contract.json` — **new**, generated, committed. This is the
     inventory. `docs/site/docs/server.md` keeps its hand-written per-route prose — that table documents **wopr's 34
