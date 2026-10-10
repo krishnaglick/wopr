@@ -1820,6 +1820,55 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prune-learner-map — bound the learner model-outcome map
 
+### serve-prompt-system — per-prompt system prompt override
+
+- **Status:** READY — filed 2026-10-10. `PromptInput.system` is an optional string that overrides the session's
+  system prompt for one turn. The hook point is `createUserMessage` in `prompt.ts` (which already reads
+  `input.system`). The gate is a behavioral test: a prompt with `system: "You are a poet"` produces a user
+  message whose system field is the override, and the model's response reflects it.
+
+### serve-prompt-no-reply — persist user message without an assistant turn
+
+- **Status:** READY — filed 2026-10-10. `PromptInput.noReply` is an optional boolean. When true, the session
+  appends the user message and returns immediately without running the agent loop. The gate: a prompt with
+  `noReply:true` produces a user message in the transcript and no assistant message; the session model is
+  unchanged. Gate: assert the transcript has +1 user entry, 0 assistant entries.
+
+### serve-prompt-parts-agent-subtask — support `agent` and `subtask` part types in prompt parts
+
+- **Status:** READY — filed 2026-10-10. `PromptInput.parts` accepts `agent` and `subtask` part types
+  (in addition to `text` and `file`). The `agent` part spawns a subagent task; `subtask` is a nested
+  sub-task. The gate: a prompt with an `agent` part spawns a subagent task that appears in the transcript;
+  the parent turn continues after the subtask completes.
+
+### serve-variant-wire-alias — emit real variant from models.dev reasoning options
+
+- **Status:** READY — filed 2026-10-10. opencode derives variants from models.dev `reasoning_options`
+  (`provider/transform.ts:1717`): one variant per effort value, or a thinking toggle, or a token budget.
+  `variant: "high"` is the *same model at high reasoning effort*. wopr already has this as `ai.ThinkingLevel`
+  (`coding/session.go:897`, clamped per model). Missing: the wire alias. `sessionModel.Variant` is a hardcoded
+  `"default"` and `providerModelDTO.Variants` an empty map. The slice emits the real variant — the shapes
+  sidecar's "captured `default`" no longer justifies it. Gate: a prompt with `variant: "high"` causes the
+  run to use the high-effort reasoning level, and `GET /session/{id}` reports the variant.
+
+### serve-prompt-tools-permissions — map deprecated `tools` to session permissions
+
+- **Status:** READY — filed 2026-10-10. `tools` is a per-prompt `{toolName: bool}` that opencode converts
+  into session permission rules (`prompt.ts:1060-1067`): `{permission: t, action: enabled ? "allow" :
+  "deny", pattern: "*"}`, written to the session. wopr has no permission subsystem (three non-test files,
+  all in serve, all stubs). This is a subsystem item, not a field item. Nothing sends `tools` today. Filed
+  as `serve-prompt-tools-permissions`.
+
+### serve-prompt-format-json-schema — structured output via `format`
+
+- **Status:** READY — filed 2026-10-10. `format` is an optional `SessionV1.Format` (JSON schema). Needs a
+  structured-output tool; wopr's own system prompt already promises the capability. Filed as
+  `serve-prompt-format-json-schema`.
+
+### serve-auto-evict-idle-sessions — auto-archive and evict sessions idle > N hours
+
+
+
 ### serve-auto-evict-idle-sessions
  — auto-archive and evict sessions idle > N hours
 
@@ -1896,6 +1945,55 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 ### serve-limit-history-tokens — cap in-memory transcript per session
 
 ### serve-prune-learner-map — bound the learner model-outcome map
+
+### serve-prompt-system — per-prompt system prompt override
+
+- **Status:** READY — filed 2026-10-10. `PromptInput.system` is an optional string that overrides the session's
+  system prompt for one turn. The hook point is `createUserMessage` in `prompt.ts` (which already reads
+  `input.system`). The gate is a behavioral test: a prompt with `system: "You are a poet"` produces a user
+  message whose system field is the override, and the model's response reflects it.
+
+### serve-prompt-no-reply — persist user message without an assistant turn
+
+- **Status:** READY — filed 2026-10-10. `PromptInput.noReply` is an optional boolean. When true, the session
+  appends the user message and returns immediately without running the agent loop. The gate: a prompt with
+  `noReply:true` produces a user message in the transcript and no assistant message; the session model is
+  unchanged. Gate: assert the transcript has +1 user entry, 0 assistant entries.
+
+### serve-prompt-parts-agent-subtask — support `agent` and `subtask` part types in prompt parts
+
+- **Status:** READY — filed 2026-10-10. `PromptInput.parts` accepts `agent` and `subtask` part types
+  (in addition to `text` and `file`). The `agent` part spawns a subagent task; `subtask` is a nested
+  sub-task. The gate: a prompt with an `agent` part spawns a subagent task that appears in the transcript;
+  the parent turn continues after the subtask completes.
+
+### serve-variant-wire-alias — emit real variant from models.dev reasoning options
+
+- **Status:** READY — filed 2026-10-10. opencode derives variants from models.dev `reasoning_options`
+  (`provider/transform.ts:1717`): one variant per effort value, or a thinking toggle, or a token budget.
+  `variant: "high"` is the *same model at high reasoning effort*. wopr already has this as `ai.ThinkingLevel`
+  (`coding/session.go:897`, clamped per model). Missing: the wire alias. `sessionModel.Variant` is a hardcoded
+  `"default"` and `providerModelDTO.Variants` an empty map. The slice emits the real variant — the shapes
+  sidecar's "captured `default`" no longer justifies it. Gate: a prompt with `variant: "high"` causes the
+  run to use the high-effort reasoning level, and `GET /session/{id}` reports the variant.
+
+### serve-prompt-tools-permissions — map deprecated `tools` to session permissions
+
+- **Status:** READY — filed 2026-10-10. `tools` is a per-prompt `{toolName: bool}` that opencode converts
+  into session permission rules (`prompt.ts:1060-1067`): `{permission: t, action: enabled ? "allow" :
+  "deny", pattern: "*"}`, written to the session. wopr has no permission subsystem (three non-test files,
+  all in serve, all stubs). This is a subsystem item, not a field item. Nothing sends `tools` today. Filed
+  as `serve-prompt-tools-permissions`.
+
+### serve-prompt-format-json-schema — structured output via `format`
+
+- **Status:** READY — filed 2026-10-10. `format` is an optional `SessionV1.Format` (JSON schema). Needs a
+  structured-output tool; wopr's own system prompt already promises the capability. Filed as
+  `serve-prompt-format-json-schema`.
+
+### serve-auto-evict-idle-sessions — auto-archive and evict sessions idle > N hours
+
+
 
 ### serve-auto-evict-idle-sessions
  — auto-archive and evict sessions idle > N hours
