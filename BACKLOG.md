@@ -1771,6 +1771,55 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Still open:** `prompt_async` still drops the body's `agent` field, so KKCode's agent choice is not honored (see the
   note under `serve-prompt-message-id`).
 
+### serve-delete-hard-delete — `DELETE /session/{id}` archives; opencode removes the session and its children
+
+- **Status:** READY — filed 2026-10-09. Supersedes the archive-on-delete owner decision of 2026-10-08
+  (`serve-delete-session-archives`) and removes one of the three ratified divergences named in `AGENTS.md`, under the
+  rule that opencode is the specification for `wopr serve`.
+- **Why:** opencode's `DELETE /session/{id}` is a hard delete. `packages/opencode/src/session/session.ts:606-627`
+  resolves the session first (unknown id errors), cancels the session's background jobs, **recursively removes every
+  child session**, publishes `SessionV1.Event.Deleted`, removes the session's events, and **logs and swallows any
+  error** — the route still answers `200` with a JSON `true`. wopr instead stamps `time.archived`
+  (`writeArchive`, `internal/codingagent/serve/serve_handlers.go`) and never removes a transcript file, so a phone
+  that deletes a session keeps seeing it. The 2026-10-08 decision was made because wopr had no host delete primitive.
+  That is still true — there is no `Host.Remove`, and nothing in `coding/host/` removes a transcript — so this is new
+  work, not a handler swap.
+- **What opencode specifies, precisely** (`session.ts:606-627`, route at `routes/instance/httpapi/groups/session.ts`):
+  1. resolve the session; unknown id is a failure before anything is touched;
+  2. cancel background jobs for that session;
+  3. **cascade** — `children(sessionID)`, then `remove(child.id)` per child, recursively;
+  4. publish `Deleted` with the session info;
+  5. remove the session's events;
+  6. any thrown error is logged, not propagated — the route still returns `true`;
+  7. response is `200 application/json` with body `true`, unchanged from what wopr already sends.
+- **Files:** `coding/host/` — a new host delete primitive (cancel the run, drop the live session, remove the
+  transcript and its sidecars); `internal/codingagent/serve/serve_handlers.go` — `deleteSession` routes to it and
+  publishes the delete event; `internal/codingagent/serve/serve_sse.go` — a `session.deleted` event, which does not
+  exist today (the vocabulary at `serve_sse.go:46-50` has `session.updated`, `session.diff`, `session.error`,
+  `session.status`, `session.idle`, and no delete).
+- **Open questions, for the implementer to settle before coding — not owner decisions:**
+  - Does `writeArchive` survive as the `PATCH {time:{archived}}` path, or does archiving fold into delete? Archiving is
+    a separate opencode feature (`PATCH /session/{id}` sets `time.archived`) and should keep working.
+  - What happens to a **live** session with a run in flight? opencode cancels background jobs first; wopr's analogue is
+    `Session.Abort` plus draining the run slot. Deleting under a live run must not leave a goroutine writing to a
+    removed transcript.
+  - A partially-deleted tree (parent gone, a child's file unremovable) must leave the session list readable — wopr's
+    disk read path (`serve_read.go`) walks session files, so a half-deleted tree is a real failure mode, not a
+    hypothetical.
+- **Gates:** a behavioral test that deleting a session removes it from `GET /session` and `GET /experimental/session`
+  and that its transcript file is gone from disk; that a session with a child removes the child; that deleting an
+  unknown id is `404`; that an unremovable file still answers `200 true` with the error logged (opencode's swallow).
+  Every gate must name the mutation that turns it red. Plus `go build ./...`, `go vet ./...`,
+  `go test -count=1 ./coding/host/ ./internal/codingagent/serve/`, `golangci-lint` on both, `go fix -diff ./...` empty,
+  `bash -lc 'make check'`.
+- **Risks:** this is the first wopr code path that destroys user data. A regression loses transcripts. That is the
+  "lose data" bar `AGENTS.md` sets for tests — it means this slice gets the fuller gate set, and the delete must be
+  recoverable-by-abort until it is not. Consider a trash step (rename, then unlink) if the implementer judges the
+  window too wide.
+- **Deferred in the same area:** `POST /session/{id}/share` and `DELETE /session/{id}/share` are unmounted in wopr and
+  filed under the absent-endpoint inventory. opencode's `Session.share` is a link-generating operation with its own
+  lifecycle; it is not implied by this item.
+
 ### serve-prompt-async-abort-handoff-race — a late abort can cancel the just-handed-off queued prompt
 
 - **Status:** DONE — shipped 2026-10-08 on `wave-serve-prompt-async-abort-handoff-race`. A late abort no longer cancels

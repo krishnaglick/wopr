@@ -44,10 +44,11 @@ Configuration lives under `~/.wopr` (`WOPR_HOME`); project configuration under
   KKCode shapes sidecar: a recorded "captured client behavior" is evidence about
   the client, not a reason to keep diverging from the server it talks to. A
   divergence survives only as a recorded product decision with a stated reason —
-  the ratified ones are the archive-on-delete, SSE user two-phase, and
-  duplicate-`messageID` items in `BACKLOG.md`. This rule covers `wopr serve`
-  only; the TUI and everything else have no upstream. The pin, the extraction,
-  and the generated inventory live in
+  the ratified ones are the SSE user two-phase and duplicate-`messageID` items in
+  `BACKLOG.md`. Archive-on-delete was ratified here once and is now **superseded**:
+  `serve-delete-hard-delete` reinstates opencode's behavior. This rule covers
+  `wopr serve` only; the TUI and everything else have no upstream. The pin, the
+  extraction, and the generated inventory live in
   `docs/plans/2026-10-09-serve-v1-conformance-and-parity.md`.
 - Do not add tests by default. Add one small behavioral test only when a
   regression would cost money, lose data, or weaken safety, or when fixing a real
