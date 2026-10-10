@@ -1786,6 +1786,40 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Gate:** add a behavioral test per route (or a single parameterized test) asserting the route exists, returns the correct status, and the response shape matches the contract. Each must name the mutation (route removal) that turns it red.
 - **Open question:** are the four 501s (`fork`, `revert`, `diff`, `permissions`) permanently stubbed, or will they become implemented? The test should assert the current 501 but stay green when implemented.
 
+### serve-prune-learner-map — bound the learner model-outcome map
+
+- **Status:** READY — filed 2026-10-10.
+- **Why:** `internal/codingagent/learn.go:175-189` (`Learner.models` map) accumulates every unique
+  `provider/model` spec ever seen, with no TTL, max-entries, or decay. The router uses this history
+  to score models, but stale entries never drop. Over months of a serve deployment encountering
+  hundreds of models, the map grows linearly.
+- **Fix:** add a bounded eviction policy — **both**:
+  - **TTL**: drop entries with no outcome update for N days (configurable, default 90 days).
+  - **Max entries**: cap the map at N entries (configurable, default 500); evict LRU when exceeded.
+  Both configs exposed via `wopr serve --learn-max-models` / `--learn-ttl` and `ServerOptions`.
+  Gate: unit test that inserts N+1 entries, asserts the oldest is dropped; `go test -count=1 ./internal/codingagent/`.
+- **Open question:** should the router's score decay over time (exponential decay) so stale entries
+  self-deprecate before hitting the cap? Not required for MVP; decay can be a follow-up.
+
+### serve-limit-history-tokens — cap in-memory transcript per session
+
+- **Status:** READY — filed 2026-10-10. Audit HIGH #2: agent's in-memory message history grows until
+  compaction, with no entry-count or byte cap between compactions. Subagent turns add to the same
+  session. A 10k-turn session can hold 100–500 MiB in RAM.
+- **Fix:** add `ServerOptions.MaxHistoryTokens` (default: 80% of the model's context window, read
+  from `model.Capabilities.ContextWindow`). In `session.go` `prepareNextTurn`/`prepareNextPrompt`,
+  after appending the new turn, if `tokenCount > MaxHistoryTokens`, trim oldest messages (keep
+  system + most recent) until under budget. `model.Capabilities.ContextWindow` is already exposed.
+  Configurable via `wopr serve --max-history-tokens` and `ServerOptions.MaxHistoryTokens` (0 = no limit).
+  Gate: test that a session with >N tokens trims to N and the oldest non-system messages are dropped.
+  **Open question:** should subagent turns count toward the same budget? (Yes — they write to the
+  same session transcript.) Should the cap apply per-turn or only at compaction boundaries? Per-turn
+  keeps the bound tight; compaction boundary is the current behavior.
+
+### serve-limit-history-tokens — cap in-memory transcript per session
+
+### serve-prune-learner-map — bound the learner model-outcome map
+
 ### serve-auto-evict-idle-sessions
  — auto-archive and evict sessions idle > N hours
 
@@ -1828,6 +1862,40 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   - `POST /session/{id}/permissions/{permissionID}` (501)
 - **Gate:** add a behavioral test per route (or a single parameterized test) asserting the route exists, returns the correct status, and the response shape matches the contract. Each must name the mutation (route removal) that turns it red.
 - **Open question:** are the four 501s (`fork`, `revert`, `diff`, `permissions`) permanently stubbed, or will they become implemented? The test should assert the current 501 but stay green when implemented.
+
+### serve-prune-learner-map — bound the learner model-outcome map
+
+- **Status:** READY — filed 2026-10-10.
+- **Why:** `internal/codingagent/learn.go:175-189` (`Learner.models` map) accumulates every unique
+  `provider/model` spec ever seen, with no TTL, max-entries, or decay. The router uses this history
+  to score models, but stale entries never drop. Over months of a serve deployment encountering
+  hundreds of models, the map grows linearly.
+- **Fix:** add a bounded eviction policy — **both**:
+  - **TTL**: drop entries with no outcome update for N days (configurable, default 90 days).
+  - **Max entries**: cap the map at N entries (configurable, default 500); evict LRU when exceeded.
+  Both configs exposed via `wopr serve --learn-max-models` / `--learn-ttl` and `ServerOptions`.
+  Gate: unit test that inserts N+1 entries, asserts the oldest is dropped; `go test -count=1 ./internal/codingagent/`.
+- **Open question:** should the router's score decay over time (exponential decay) so stale entries
+  self-deprecate before hitting the cap? Not required for MVP; decay can be a follow-up.
+
+### serve-limit-history-tokens — cap in-memory transcript per session
+
+- **Status:** READY — filed 2026-10-10. Audit HIGH #2: agent's in-memory message history grows until
+  compaction, with no entry-count or byte cap between compactions. Subagent turns add to the same
+  session. A 10k-turn session can hold 100–500 MiB in RAM.
+- **Fix:** add `ServerOptions.MaxHistoryTokens` (default: 80% of the model's context window, read
+  from `model.Capabilities.ContextWindow`). In `session.go` `prepareNextTurn`/`prepareNextPrompt`,
+  after appending the new turn, if `tokenCount > MaxHistoryTokens`, trim oldest messages (keep
+  system + most recent) until under budget. `model.Capabilities.ContextWindow` is already exposed.
+  Configurable via `wopr serve --max-history-tokens` and `ServerOptions.MaxHistoryTokens` (0 = no limit).
+  Gate: test that a session with >N tokens trims to N and the oldest non-system messages are dropped.
+  **Open question:** should subagent turns count toward the same budget? (Yes — they write to the
+  same session transcript.) Should the cap apply per-turn or only at compaction boundaries? Per-turn
+  keeps the bound tight; compaction boundary is the current behavior.
+
+### serve-limit-history-tokens — cap in-memory transcript per session
+
+### serve-prune-learner-map — bound the learner model-outcome map
 
 ### serve-auto-evict-idle-sessions
  — auto-archive and evict sessions idle > N hours
