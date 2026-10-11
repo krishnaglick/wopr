@@ -4365,3 +4365,156 @@ func TestPromptMessageIDDuplicateRejectedWhileBusy(t *testing.T) {
 		t.Errorf("persisted msg_race text: expected it to contain %q, got %q", "queued-race", text)
 	}
 }
+
+// TestProjectCurrentReturnsServedRootProject guards GET /project/current: it
+// answers 200 with a projectDTO object whose sandboxes slice is present (never
+// null). Deleting the route's mux.HandleFunc line in serve.go leaves ServeMux
+// with no match, it answers 404, and this test goes red.
+func TestProjectCurrentReturnsServedRootProject(t *testing.T) {
+	env := promptEnvFor(t)
+
+	status, body := getRaw(t, env.baseURL, "/project/current")
+	if status != http.StatusOK {
+		t.Fatalf("GET /project/current: expected 200, got %d", status)
+	}
+	var dto projectDTO
+	if err := json.Unmarshal(body, &dto); err != nil {
+		t.Fatalf("GET /project/current: decode projectDTO: %v", err)
+	}
+	if dto.Sandboxes == nil {
+		t.Error("GET /project/current: sandboxes is null, contract requires a non-nil slice")
+	}
+}
+
+// TestProviderReturnsSortedAuthenticatedNames guards GET /provider: it answers
+// 200 with a non-nil, sorted []string (empty under the hermetic test env).
+// Deleting the route's mux.HandleFunc line in serve.go leaves ServeMux with no
+// match, it answers 404, and this test goes red.
+func TestProviderReturnsSortedAuthenticatedNames(t *testing.T) {
+	env := promptEnvFor(t)
+
+	status, body := getRaw(t, env.baseURL, "/provider")
+	if status != http.StatusOK {
+		t.Fatalf("GET /provider: expected 200, got %d", status)
+	}
+	var names []string
+	if err := json.Unmarshal(body, &names); err != nil {
+		t.Fatalf("GET /provider: decode []string: %v", err)
+	}
+	if names == nil {
+		t.Fatal("GET /provider: body is null, contract requires []")
+	}
+	if !slices.IsSorted(names) {
+		t.Errorf("GET /provider: names are not sorted: %v", names)
+	}
+}
+
+// TestFindFileReturnsWalkedFileNodes guards GET /find/file: after seeding
+// hello.txt in CWD it answers 200 with the walked fileNodeDTO list whose
+// hello.txt entry carries the full node shape. Deleting the route's
+// mux.HandleFunc line in serve.go leaves ServeMux with no match, it answers
+// 404, and this test goes red.
+func TestFindFileReturnsWalkedFileNodes(t *testing.T) {
+	env := promptEnvFor(t)
+	if err := os.WriteFile(filepath.Join(env.services.CWD(), "hello.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	status, body := getRaw(t, env.baseURL, "/find/file")
+	if status != http.StatusOK {
+		t.Fatalf("GET /find/file: expected 200, got %d", status)
+	}
+	var nodes []fileNodeDTO
+	if err := json.Unmarshal(body, &nodes); err != nil {
+		t.Fatalf("GET /find/file: decode []fileNodeDTO: %v", err)
+	}
+	var found *fileNodeDTO
+	for i := range nodes {
+		if nodes[i].Name == "hello.txt" {
+			found = &nodes[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("GET /find/file: no hello.txt node in %+v", nodes)
+	}
+	if found.Name != "hello.txt" {
+		t.Errorf("hello.txt name: expected %q, got %q", "hello.txt", found.Name)
+	}
+	if found.Path != "hello.txt" {
+		t.Errorf("hello.txt path: expected %q, got %q", "hello.txt", found.Path)
+	}
+	if found.Type != "file" {
+		t.Errorf("hello.txt type: expected %q, got %q", "file", found.Type)
+	}
+	if found.Ignored {
+		t.Error("hello.txt ignored: expected false")
+	}
+	if found.Absolute == "" {
+		t.Error("hello.txt absolute: expected non-empty")
+	}
+}
+
+// TestFileStatusAnswersNonNilArray guards GET /file/status: on the plain
+// promptEnvFor tempdir (not a git repo) it answers 200 with the empty but
+// non-null []fileStatusDTO. Deleting the route's mux.HandleFunc line in
+// serve.go leaves ServeMux with no match, it answers 404, and this test goes
+// red.
+func TestFileStatusAnswersNonNilArray(t *testing.T) {
+	env := promptEnvFor(t)
+
+	status, body := getRaw(t, env.baseURL, "/file/status")
+	if status != http.StatusOK {
+		t.Fatalf("GET /file/status: expected 200, got %d", status)
+	}
+	var statuses []fileStatusDTO
+	if err := json.Unmarshal(body, &statuses); err != nil {
+		t.Fatalf("GET /file/status: decode []fileStatusDTO: %v", err)
+	}
+	if statuses == nil {
+		t.Error("GET /file/status: body is null, contract requires []")
+	}
+}
+
+// TestStubbedSessionRoutesAnswer501 guards the three not-yet-implemented
+// session routes: POST /session/{id}/fork, POST /session/{id}/revert and
+// GET /session/{id}/diff. Each answers 501 with errorDTO{error:"not
+// implemented"}. Deleting any one of the three mux.HandleFunc lines in serve.go
+// (fork, revert, diff) leaves ServeMux with no match for that route, it answers
+// 404, and this test goes red.
+func TestStubbedSessionRoutesAnswer501(t *testing.T) {
+	env := promptEnvFor(t)
+	id := createPromptSession(t, env.baseURL)
+
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/session/" + id + "/fork"},
+		{http.MethodPost, "/session/" + id + "/revert"},
+		{http.MethodGet, "/session/" + id + "/diff"},
+	}
+	for _, rt := range routes {
+		var status int
+		var body []byte
+		if rt.method == http.MethodGet {
+			status, body = getRaw(t, env.baseURL, rt.path)
+		} else {
+			status, body = postJSON(t, env.baseURL, rt.path, "{}")
+		}
+		// 501 is the current contract for this stub; update this line when the
+		// route is implemented.
+		if status != http.StatusNotImplemented {
+			t.Errorf("%s %s: expected 501, got %d", rt.method, rt.path, status)
+			continue
+		}
+		var dto errorDTO
+		if err := json.Unmarshal(body, &dto); err != nil {
+			t.Errorf("%s %s: decode errorDTO: %v", rt.method, rt.path, err)
+			continue
+		}
+		if dto.Error != "not implemented" {
+			t.Errorf("%s %s: expected error %q, got %q", rt.method, rt.path, "not implemented", dto.Error)
+		}
+	}
+}

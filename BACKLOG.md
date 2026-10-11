@@ -1773,7 +1773,9 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-missing-route-tests — eight routes lack behavioral tests
 
-- **Status:** READY — filed 2026-10-10.
+- **Status:** DONE — shipped 2026-10-11 on `wave-serve-missing-route-tests`. Five tests added to `internal/codingagent/serve/serve_test.go`, no import changes, no new helper: `TestProjectCurrentReturnsServedRootProject`, `TestProviderReturnsSortedAuthenticatedNames`, `TestFindFileReturnsWalkedFileNodes`, `TestFileStatusAnswersNonNilArray`, `TestStubbedSessionRoutesAnswer501`. Each was observed RED on its own route's `mux.HandleFunc` removal (404) and GREEN after; the stub test was mutated three times (`serve.go` fork/revert/diff lines). Gate: package tests (108 pass), `go build`/`go vet`, `golangci-lint` 0 issues; `make check` still cannot complete in this environment (tmux absent), `make lint` passes.
+- **Permissions:** `POST /session/{id}/permissions/{permissionID}` already had behavioral coverage (`TestPermissionSubmitRoutesAnswer501OnEveryMatchingPath`, `serve_test.go:2121`), so no test was added — the item's "eight" is seven uncovered plus one covered.
+- **Open question — resolved:** the four 501 stubs stay pinned at 501 today; the `501` literal is the one line to change when a stub is implemented (`TestStubbedSessionRoutesAnswer501` carries that comment; the permissions test's literal is at `serve_test.go:2131`). No `!= 404` shadow assertion — it is dead beside the `== 501` check.
 - **Why:** `TestNewRegistersEveryRouteWithoutPanicking` (the only route-wide test) covers only `/permission` and `/question`. The following mounted routes have no behavioral test and would silently regress if removed from `serve.go`:
   - `GET /project/current`
   - `GET /provider`
