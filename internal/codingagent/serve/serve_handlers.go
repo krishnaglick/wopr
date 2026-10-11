@@ -1164,10 +1164,12 @@ func entriesToMessages(entries []icodingagent.SessionEntry, sessionID, cwd, root
 			role      string
 			content   []ai.ContentBlock
 			assistant *agent.AssistantMessage
+			system    string
 		)
 		switch {
 		case me.Message.User != nil:
 			role = me.Message.User.Role
+			system = me.Message.User.System
 			content = make([]ai.ContentBlock, len(me.Message.User.Content))
 			for i, c := range me.Message.User.Content {
 				content[i] = c
@@ -1212,6 +1214,7 @@ func entriesToMessages(entries []icodingagent.SessionEntry, sessionID, cwd, root
 			Info: messageInfo(sessionID, cwd, root, e.Base.ID, role, parentID, created,
 				assistant, fallbackProvider, fallbackModel),
 		}
+		msg.Info.System = system
 
 		for i, block := range content {
 			switch b := block.(type) {

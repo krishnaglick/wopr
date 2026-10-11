@@ -34,6 +34,11 @@ type UserMessage struct {
 	Role      string                `json:"role"` // "user"
 	Content   []ai.UserContentBlock `json:"content"`
 	Timestamp int64                 `json:"timestamp"`
+	// System is the per-prompt system text the caller staged with
+	// SetNextUserSystem for this turn. It is appended (never substituted) to the
+	// turn's system prompt at the provider boundary and persisted so the stream
+	// and GET can echo it. omitempty keeps it off every message that has none.
+	System string `json:"system,omitempty"`
 	// EntryID is the session entry id this message persists under. A client that
 	// minted the id for optimistic rendering sets it so the stream and the
 	// transcript share one id; it is runtime-only and never serialized.
@@ -589,6 +594,10 @@ type Agent struct {
 	stateMu            sync.RWMutex
 	stateRevision      uint64
 	forcedSystemPrompt *string
+	// nextUserSystem is the per-prompt system text for exactly one turn. The
+	// serve run-slot before hook sets it on the run goroutine and the adjacent
+	// SendContent consumes and clears it, so it never leaks past the turn.
+	nextUserSystem string
 	// messagesMu guards writes to messages and MessagesSnapshot reads, so
 	// other goroutines can observe the transcript while a run appends to it.
 	messagesMu    sync.RWMutex
@@ -660,6 +669,15 @@ func (a *Agent) SetSystemPrompt(prompt string) {
 // use the transcript's own system prompt again.
 func (a *Agent) ClearSystemPrompt() {
 	a.forcedSystemPrompt = nil
+}
+
+// SetNextUserSystem stages per-prompt system text for the next SendContent.
+// Unlike SetSystemPrompt it is request-scoped: SendContent attaches the value to
+// its user message and clears it, so it applies to exactly one turn. It is set
+// and consumed on the run goroutine by the run-slot before hook and the adjacent
+// SendContent.
+func (a *Agent) SetNextUserSystem(system string) {
+	a.nextUserSystem = system
 }
 
 // ErrNoModelSelected is returned when a turn is requested with no usable model.
@@ -734,12 +752,15 @@ func (a *Agent) SendContent(ctx context.Context, content []ai.UserContentBlock, 
 	if err := a.ensureModel(); err != nil {
 		return nil, err
 	}
+	system := a.nextUserSystem
+	a.nextUserSystem = ""
 	userMsg := AgentMessage{
 		User: &UserMessage{
 			Role:      RoleUser,
 			Content:   append([]ai.UserContentBlock(nil), content...),
 			Timestamp: time.Now().UnixMilli(),
 			EntryID:   entryID,
+			System:    system,
 		},
 	}
 	msgs := append([]AgentMessage{userMsg}, a.takePendingNextTurn()...)

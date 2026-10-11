@@ -13,18 +13,19 @@ import (
 	codinghost "github.com/alexrudloff/wopr/coding/host"
 )
 
-// promptBody is the body both prompt endpoints accept. system, format and
-// agent are declared nowhere: json.Decode ignores unknown keys, so a body
-// without them accepts all three for free.
+// promptBody is the body both prompt endpoints accept. format and agent are
+// declared nowhere: json.Decode ignores unknown keys, so a body without them
+// accepts both for free.
 //
-// ponytail: ignored per request, not per session. A per-prompt system
-// override, a JSON-schema-constrained retry loop (opencode's
-// StructuredOutputError path) and runtime agent personas are three different
-// slices; declaring the fields now would promise behaviour nothing implements.
+// ponytail: ignored per request, not per session. A JSON-schema-constrained
+// retry loop (opencode's StructuredOutputError path) and runtime agent personas
+// are two different slices; declaring the fields now would promise behaviour
+// nothing implements.
 type promptBody struct {
 	MessageID string       `json:"messageID,omitempty"`
 	Parts     []promptPart `json:"parts"`
 	Model     *modelRef    `json:"model,omitempty"`
+	System    string       `json:"system,omitempty"`
 }
 
 // promptPart is one client part. Text and file are sent; every other type the
@@ -91,11 +92,17 @@ func (s *Server) promptAsync(w http.ResponseWriter, r *http.Request) {
 		}
 		model = m
 	}
+	// The per-prompt system text is staged once the slot is held, unconditionally
+	// and after a successful model swap, so a model refusal returns before it and
+	// a prompt without system clears any pending value.
 	if err := sess.PromptContent(r.Context(), content, msgID, func() error {
-		if model == nil {
-			return nil
+		if model != nil {
+			if err := sess.Inner().SetModel(model); err != nil {
+				return err
+			}
 		}
-		return sess.Inner().SetModel(model)
+		sess.Inner().Agent().SetNextUserSystem(body.System)
+		return nil
 	}); err != nil {
 		s.writePromptError(w, err)
 		return
@@ -145,13 +152,13 @@ func (s *Server) sessionMessage(w http.ResponseWriter, r *http.Request) {
 		var errDTO *errorDTO
 		var status int
 		msgs, runError := sess.PromptContentWait(r.Context(), content, msgID, func() error {
-			if body.Model == nil {
-				return nil
+			if body.Model != nil {
+				errDTO, status = s.applyModel(sess, *body.Model)
+				if errDTO != nil {
+					return errRefused // refusal returns before the set: no pending value
+				}
 			}
-			errDTO, status = s.applyModel(sess, *body.Model)
-			if errDTO != nil {
-				return errRefused
-			}
+			sess.Inner().Agent().SetNextUserSystem(body.System)
 			return nil
 		})
 		settled <- outcome{

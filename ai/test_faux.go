@@ -105,6 +105,28 @@ const TestFauxToolStartedMarker = ".wopr-faux-tool-started"
 
 var testFauxRetryState sync.Map
 
+var (
+	testFauxCaptureMu  sync.Mutex
+	testFauxLastSystem string
+)
+
+// recordTestFauxSystemPrompt records the effective system prompt of a test-faux
+// request. It runs at the top of TestFauxProvider.Stream, before the goroutine,
+// from the messages the transcript already computed.
+func recordTestFauxSystemPrompt(prompt string) {
+	testFauxCaptureMu.Lock()
+	testFauxLastSystem = prompt
+	testFauxCaptureMu.Unlock()
+}
+
+// LastTestFauxSystemPrompt returns the effective system prompt of the last
+// test-faux request, or "" before the first one.
+func LastTestFauxSystemPrompt() string {
+	testFauxCaptureMu.Lock()
+	defer testFauxCaptureMu.Unlock()
+	return testFauxLastSystem
+}
+
 type testFauxToolCall struct {
 	Name string
 	Args map[string]any
@@ -119,6 +141,7 @@ func (p *TestFauxProvider) Stream(ctx context.Context, transcript TranscriptCont
 	}
 	builder := newAssistantStreamBuilder(ctx, "faux", p.ID(), "faux-1", ModelCost{})
 	messages := transcript.Messages()
+	recordTestFauxSystemPrompt(GetCurrentSystemPrompt(messages))
 	go func() {
 		if err := ctx.Err(); err != nil {
 			builder.fail(StopReasonAborted, err)

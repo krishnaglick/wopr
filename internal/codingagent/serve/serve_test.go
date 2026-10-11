@@ -4099,6 +4099,17 @@ func lastUserMessageID(msgs []messageDTO) string {
 	return id
 }
 
+// lastUserMessage returns the last user-role message in the transcript, or nil
+// when there is none.
+func lastUserMessage(msgs []messageDTO) *messageDTO {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Info.Role == "user" {
+			return &msgs[i]
+		}
+	}
+	return nil
+}
+
 // TestPromptMessageIDHonoredEndToEnd pins the item's contract: a client-minted
 // messageID in the prompt body becomes the user transcript entry id on the SSE
 // user message.updated, on its part, and on GET, so a client that rendered the
@@ -4209,6 +4220,109 @@ func TestPromptMessageIDHonoredOnMessage(t *testing.T) {
 	}
 	if got := firstUserMessageID(readTranscript(t, baseURL, id)); got != "msg_sync1" {
 		t.Errorf("GET user id: expected client id %q, got %q", "msg_sync1", got)
+	}
+}
+
+// TestPromptSystemAppliesToTheTurn pins serve-prompt-system: a prompt body's
+// system text is appended (never substituted) to that turn's provider system
+// prompt, persisted on the user message, echoed by GET and both SSE user frames,
+// and absent from a later turn that carries none. Both prompt endpoints have
+// their own before closure, so each gets its own step.
+func TestPromptSystemAppliesToTheTurn(t *testing.T) {
+	baseURL, _ := promptServer(t)
+	id := createPromptSession(t, baseURL)
+
+	const (
+		poetText = "reply with exactly: poet-ok"
+		poetSys  = "You are a poet"
+	)
+	withSystem := `{"parts":[{"type":"text","text":"` + poetText + `"}],"system":"` + poetSys + `"}`
+	withoutSystem := `{"parts":[{"type":"text","text":"` + poetText + `"}]}`
+
+	// Open the stream before the turn so both user frames are observable.
+	ctx := t.Context()
+	resp := openSSE(t, baseURL, ctx)
+	defer func() { _ = resp.Body.Close() }()
+
+	// Turn 1 — POST /session/{id}/message with system.
+	status, payload := postJSON(t, baseURL, "/session/"+id+"/message", withSystem)
+	if status != http.StatusOK {
+		t.Fatalf("POST /message with system: expected 200, got %d (%s)", status, payload)
+	}
+	frames := readSSEUntil(t, resp, stopOnSessionIdle)
+
+	// (a) GET echoes the system text on the turn's user message. This is already
+	// the persisted-JSON round-trip: entriesToMessages decodes the persisted
+	// entry raw through the AgentMessage wire shape.
+	user := lastUserMessage(readTranscript(t, baseURL, id))
+	if user == nil {
+		t.Fatal("no user message reached the transcript")
+	}
+	if user.Info.System != poetSys {
+		t.Errorf("GET user system: expected %q, got %q", poetSys, user.Info.System)
+	}
+
+	// (b) the provider request carried the base prompt plus the appended text,
+	// not the text alone.
+	captured := ai.LastTestFauxSystemPrompt()
+	if !strings.HasSuffix(captured, poetSys) {
+		t.Errorf("captured system prompt must end with %q, got %q", poetSys, captured)
+	}
+	if len(captured) <= len(poetSys) {
+		t.Errorf("captured system prompt must include the base prompt plus the appended text, got %q", captured)
+	}
+
+	// (c) both SSE user frames — the message_end start frame and the settled
+	// frame, under one id — carry the system text.
+	infos := userMessageUpdatedInfos(t, frames)
+	if len(infos) != 2 {
+		t.Fatalf("expected exactly two user message.updated, got %d; frames: %s", len(infos), summarize(frames))
+	}
+	var frameID string
+	for i, info := range infos {
+		var got string
+		if err := json.Unmarshal(info["system"], &got); err != nil {
+			t.Fatalf("user frame %d has no decodable system key: %v (%v)", i, err, info)
+		}
+		if got != poetSys {
+			t.Errorf("user frame %d system: expected %q, got %q", i, poetSys, got)
+		}
+		var frameSystemID string
+		_ = json.Unmarshal(info["id"], &frameSystemID)
+		if i == 0 {
+			frameID = frameSystemID
+		} else if frameSystemID != frameID {
+			t.Errorf("user message.updated ids disagree: %q against %q", frameID, frameSystemID)
+		}
+	}
+
+	// Turn 2 — no system. The previous override must not bleed: the new user
+	// entry carries no key and the provider request omits the text.
+	status, payload = postJSON(t, baseURL, "/session/"+id+"/message", withoutSystem)
+	if status != http.StatusOK {
+		t.Fatalf("second POST /message: expected 200, got %d (%s)", status, payload)
+	}
+	if got := lastUserMessage(readTranscript(t, baseURL, id)); got == nil || got.Info.System != "" {
+		t.Errorf("second turn user system: expected empty, got %+v", got)
+	}
+	if captured := ai.LastTestFauxSystemPrompt(); strings.Contains(captured, poetSys) {
+		t.Errorf("second turn carried a leaked system text: %q", captured)
+	}
+	// Drain turn 2's frames so the next read waits on turn 3, not a buffered
+	// turn-2 idle.
+	_ = readSSEUntil(t, resp, stopOnSessionIdle)
+
+	// Turn 3 — prompt_async has its own before closure, so it gets its own step.
+	status, payload = postJSON(t, baseURL, "/session/"+id+"/prompt_async", withSystem)
+	if status != http.StatusNoContent {
+		t.Fatalf("prompt_async with system: expected 204, got %d (%s)", status, payload)
+	}
+	_ = readSSEUntil(t, resp, stopOnSessionIdle)
+	if got := lastUserMessage(readTranscript(t, baseURL, id)); got == nil || got.Info.System != poetSys {
+		t.Errorf("prompt_async user system: expected %q, got %+v", poetSys, got)
+	}
+	if captured := ai.LastTestFauxSystemPrompt(); !strings.HasSuffix(captured, poetSys) {
+		t.Errorf("prompt_async captured system prompt must end with %q, got %q", poetSys, captured)
 	}
 }
 
