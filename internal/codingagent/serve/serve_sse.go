@@ -387,6 +387,11 @@ type eventMapper struct {
 	// message_end and reused on the turn-end frame so both phases of the user
 	// message.updated report one clock.
 	turnUserCreated int64
+	// turnUserSystem is the user message's per-prompt system text, recorded at
+	// its message_end. The settle frame is emitted from AgentSettledEvent, which
+	// carries no user message, so the mapper must retain the value the start
+	// frame read to make both user frames agree with GET.
+	turnUserSystem string
 }
 
 // newEventMapper returns the Translator the host runs for one session. It is a
@@ -448,10 +453,12 @@ func (m *eventMapper) translate(ev agent.AgentEvent, entryID string) ([]codingho
 		// summary:{"diffs":[]} opencode emits on a settled turn. It rides before
 		// the idle terminators so a reader that stops on session.idle sees it.
 		if m.turnUserID != "" {
+			info := messageInfo(m.sessionID, m.cwd, m.root, m.turnUserID, "user", "", m.turnUserCreated,
+				nil, m.providerID, m.modelID)
+			info.System = m.turnUserSystem
 			events = append(events, m.event(eventMessageUpdated, sseMessageUpdated{
 				SessionID: m.sessionID,
-				Info: messageInfo(m.sessionID, m.cwd, m.root, m.turnUserID, "user", "", m.turnUserCreated,
-					nil, m.providerID, m.modelID),
+				Info:      info,
 			}))
 		}
 		events = append(events, m.status("idle"), m.idle())
@@ -572,10 +579,12 @@ func (m *eventMapper) messageEnd(ev agent.MessageEndEvent, entryID string) ([]co
 		}
 		m.turnUserID = entryID
 		m.turnUserCreated = now
+		m.turnUserSystem = ev.Message.User.System
 		// The start frame carries no summary; the settle burst adds it, so the
 		// turn emits opencode's two-phase pair under one id and clock.
 		info := messageInfo(m.sessionID, m.cwd, m.root, entryID, "user", "", now,
 			nil, m.providerID, m.modelID)
+		info.System = m.turnUserSystem
 		info.omitSummary = true
 		events := []codinghost.Event{m.event(eventMessageUpdated, sseMessageUpdated{
 			SessionID: m.sessionID,

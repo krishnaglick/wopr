@@ -86,6 +86,10 @@ type messageInfoDTO struct {
 	ProviderID string        `json:"providerID"`
 	Time       messageTime   `json:"time"`
 	Finish     string        `json:"finish"`
+	// System is the per-prompt system text the client attached, echoed only on
+	// user messages. omitempty keeps it off every message that has none, so the
+	// persisted transcript shape is unchanged for non-serve turns.
+	System string `json:"system,omitempty"`
 	// omitSummary is a stream-phase flag, never wire data. When set, the user
 	// branch of MarshalJSON omits the summary key, which is how the stream's
 	// start frame differs from its settle frame. The zero value false leaves
@@ -130,6 +134,7 @@ func (m messageInfoDTO) MarshalJSON() ([]byte, error) {
 			Summary   *messageSummary `json:"summary,omitempty"`
 			Agent     string          `json:"agent"`
 			Model     messageModel    `json:"model"`
+			System    string          `json:"system,omitempty"`
 		}{
 			ID:        m.ID,
 			SessionID: m.SessionID,
@@ -138,6 +143,7 @@ func (m messageInfoDTO) MarshalJSON() ([]byte, error) {
 			Summary:   summary,
 			Agent:     m.Agent,
 			Model:     messageModel{ProviderID: m.ProviderID, ModelID: m.ModelID},
+			System:    m.System,
 		})
 	}
 	type plain messageInfoDTO

@@ -49,7 +49,7 @@ payload as `Struct.omit(SessionPrompt.PromptInput.fields, ["sessionID"])`, so th
 | `messageID` | honored | done | `TestPromptMessageIDHonoredEndToEnd` |
 | `model` | honored | done 2026-10-10 | `TestPromptAsyncAppliesTheClientModel` |
 | `agent` | dropped | S2 | none today — the fix creates it; then `GET /session/{id}` |
-| `system` | dropped | S3 | **none identified** — the seam must be named before the slice starts |
+| `system` | honored (appended, not substituted) | done 2026-10-11 | `TestPromptSystemAppliesToTheTurn` |
 | `noReply` | dropped | S3 | user message count +1, assistant count +0 |
 | `parts: agent\|subtask` | dropped | S3 | subagent task record |
 | `variant` | hardcoded `"default"` | S4 (backlog) | emitted `sessionModel.Variant` |
