@@ -52,6 +52,11 @@ type Services struct {
 	registry     *ModelRegistry
 	modelRuntime *ModelRuntime
 
+	// learnMaxModels and learnTTLDays bound the learned model map; zero
+	// takes the efficiency package default. Only `wopr serve` sets them.
+	learnMaxModels int
+	learnTTLDays   int
+
 	// Keep the deterministic provider's counters across request-level model reconstruction.
 	testFauxProvider func() *ai.TestFauxProvider
 }
@@ -72,6 +77,14 @@ type ServicesOptions struct {
 	// ProjectTrusted controls whether project-local settings are loaded. nil
 	// means trusted.
 	ProjectTrusted *bool
+
+	// LearnMaxModels bounds the learner's model map; ≤0 takes the efficiency
+	// package default. Set by `wopr serve --learn-max-models`.
+	LearnMaxModels int
+
+	// LearnTTLDays drops learner entries not updated within this many days;
+	// ≤0 takes the efficiency package default. Set by `wopr serve --learn-ttl`.
+	LearnTTLDays int
 }
 
 // NewServices constructs a Services container. Failure modes:
@@ -132,6 +145,8 @@ func NewServices(opts ServicesOptions) (*Services, error) {
 			return &ai.TestFauxProvider{}
 		}),
 	}
+	services.learnMaxModels = opts.LearnMaxModels
+	services.learnTTLDays = opts.LearnTTLDays
 	modelRuntime, err := NewModelRuntime(services)
 	if err != nil {
 		return nil, err

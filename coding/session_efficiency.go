@@ -52,7 +52,14 @@ func (s *Session) initEfficiency() {
 		state.loadError = err.Error()
 		state.cfg = efficiency.DefaultConfig()
 	}
-	state.learner = efficiency.LoadLearner(s.services.AgentDir(), state.cfg.Learn)
+	var lo efficiency.LearnerOptions
+	if v := s.services.learnMaxModels; v > 0 {
+		lo.MaxModels = v
+	}
+	if v := s.services.learnTTLDays; v > 0 {
+		lo.TTL = time.Duration(v) * 24 * time.Hour
+	}
+	state.learner = efficiency.LoadLearner(s.services.AgentDir(), state.cfg.Learn, lo)
 	s.efficiency = state
 	if state.learner.On() {
 		s.agent.AddAfterToolCallHook(s.learnAfterToolCall)

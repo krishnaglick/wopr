@@ -1790,7 +1790,18 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prune-learner-map — bound the learner model-outcome map
 
-- **Status:** READY — filed 2026-10-10.
+- **Status:** DONE — shipped 2026-10-11 (wave `wave-serve-prune-learner-map`).
+- **Shipped:** TTL (default 90d) and max-entries (default 500) eviction on `Learner.models`, both
+  overridable via `wopr serve --learn-max-models N --learn-ttl DAYS` → `coding.ServicesOptions`
+  → `efficiency.LoadLearner` options. Eviction is least-recently-**updated** (keyed on a new
+  per-entry `UpdatedAt`), which is the item's "no outcome update for N days" read; it is not
+  read-order LRU. Tests: `TestLearnerCapEvictsOldest`, `TestLearnerTTLDropsStale`
+  (`internal/codingagent/efficiency/`). Backward compatible: `learnedVersion` unchanged, legacy
+  entries are stamped on load, no data loss.
+- **Corrections to this item's text:** the path was `internal/codingagent/efficiency/learn.go`, not
+  `internal/codingagent/learn.go`; `ServerOptions` does not exist, so the seam is
+  `coding.ServicesOptions`; the gate is `./internal/codingagent/...` (the tests live in the
+  `efficiency` subpackage).
 - **Why:** `internal/codingagent/learn.go:175-189` (`Learner.models` map) accumulates every unique
   `provider/model` spec ever seen, with no TTL, max-entries, or decay. The router uses this history
   to score models, but stale entries never drop. Over months of a serve deployment encountering
