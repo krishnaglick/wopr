@@ -1816,18 +1816,40 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-limit-history-tokens — cap in-memory transcript per session
 
-- **Status:** IN-PROGRESS — claimed 2026-10-11 by `wave-serve-limit-history-tokens`. Filed 2026-10-10. Audit HIGH #2: agent's in-memory message history grows until
-  compaction, with no entry-count or byte cap between compactions. Subagent turns add to the same
-  session. A 10k-turn session can hold 100–500 MiB in RAM.
-- **Fix:** add `ServerOptions.MaxHistoryTokens` (default: 80% of the model's context window, read
-  from `model.Capabilities.ContextWindow`). In `session.go` `prepareNextTurn`/`prepareNextPrompt`,
-  after appending the new turn, if `tokenCount > MaxHistoryTokens`, trim oldest messages (keep
-  system + most recent) until under budget. `model.Capabilities.ContextWindow` is already exposed.
-  Configurable via `wopr serve --max-history-tokens` and `ServerOptions.MaxHistoryTokens` (0 = no limit).
-  Gate: test that a session with >N tokens trims to N and the oldest non-system messages are dropped.
-  **Open question:** should subagent turns count toward the same budget? (Yes — they write to the
-  same session transcript.) Should the cap apply per-turn or only at compaction boundaries? Per-turn
-  keeps the bound tight; compaction boundary is the current behavior.
+- **Status:** DONE — shipped on `wave-serve-limit-history-tokens` as `9655b10`, 2026-10-11. Filed
+  2026-10-10. Audit HIGH #2: agent's in-memory message history grows until compaction, with no
+  entry-count or byte cap between compactions. Subagent turns add to the same session. A 10k-turn
+  session can hold 100–500 MiB in RAM.
+- **What landed:** `coding.ServicesOptions.MaxHistoryTokens *int` (there is no `ServerOptions` type)
+  plumbed from `wopr serve --max-history-tokens`: `nil` → 80% of the model's effective window,
+  `0` → disabled, `N>0` → cap N. New `compaction.TrimMessages` keeps the leading system baseline and
+  the newest messages that fit, starting the kept suffix at a cut point so no tool result is
+  orphaned. Applied at the END of `prepareRequest` (`coding/session_transcript.go:142`), after the
+  routing/learner accounting calls, so the `Context` handed to the provider is bounded. Gate
+  `TestMaxHistoryTokensTrimsOldest` (`coding`) fails if the trim is removed.
+- **Corrections to this item's text:** the path is `coding/session_transcript.go`, not `session.go`;
+  `prepareNextPrompt` does not exist; the seam is `prepareRequest`, not `prepareNextTurn` (a
+  `prepareNextTurn` return is overwritten by `prepareRequest` in the same loop iteration —
+  `agent/agent_loop.go:144` then `:157`), and not `pruneRequestContext` (its result feeds
+  `ensureRoute`/`efficiencyRecordRequest`/`learnRequest`, which must see the untrimmed projection).
+- **Scope correction, recorded:** this bounds the **per-request context**, not the retained
+  transcript. `inner.entries` (`internal/codingagent/session.go:335`) is append-only by invariant
+  (`:325-328`) and is NOT capped; `agent.messages` is already compaction-bounded. The item's
+  100–500 MiB RAM premise is therefore not fully addressed — see `serve-transcript-ram-cap`.
+- **Open items on ship:** the 80% default (`MaxHistoryTokens == nil`) applies to **every**
+  `NewServices` caller — serve, TUI, print, host — not serve-only. It never drops data (compaction
+  still counts the untrimmed projection) but the owner should ratify the broader behavior. Gate note:
+  `make check`'s `test-integration` tier needs `tmux`, absent here, so it did not run; `make test-race`
+  does not race-test the `./coding` package itself.
+
+### serve-transcript-ram-cap — actually bound the retained in-memory transcript
+
+- **Status:** READY — surfaced 2026-10-11 by `serve-limit-history-tokens`. That item's stated
+  motivation (a 10k-turn session holding 100–500 MiB in RAM) is not solved by capping the per-request
+  context: `inner.entries` (`internal/codingagent/session.go:335`) grows for the life of a session and
+  is append-only by design (`:325-328`). Bounding it needs a mechanism that preserves
+  branches/undo/resume (e.g. spill cold entries to disk and page them back, or evict only from a
+  settled point), not truncation. Not started; needs a design decision first.
 
 ### serve-prompt-system — per-prompt system prompt override
 
