@@ -16,6 +16,9 @@ import (
 	"github.com/alexrudloff/wopr/internal/codingagent/serve"
 )
 
+// serveUsage is the flag list every help and error line prints.
+const serveUsage = "wopr serve [--port N] [--hostname H] [--dir PATH] [--learn-max-models N] [--learn-ttl DAYS]"
+
 func runServeCommand(args []string) int {
 	if len(args) == 0 || args[0] != "serve" {
 		return -1
@@ -24,7 +27,7 @@ func runServeCommand(args []string) int {
 	if len(args) > 0 {
 		switch args[0] {
 		case "-h", "--help":
-			fmt.Println("Usage:\n  wopr serve [--port N] [--hostname H] [--dir PATH]\n\nStart the wopr serve daemon.")
+			fmt.Println("Usage:\n  " + serveUsage + "\n\nStart the wopr serve daemon.")
 			return 0
 		}
 	}
@@ -32,11 +35,13 @@ func runServeCommand(args []string) int {
 	flagPort := 0
 	flagHost := ""
 
-	var portVal, hostVal, dirVal string
+	var portVal, hostVal, dirVal, learnMaxVal, learnTTLVal string
 	stringFlags := map[string]*string{
-		"--port":     &portVal,
-		"--hostname": &hostVal,
-		"--dir":      &dirVal,
+		"--port":             &portVal,
+		"--hostname":         &hostVal,
+		"--dir":              &dirVal,
+		"--learn-max-models": &learnMaxVal,
+		"--learn-ttl":        &learnTTLVal,
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -44,7 +49,7 @@ func runServeCommand(args []string) int {
 		if p, ok := stringFlags[arg]; ok {
 			if i+1 >= len(args) || args[i+1] == "" {
 				fmt.Fprintf(os.Stderr, "wopr serve: %s requires a non-empty value\n", arg)
-				fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H] [--dir PATH]")
+				fmt.Fprintln(os.Stderr, "Usage: "+serveUsage)
 				return 2
 			}
 			i++
@@ -54,11 +59,11 @@ func runServeCommand(args []string) int {
 		switch {
 		case strings.HasPrefix(arg, "-"):
 			fmt.Fprintf(os.Stderr, "wopr serve: unknown option: %s\n", arg)
-			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H] [--dir PATH]")
+			fmt.Fprintln(os.Stderr, "Usage: "+serveUsage)
 			return 2
 		default:
 			fmt.Fprintf(os.Stderr, "wopr serve: unexpected argument: %s\n", arg)
-			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H] [--dir PATH]")
+			fmt.Fprintln(os.Stderr, "Usage: "+serveUsage)
 			return 2
 		}
 	}
@@ -67,12 +72,32 @@ func runServeCommand(args []string) int {
 		p, err := strconv.Atoi(portVal)
 		if err != nil || p <= 0 {
 			fmt.Fprintf(os.Stderr, "wopr serve: --port requires a positive integer\n")
-			fmt.Fprintln(os.Stderr, "Usage: wopr serve [--port N] [--hostname H] [--dir PATH]")
+			fmt.Fprintln(os.Stderr, "Usage: "+serveUsage)
 			return 2
 		}
 		flagPort = p
 	}
 	flagHost = hostVal
+
+	maxModels, ttlDays := 0, 0
+	if learnMaxVal != "" {
+		n, err := strconv.Atoi(learnMaxVal)
+		if err != nil || n <= 0 {
+			fmt.Fprintf(os.Stderr, "wopr serve: --learn-max-models requires a positive integer\n")
+			fmt.Fprintln(os.Stderr, "Usage: "+serveUsage)
+			return 2
+		}
+		maxModels = n
+	}
+	if learnTTLVal != "" {
+		n, err := strconv.Atoi(learnTTLVal)
+		if err != nil || n <= 0 {
+			fmt.Fprintf(os.Stderr, "wopr serve: --learn-ttl requires a positive integer (days)\n")
+			fmt.Fprintln(os.Stderr, "Usage: "+serveUsage)
+			return 2
+		}
+		ttlDays = n
+	}
 
 	agentDir := codingagent.AgentDir()
 	// The allowlist is a global-layer guardrail: a served project must not be
@@ -117,6 +142,8 @@ func runServeCommand(args []string) int {
 		CWD:            cwd,
 		AgentDir:       agentDir,
 		ProjectTrusted: func() *bool { b := true; return &b }(),
+		LearnMaxModels: maxModels,
+		LearnTTLDays:   ttlDays,
 	})
 	if err != nil {
 		return failf("wopr serve: %v", err)
