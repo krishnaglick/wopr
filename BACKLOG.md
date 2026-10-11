@@ -1816,7 +1816,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-limit-history-tokens — cap in-memory transcript per session
 
-- **Status:** READY — filed 2026-10-10. Audit HIGH #2: agent's in-memory message history grows until
+- **Status:** IN-PROGRESS — claimed 2026-10-11 by `wave-serve-limit-history-tokens`. Filed 2026-10-10. Audit HIGH #2: agent's in-memory message history grows until
   compaction, with no entry-count or byte cap between compactions. Subagent turns add to the same
   session. A 10k-turn session can hold 100–500 MiB in RAM.
 - **Fix:** add `ServerOptions.MaxHistoryTokens` (default: 80% of the model's context window, read
