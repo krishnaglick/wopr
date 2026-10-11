@@ -1771,6 +1771,163 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Still open:** `prompt_async` still drops the body's `agent` field, so KKCode's agent choice is not honored (see the
   note under `serve-prompt-message-id`).
 
+### serve-missing-route-tests — eight routes lack behavioral tests
+
+- **Status:** READY — filed 2026-10-10.
+- **Why:** `TestNewRegistersEveryRouteWithoutPanicking` (the only route-wide test) covers only `/permission` and `/question`. The following mounted routes have no behavioral test and would silently regress if removed from `serve.go`:
+  - `GET /project/current`
+  - `GET /provider`
+  - `GET /find/file`
+  - `GET /file/status`
+  - `POST /session/{id}/fork` (501)
+  - `POST /session/{id}/revert` (501)
+  - `GET /session/{id}/diff` (501)
+  - `POST /session/{id}/permissions/{permissionID}` (501)
+- **Gate:** add a behavioral test per route (or a single parameterized test) asserting the route exists, returns the correct status, and the response shape matches the contract. Each must name the mutation (route removal) that turns it red.
+- **Open question:** are the four 501s (`fork`, `revert`, `diff`, `permissions`) permanently stubbed, or will they become implemented? The test should assert the current 501 but stay green when implemented.
+
+### serve-prune-learner-map — bound the learner model-outcome map
+
+- **Status:** READY — filed 2026-10-10.
+- **Why:** `internal/codingagent/learn.go:175-189` (`Learner.models` map) accumulates every unique
+  `provider/model` spec ever seen, with no TTL, max-entries, or decay. The router uses this history
+  to score models, but stale entries never drop. Over months of a serve deployment encountering
+  hundreds of models, the map grows linearly.
+- **Fix:** add a bounded eviction policy — **both**:
+  - **TTL**: drop entries with no outcome update for N days (configurable, default 90 days).
+  - **Max entries**: cap the map at N entries (configurable, default 500); evict LRU when exceeded.
+  Both configs exposed via `wopr serve --learn-max-models` / `--learn-ttl` and `ServerOptions`.
+  Gate: unit test that inserts N+1 entries, asserts the oldest is dropped; `go test -count=1 ./internal/codingagent/`.
+- **Open question:** should the router's score decay over time (exponential decay) so stale entries
+  self-deprecate before hitting the cap? Not required for MVP; decay can be a follow-up.
+
+### serve-limit-history-tokens — cap in-memory transcript per session
+
+- **Status:** READY — filed 2026-10-10. Audit HIGH #2: agent's in-memory message history grows until
+  compaction, with no entry-count or byte cap between compactions. Subagent turns add to the same
+  session. A 10k-turn session can hold 100–500 MiB in RAM.
+- **Fix:** add `ServerOptions.MaxHistoryTokens` (default: 80% of the model's context window, read
+  from `model.Capabilities.ContextWindow`). In `session.go` `prepareNextTurn`/`prepareNextPrompt`,
+  after appending the new turn, if `tokenCount > MaxHistoryTokens`, trim oldest messages (keep
+  system + most recent) until under budget. `model.Capabilities.ContextWindow` is already exposed.
+  Configurable via `wopr serve --max-history-tokens` and `ServerOptions.MaxHistoryTokens` (0 = no limit).
+  Gate: test that a session with >N tokens trims to N and the oldest non-system messages are dropped.
+  **Open question:** should subagent turns count toward the same budget? (Yes — they write to the
+  same session transcript.) Should the cap apply per-turn or only at compaction boundaries? Per-turn
+  keeps the bound tight; compaction boundary is the current behavior.
+
+### serve-prompt-system — per-prompt system prompt override
+
+- **Status:** READY — filed 2026-10-10. `PromptInput.system` is an optional string that overrides the session's
+  system prompt for one turn. The hook point is `createUserMessage` in `prompt.ts` (which already reads
+  `input.system`). The gate is a behavioral test: a prompt with `system: "You are a poet"` produces a user
+  message whose system field is the override, and the model's response reflects it.
+
+### serve-prompt-no-reply — persist user message without an assistant turn
+
+- **Status:** READY — filed 2026-10-10. `PromptInput.noReply` is an optional boolean. When true, the session
+  appends the user message and returns immediately without running the agent loop. The gate: a prompt with
+  `noReply:true` produces a user message in the transcript and no assistant message; the session model is
+  unchanged. Gate: assert the transcript has +1 user entry, 0 assistant entries.
+
+### serve-prompt-parts-agent-subtask — support `agent` and `subtask` part types in prompt parts
+
+- **Status:** READY — filed 2026-10-10. `PromptInput.parts` accepts `agent` and `subtask` part types
+  (in addition to `text` and `file`). The `agent` part spawns a subagent task; `subtask` is a nested
+  sub-task. The gate: a prompt with an `agent` part spawns a subagent task that appears in the transcript;
+  the parent turn continues after the subtask completes.
+
+### serve-variant-wire-alias — emit real variant from models.dev reasoning options
+
+- **Status:** READY — filed 2026-10-10. opencode derives variants from models.dev `reasoning_options`
+  (`provider/transform.ts:1717`): one variant per effort value, or a thinking toggle, or a token budget.
+  `variant: "high"` is the *same model at high reasoning effort*. wopr already has this as `ai.ThinkingLevel`
+  (`coding/session.go:897`, clamped per model). Missing: the wire alias. `sessionModel.Variant` is a hardcoded
+  `"default"` and `providerModelDTO.Variants` an empty map. The slice emits the real variant — the shapes
+  sidecar's "captured `default`" no longer justifies it. Gate: a prompt with `variant: "high"` causes the
+  run to use the high-effort reasoning level, and `GET /session/{id}` reports the variant.
+
+### serve-prompt-tools-permissions — map deprecated `tools` to session permissions
+
+- **Status:** READY — filed 2026-10-10. `tools` is a per-prompt `{toolName: bool}` that opencode converts
+  into session permission rules (`prompt.ts:1060-1067`): `{permission: t, action: enabled ? "allow" :
+  "deny", pattern: "*"}`, written to the session. wopr has no permission subsystem (three non-test files,
+  all in serve, all stubs). This is a subsystem item, not a field item. Nothing sends `tools` today. Filed
+
+### serve-prompt-format-json-schema — structured output via `format`
+
+- **Status:** READY — filed 2026-10-10. `format` is an optional `SessionV1.Format` (JSON schema). Needs a
+  structured-output tool; wopr's own system prompt already promises the capability. Filed as
+  `serve-prompt-format-json-schema`.
+
+### serve-auto-evict-idle-sessions — auto-archive and evict sessions idle > N hours
+
+
+
+### serve-delete-hard-delete — `DELETE /session/{id}` archives; opencode removes the session and its children
+
+- **Status:** READY — filed 2026-10-09. Supersedes the archive-on-delete owner decision of 2026-10-08
+  (`serve-delete-session-archives`) and removes one of the three ratified divergences named in `AGENTS.md`, under the
+  rule that opencode is the specification for `wopr serve`.
+- **Why:** opencode's `DELETE /session/{id}` is a hard delete. `packages/opencode/src/session/session.ts:606-627`
+  resolves the session first (unknown id errors), cancels the session's background jobs, **recursively removes every
+  child session**, publishes `SessionV1.Event.Deleted`, removes the session's events, and **logs and swallows any
+  error** — the route still answers `200` with a JSON `true`. wopr instead stamps `time.archived`
+  (`writeArchive`, `internal/codingagent/serve/serve_handlers.go`) and never removes a transcript file, so a phone
+  that deletes a session keeps seeing it. The 2026-10-08 decision was made because wopr had no host delete primitive.
+  That is still true — there is no `Host.Remove`, and nothing in `coding/host/` removes a transcript — so this is new
+  work, not a handler swap.
+- **What opencode specifies, precisely** (`session.ts:606-627`, route at `routes/instance/httpapi/groups/session.ts`):
+  1. resolve the session; unknown id is a failure before anything is touched;
+  2. cancel background jobs for that session;
+  3. **cascade** — `children(sessionID)`, then `remove(child.id)` per child, recursively;
+  4. publish `Deleted` with the session info;
+  5. remove the session's events;
+  6. any thrown error is logged, not propagated — the route still returns `true`;
+  7. response is `200 application/json` with body `true`, unchanged from what wopr already sends.
+- **Files:** `coding/host/` — a new host delete primitive (cancel the run, drop the live session, remove the
+  transcript and its sidecars); `internal/codingagent/serve/serve_handlers.go` — `deleteSession` routes to it and
+  publishes the delete event; `internal/codingagent/serve/serve_sse.go` — a `session.deleted` event, which does not
+  exist today (the vocabulary at `serve_sse.go:46-50` has `session.updated`, `session.diff`, `session.error`,
+  `session.status`, `session.idle`, and no delete).
+- **Open questions, for the implementer to settle before coding — not owner decisions:**
+  - **Delete and archive both refuse while a run is in flight** — owner decision 2026-09. `409 {"error":"session is
+    busy"}`, matching the convention already used by `prompt_async` and `/message` (`serve_prompt.go:77,343`). The busy
+    signal is `s.host.Sessions()` → `Inner().IsIdle()`, the same one `sessionStatus` reads
+    (`serve_handlers.go:552`). This **removes** the cancel-and-drain machinery: a delete can no longer race a turn
+    writing to a transcript it is about to unlink, which was the worst half-delete source. opencode cancels background
+    jobs instead; refusing is a deliberate divergence, and a safer one — nothing is destroyed while work is in flight.
+  - **Archive needs no decision.** `PATCH /session/{id}` with `time.archived` is a separate opencode feature
+    (`Session.setArchived`) and keeps working untouched; only the shared running-session refusal above is new. What
+    the old item got wrong was implying the two might fold together. They do not.
+  - **Half-deleted trees: make the state unreachable by ordering, not by storing trash.** With the busy refusal in
+    place, three sources remain — (i) the recursive cascade unlinks the parent and a child's `os.Remove` returns
+    `EACCES`/`EBUSY` (open handle, permissions, NFS); (ii) the process dies between two unlinks; (iii) `ENOSPC`/`EIO`
+    part-way down the tree. The symptom is concrete: **`serve_read.go` lists sessions by walking session files under
+    `~/.wopr/agent/sessions/<mangled-cwd>/` and never follows `parentID`**, so an orphaned child does not fail the
+    reader — it reappears in `GET /session` as an ordinary session whose `parentID` points at nothing. A silent ghost.
+    opencode tolerates this by logging and swallowing. **wopr orders instead: read the whole subtree from disk first
+    (reading it as you walk loses the siblings once the first is gone), then unlink children-first, parent-last,
+    stopping at the first error.** The invariant that buys is *a session file exists ⟹ its parent exists, or it was a
+    root*, because a parent is only unlinked once every child is gone. A failed unlink or a crash then leaves the
+    **parent in place** — the subtree stays discoverable and the delete is retryable, which is the same guarantee as
+    any other failed filesystem call. No trash directory: it would need its own lifecycle (what prunes it, what lists
+    it, how it is recovered) to solve a state that ordering removes. Gate on the ordering, not on the error path.
+- **Gates:** a behavioral test that deleting an idle session removes it from `GET /session` and
+  `GET /experimental/session` and that its transcript file is gone from disk; that a session with a child removes the
+  child; that **deleting a session with a run in flight is `409 {"error":"session is busy"}` and deletes nothing**;
+  that deleting an unknown id is `404`; and that **a child whose unlink fails leaves its parent listed and intact**
+  — the ordering assertion, not an error-code assertion. Every gate must name the mutation that turns it red. Plus
+  `go build ./...`, `go vet ./...`, `go test -count=1 ./coding/host/ ./internal/codingagent/serve/`,
+  `golangci-lint` on both, `go fix -diff ./...` empty, `bash -lc 'make check'`.
+- **Risks:** this is the first wopr code path that destroys user data. A regression loses transcripts. That is the
+  "lose data" bar `AGENTS.md` sets for tests — it means this slice gets the fuller gate set. Two things keep it
+  recoverable, and both are already specified above: nothing is destroyed under a live run, and children-first ordering
+  means every failure leaves the parent listed and the delete retryable.
+- **Deferred in the same area:** `POST /session/{id}/share` and `DELETE /session/{id}/share` are unmounted in wopr and
+  filed under the absent-endpoint inventory. opencode's `Session.share` is a link-generating operation with its own
+  lifecycle; it is not implied by this item.
+
 ### serve-prompt-async-abort-handoff-race — a late abort can cancel the just-handed-off queued prompt
 
 - **Status:** DONE — shipped 2026-10-08 on `wave-serve-prompt-async-abort-handoff-race`. A late abort no longer cancels
