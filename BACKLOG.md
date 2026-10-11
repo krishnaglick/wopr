@@ -1853,7 +1853,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-system — per-prompt system prompt override
 
-- **Status:** READY — filed 2026-10-10. `PromptInput.system` is an optional string that overrides the session's
+- **Status:** IN-PROGRESS — claimed 2026-10-11 on `wave-serve-prompt-system`. filed 2026-10-10. `PromptInput.system` is an optional string that overrides the session's
   system prompt for one turn. The hook point is `createUserMessage` in `prompt.ts` (which already reads
   `input.system`). The gate is a behavioral test: a prompt with `system: "You are a poet"` produces a user
   message whose system field is the override, and the model's response reflects it.
