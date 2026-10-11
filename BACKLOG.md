@@ -1853,10 +1853,24 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-system — per-prompt system prompt override
 
-- **Status:** IN-PROGRESS — claimed 2026-10-11 on `wave-serve-prompt-system`. filed 2026-10-10. `PromptInput.system` is an optional string that overrides the session's
-  system prompt for one turn. The hook point is `createUserMessage` in `prompt.ts` (which already reads
-  `input.system`). The gate is a behavioral test: a prompt with `system: "You are a poet"` produces a user
-  message whose system field is the override, and the model's response reflects it.
+- **Status:** DONE — shipped on `wave-serve-prompt-system` as `2ce42a8`, 2026-10-11. Filed 2026-10-10.
+  `PromptInput.system` is an optional string that adds to the session's system prompt for one turn. The
+  hook point is `createUserMessage` in `prompt.ts` (which already reads `input.system`).
+- **What landed:** both `POST /session/{id}/message` and `/prompt_async` accept `system`; the user message
+  each produces persists it and returns it on `GET /session/{id}/message` and both SSE user frames; the
+  provider request for that turn appends the text last (`agent/agent_loop.go:400`). Gate:
+  `TestPromptSystemAppliesToTheTurn` (`internal/codingagent/serve`), which covers both endpoints, the
+  persisted DTO round-trip, the appended provider request, a no-bleed second turn, and the two SSE frames.
+- **Corrections to this item's text:** opencode does not *override* — it **appends** the per-prompt text
+  as the last system element (`join("\n", [base, ...user.system])`, `session/llm/request.ts:56-66`), and
+  the append is fixed for the whole turn (`lastUser`). wopr matches: `projectSystemPrompt` folds
+  `base + "\n" + sys` into the head. The gate asserts the **provider request** that carried the text, not
+  "the model's response reflects it" — a scripted provider has no prompt-dependent response.
+- **Recorded product divergence (D1):** an empty `system: ""` is treated as absent (no append, key
+  omitted), where opencode stores `Some("")` and echoes `"system":""`. Model behavior is identical —
+  opencode appends only a truthy `user.system` (`request.ts:62`) — but wopr keeps `UserMessage.System` a
+  plain `string` rather than introduce a `*string` solely to echo an empty override. Recorded here per
+  `AGENTS.md`'s divergence rule.
 
 ### serve-prompt-no-reply — persist user message without an assistant turn
 
