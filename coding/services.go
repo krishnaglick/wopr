@@ -57,6 +57,10 @@ type Services struct {
 	learnMaxModels int
 	learnTTLDays   int
 
+	// maxHistoryTokens caps the per-request context. nil takes the 80%
+	// effective-window default, 0 disables the cap. Only `wopr serve` sets it.
+	maxHistoryTokens *int
+
 	// Keep the deterministic provider's counters across request-level model reconstruction.
 	testFauxProvider func() *ai.TestFauxProvider
 }
@@ -85,6 +89,11 @@ type ServicesOptions struct {
 	// LearnTTLDays drops learner entries not updated within this many days;
 	// ≤0 takes the efficiency package default. Set by `wopr serve --learn-ttl`.
 	LearnTTLDays int
+
+	// MaxHistoryTokens caps the per-request history budget. nil takes the
+	// default 80% of the active model's effective window; 0 disables the cap;
+	// N>0 caps at N tokens. Set by `wopr serve --max-history-tokens`.
+	MaxHistoryTokens *int
 }
 
 // NewServices constructs a Services container. Failure modes:
@@ -147,6 +156,7 @@ func NewServices(opts ServicesOptions) (*Services, error) {
 	}
 	services.learnMaxModels = opts.LearnMaxModels
 	services.learnTTLDays = opts.LearnTTLDays
+	services.maxHistoryTokens = opts.MaxHistoryTokens
 	modelRuntime, err := NewModelRuntime(services)
 	if err != nil {
 		return nil, err

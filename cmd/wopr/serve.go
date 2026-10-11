@@ -17,7 +17,7 @@ import (
 )
 
 // serveUsage is the flag list every help and error line prints.
-const serveUsage = "wopr serve [--port N] [--hostname H] [--dir PATH] [--learn-max-models N] [--learn-ttl DAYS]"
+const serveUsage = "wopr serve [--port N] [--hostname H] [--dir PATH] [--learn-max-models N] [--learn-ttl DAYS] [--max-history-tokens N]"
 
 func runServeCommand(args []string) int {
 	if len(args) == 0 || args[0] != "serve" {
@@ -35,13 +35,14 @@ func runServeCommand(args []string) int {
 	flagPort := 0
 	flagHost := ""
 
-	var portVal, hostVal, dirVal, learnMaxVal, learnTTLVal string
+	var portVal, hostVal, dirVal, learnMaxVal, learnTTLVal, maxHistoryVal string
 	stringFlags := map[string]*string{
-		"--port":             &portVal,
-		"--hostname":         &hostVal,
-		"--dir":              &dirVal,
-		"--learn-max-models": &learnMaxVal,
-		"--learn-ttl":        &learnTTLVal,
+		"--port":               &portVal,
+		"--hostname":           &hostVal,
+		"--dir":                &dirVal,
+		"--learn-max-models":   &learnMaxVal,
+		"--learn-ttl":          &learnTTLVal,
+		"--max-history-tokens": &maxHistoryVal,
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -99,6 +100,18 @@ func runServeCommand(args []string) int {
 		ttlDays = n
 	}
 
+	var maxHistoryTokens *int
+	if maxHistoryVal != "" {
+		n, err := strconv.Atoi(maxHistoryVal)
+		if err != nil || n < 0 {
+			fmt.Fprintf(os.Stderr, "wopr serve: --max-history-tokens requires a non-negative integer (0 disables)\n")
+			fmt.Fprintln(os.Stderr, "Usage: "+serveUsage)
+			return 2
+		}
+		v := n
+		maxHistoryTokens = &v
+	}
+
 	agentDir := codingagent.AgentDir()
 	// The allowlist is a global-layer guardrail: a served project must not be
 	// able to widen it. The manager's cwd is irrelevant to global settings.
@@ -139,11 +152,12 @@ func runServeCommand(args []string) int {
 
 	// Build Services.
 	services, err := coding.NewServices(coding.ServicesOptions{
-		CWD:            cwd,
-		AgentDir:       agentDir,
-		ProjectTrusted: func() *bool { b := true; return &b }(),
-		LearnMaxModels: maxModels,
-		LearnTTLDays:   ttlDays,
+		CWD:              cwd,
+		AgentDir:         agentDir,
+		ProjectTrusted:   func() *bool { b := true; return &b }(),
+		LearnMaxModels:   maxModels,
+		LearnTTLDays:     ttlDays,
+		MaxHistoryTokens: maxHistoryTokens,
 	})
 	if err != nil {
 		return failf("wopr serve: %v", err)
