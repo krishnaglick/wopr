@@ -6,6 +6,7 @@ import (
 
 	"github.com/alexrudloff/wopr/agent"
 	"github.com/alexrudloff/wopr/ai"
+	"github.com/alexrudloff/wopr/internal/codingagent/shellread"
 )
 
 // ─── Bash Tool ────────────────────────────────────────────────────────────────
@@ -42,17 +43,31 @@ type BashTool struct {
 	// compacted result and returns its obs_recall id.
 	Compact bool
 	Archive func(key, text string) string
+	// Background, when set, offers run_in_background and tracks the jobs
+	// a command leaves running.
+	Background *BackgroundShells
 }
 
 func (t *BashTool) Name() string  { return "bash" }
 func (t *BashTool) Label() string { return "" }
 
 func (t *BashTool) Schema() ai.ToolSchema {
-	return shellToolSchema("bash", "bash", !t.HideSessionEnvironment)
+	return shellToolSchema("bash", "bash", !t.HideSessionEnvironment, t.Background != nil)
 }
 
 // ExecutionMode is parallel.
 func (t *BashTool) ExecutionMode() agent.ToolExecutionMode { return agent.ToolModeParallel }
+
+// ConcurrencySafe: a command that only reads (shellread's allowlisted
+// pipelines) may run alongside other reads; anything else may create or
+// change files a later call of the batch reads, so it is a barrier.
+func (t *BashTool) ConcurrencySafe(args json.RawMessage) bool {
+	var in struct {
+		Command    string `json:"command"`
+		Background bool   `json:"run_in_background"`
+	}
+	return json.Unmarshal(args, &in) == nil && !in.Background && shellread.CheckReadOnly(in.Command) == nil
+}
 
 // Execute runs the command through the shared shell tool execution with the
 // bash config: the resolved bash, the settings command prefix, and bash temp
@@ -68,5 +83,7 @@ func (t *BashTool) Execute(ctx context.Context, _ string, rawParams json.RawMess
 		binDir:                   t.BinDir,
 		compact:                  t.Compact,
 		archive:                  t.Archive,
+		background:               t.Background,
+		resolveShell:             func() (ShellConfig, error) { return GetShellConfig(t.Settings) },
 	}, rawParams, onUpdate)
 }

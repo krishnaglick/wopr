@@ -54,21 +54,25 @@ func TestImagePruningKeepsTheSessionWhole(t *testing.T) {
 	name := func(id string) string { return "/tmp/" + id + ".png" }
 
 	// Five images, keep 3: under one step past it, nothing is pruned.
-	if _, report := ProjectImages(conversation[1:11], 3, 0, name); report.Pruned != 0 {
+	if _, report := ProjectImages(conversation[1:11], 3, 0, 0, name); report.Pruned != 0 {
 		t.Fatalf("5 images, keep 3: pruned %d, want 0 (pruning waits for a full step)", report.Pruned)
 	}
 	// Eight images, keep 3: the oldest step of three goes, except the
 	// user's own image.
-	projected, report := ProjectImages(conversation, 3, 0, name)
+	projected, report := ProjectImages(conversation, 3, 0, 0, name)
 	if n, ph := images(projected); report.Pruned != 2 || n != 6 || len(ph) != 2 || !strings.Contains(ph[0], "/tmp/a.png") {
 		t.Fatalf("8 images, keep 3: pruned %d, %d images left, placeholders %q", report.Pruned, n, ph)
+	}
+	// A large window's step lets them accumulate: no prefix change yet.
+	if _, report := ProjectImages(conversation, 3, ImagePruneStepLarge, 0, name); report.Pruned != 0 {
+		t.Fatalf("8 images, step %d: pruned %d, want 0", ImagePruneStepLarge, report.Pruned)
 	}
 	if n, _ := images(conversation); n != 8 {
 		t.Fatalf("the conversation lost images: %d left of 8", n)
 	}
 	// A tight size limit prunes oldest first down to one image, and every
 	// text block survives.
-	projected, report = ProjectImages(conversation, 3, 1500, name)
+	projected, report = ProjectImages(conversation, 3, 0, 1500, name)
 	if n, _ := images(projected); n != 1 || report.Bytes > 1500+8*64 {
 		t.Fatalf("size limit: %d images left, %d bytes", n, report.Bytes)
 	}
@@ -82,12 +86,48 @@ func TestImagePruningKeepsTheSessionWhole(t *testing.T) {
 	for i := range 10 {
 		batch = append(batch, shot(fmt.Sprint("sq", i)))
 	}
-	if projected, report := ProjectImages(batch, 3, 0, name); report.Pruned != 3 {
+	if projected, report := ProjectImages(batch, 3, 0, 0, name); report.Pruned != 3 {
 		t.Fatalf("unseen batch of 10: pruned %d, want only the 3 older images", report.Pruned)
 	} else if n, _ := images(projected); n != 10 {
 		t.Fatalf("unseen batch of 10: %d images left", n)
 	}
-	if _, report := ProjectImages(append(batch, reply), 3, 0, name); report.Pruned != 3 {
+	if _, report := ProjectImages(append(batch, reply), 3, 0, 0, name); report.Pruned != 3 {
 		t.Fatalf("newest batch of 10 after a reply: pruned %d, want 3", report.Pruned)
+	}
+}
+
+// An image-heavy session sits at the request size limit: each new frame
+// pushed one more old one out, the cached prefix changed on nearly every
+// request, and each change rewrote a 600K-token Opus prefix. The size limit
+// now moves its cut a block of images at a time.
+func TestSizeLimitRarelyMovesTheCut(t *testing.T) {
+	const limit = 24 << 20
+	frame := ai.ImageContent{Data: strings.Repeat("x", 1200<<10), MimeType: "image/png"}
+	var conversation []agent.AgentMessage
+	var previous string
+	changes := 0
+	for i := range 80 {
+		conversation = append(conversation,
+			agent.AgentMessage{Assistant: &agent.AssistantMessage{Content: []ai.AssistantContentBlock{ai.TextContent{Text: "look"}}}},
+			agent.AgentMessage{ToolResult: &agent.ToolResultMessage{ToolCallID: fmt.Sprint(i), ToolName: "read", Content: []ai.ToolResultMessageContent{frame}}})
+		projected, report := ProjectImages(conversation, 3, ImagePruneStepLarge, limit, nil)
+		if report.Bytes > limit {
+			t.Fatalf("request %d: %d bytes over the %d limit", i, report.Bytes, limit)
+		}
+		var cut strings.Builder
+		for _, m := range projected {
+			if m.ToolResult != nil {
+				if _, ok := m.ToolResult.Content[0].(ai.TextContent); ok {
+					cut.WriteString(m.ToolResult.ToolCallID + ",")
+				}
+			}
+		}
+		if cut.String() != previous {
+			changes++
+			previous = cut.String()
+		}
+	}
+	if changes > 10 {
+		t.Fatalf("the cut moved on %d of 80 requests, want at most 10", changes)
 	}
 }

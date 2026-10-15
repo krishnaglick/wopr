@@ -205,6 +205,15 @@ func (t *Tool) Label() string { return "Task" }
 
 func (t *Tool) ExecutionMode() agent.ToolExecutionMode { return agent.ToolModeParallel }
 
+// ConcurrencySafe: an explore task only reads; a general one may change
+// files, so it waits for the calls before it.
+func (t *Tool) ConcurrencySafe(args json.RawMessage) bool {
+	var in struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(args, &in) == nil && (in.Type == "" || in.Type == TypeExplore)
+}
+
 // Schema is the tool definition. Its guidelines are the orchestrator's
 // "when to delegate" rules, present only while the tool is active.
 func (t *Tool) Schema() ai.ToolSchema {
@@ -516,7 +525,7 @@ func (t *Tool) runAttempt(ctx context.Context, req Request, route Route, notes s
 		Tools:     tools(),
 		Before:    before,
 		After:     after,
-		System:    systemPrompt(req.Type, t.Host.Cwd()),
+		System:    systemPrompt(req.Type, t.Host.Cwd(), t.persona()),
 		Prompt:    BriefPrompt(req, notes),
 		Budget:    budgetFor(req),
 		SessionID: t.SessionID + ":task",
@@ -524,6 +533,14 @@ func (t *Tool) runAttempt(ctx context.Context, req Request, route Route, notes s
 		Progress:  progress,
 		StreamFn:  t.StreamFn,
 	}), nil
+}
+
+// persona is the lead agent's saved system prompt, when its host has one.
+func (t *Tool) persona() string {
+	if h, ok := t.Host.(PersonaHost); ok {
+		return h.Persona()
+	}
+	return ""
 }
 
 func (t *Tool) record(req Request, attempt int, route Route, out Outcome) Record {

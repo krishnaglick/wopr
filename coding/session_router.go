@@ -592,36 +592,16 @@ func (s *Session) routeFailover(message *agent.AssistantMessage, toolResults []a
 	return false
 }
 
-// sideTaskModel picks the cheapest model that fits contextTokens for
-// background work such as compaction summaries. In uncensored and cost mode
-// it is nil when no model the mode admits is available.
-func (s *Session) sideTaskModel(contextTokens int) *ai.Model {
-	fallback := s.subagentBaseModel()
-	if s.subagentGate(fallback) != nil || s.RouteError() != nil {
-		// A mode never falls back to a model it didn't choose.
-		fallback = nil
+// summaryModel is the model that summarizes for compaction: the one running
+// the conversation, which has already seen everything it summarizes, so no
+// other model (and no slow local prefill) is involved. When the request is
+// larger than its window, it summarizes only the newest messages that fit.
+func (s *Session) summaryModel(prep *compaction.CompactionPreparation) *ai.Model {
+	model := s.activeModel()
+	if model != nil {
+		compaction.FitSummaryRequest(prep, ai.UsableContext(s.effectiveWindow(model), model.Capabilities.MaxOutputTokens))
 	}
-	if !s.subagentRoutingActive() {
-		return fallback
-	}
-	ref, _, ok := s.router.SideTask(contextTokens)
-	if !ok {
-		return fallback
-	}
-	m, err := s.routeModel(ref.Provider, ref.Model)
-	if err != nil {
-		return fallback
-	}
-	return m
-}
-
-// compactionModel is the side-task model for summarizing the current branch.
-func (s *Session) compactionModel() *ai.Model {
-	if !s.subagentRoutingActive() {
-		return s.subagentBaseModel()
-	}
-	tokens := compaction.EstimateProjectedContextTokens(s.inner.BuildSessionProjection(), s.currentBranch()).Tokens
-	return s.sideTaskModel(tokens)
+	return model
 }
 
 // RouterCommand implements the /router slash command.

@@ -432,5 +432,6 @@ func (s *Session) compactionSettingsFor(model *ai.Model) compaction.CompactionSe
 		Enabled:          cfg.Enabled,
 		ReserveTokens:    cfg.ReserveTokens,
 		KeepRecentTokens: cfg.KeepRecentTokens,
+		MaxContextTokens: cfg.MaxContextTokens,
 	}.ForModel(window, maxOutput)
 }

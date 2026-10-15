@@ -36,11 +36,16 @@ import (
 //
 // Construct a Session via NewSession or through Runtime.
 type Session struct {
-	services      *Services
-	inner         *icodingagent.Session
-	agent         *agent.Agent
-	tools         []agent.AgentTool
-	model         atomic.Pointer[ai.Model]
+	// bgShells are the jobs the session's bash tools left running.
+	bgShells *tools.BackgroundShells
+	services *Services
+	inner    *icodingagent.Session
+	agent    *agent.Agent
+	tools    []agent.AgentTool
+	model    atomic.Pointer[ai.Model]
+	// persona is the saved system prompt the conversation runs with (nil
+	// or "" for the default), passed to subagents as context.
+	persona       atomic.Pointer[string]
 	modelRuntime  *ModelRuntime
 	modelRegistry *ModelRegistry
 	sessionDir    string
@@ -315,6 +320,8 @@ func NewSession(svcs *Services, opts SessionOptions) (*Session, error) {
 	if len(opts.ExcludedTools) > 0 {
 		allTools = removeExcludedTools(allTools, opts.ExcludedTools)
 	}
+	bgShells := tools.NewBackgroundShells()
+	withBackgroundShells(allTools, bgShells)
 
 	bufSize := opts.EventBufferSize
 	if bufSize <= 0 {
@@ -500,6 +507,7 @@ func NewSession(svcs *Services, opts SessionOptions) (*Session, error) {
 
 	sess = &Session{
 		tasks:         &sessionTasks{},
+		bgShells:      bgShells,
 		services:      svcs,
 		inner:         inner,
 		agent:         agent,
@@ -544,6 +552,7 @@ func NewSession(svcs *Services, opts SessionOptions) (*Session, error) {
 	sess.initBashArchive()
 	sess.initPruning()
 	sess.initSubagents(toolAllowed(opts, "task"))
+	bgShells.OnExit(sess.backgroundShellEnded)
 	sess.restoreWarCouncil(inner)
 	sess.model.Store(opts.Model)
 	sess.initSystemPrompt(opts)
@@ -994,6 +1003,10 @@ func (s *Session) SessionName() string { return s.inner.GetSessionName() }
 // SetSessionName persists a Session name entry. An empty name clears the
 // current name, as API calls can do. RPC and slash-command
 // boundaries validate their own non-empty input before calling this method.
+// SetPersona records the saved system prompt the conversation runs with,
+// so subagents get it as context; "" is the default prompt.
+func (s *Session) SetPersona(text string) { s.persona.Store(&text) }
+
 func (s *Session) SetSessionName(name string) error {
 	id, err := icodingagent.GenerateEntryID()
 	if err != nil {
@@ -1911,8 +1924,6 @@ func (s *Session) compact(ctx context.Context, customInstructions string) (*Comp
 	if err := s.beginManualCompaction(ctx); err != nil {
 		return nil, err
 	}
-	model := s.compactionModel()
-
 	s.mu.Lock()
 	entries := s.currentBranch()
 	settings := s.compactionSettings()
@@ -1962,12 +1973,17 @@ func (s *Session) compact(ctx context.Context, customInstructions string) (*Comp
 
 	var result *compaction.CompactionResult
 	var err error
-	if model == nil {
+	if model := s.summaryModel(prep); model == nil {
 		err = errors.New("no model can summarize the session")
 	} else {
 		var generated compaction.CompactionResult
 		generated, err = compaction.Compact(compactCtx, *prep, model, s.resolveCompleter(), s.streamFn, customInstructions, s.ThinkingLevel(), s.summarizationRetryOptions("compaction", "manual"), "")
 		if err == nil {
+			// The note steers the summary and is kept word for word, so the
+			// model reads what the user said about this compaction.
+			if note := strings.TrimSpace(customInstructions); note != "" {
+				generated.Summary += "\n\n## User's Note on This Compaction\n\n" + note
+			}
 			result = &generated
 		}
 	}
@@ -2153,11 +2169,10 @@ func (s *Session) navigateTree(ctx context.Context, targetID string, opts Naviga
 
 	var summary *treeBranchSummary
 	if opts.Summarize && len(collected.Entries) > 0 {
-		// The summary runs where compaction does, so a routing mode (private,
-		// cost) also governs it.
-		summaryModel := s.compactionModel()
+		// The summary runs on the conversation's model, as compaction does.
+		summaryModel := s.activeModel()
 		if summaryModel == nil {
-			return NavigateTreeResult{}, errors.New("no model this routing mode allows can summarize the branch")
+			return NavigateTreeResult{}, errors.New("no model can summarize the branch")
 		}
 		bsResult := compaction.GenerateBranchSummary(branchCtx, collected.Entries, compaction.GenerateBranchSummaryOptions{
 			Model:               summaryModel,
@@ -2417,18 +2432,20 @@ func (s *Session) runAutoCompactionWith(ctx context.Context, reason string, will
 // runCompaction is runAutoCompactionWith with settings sized for the model
 // the compacted conversation is for.
 func (s *Session) runCompaction(ctx context.Context, reason string, willRetry bool, instructions string, settings compaction.CompactionSettings) bool {
-	model := s.compactionModel()
 	if !s.beginCompaction() {
 		return false
 	}
 	defer s.finishCompaction()
-	if model == nil {
-		return false
-	}
 
 	entries := s.currentBranch()
 	prep := compaction.PrepareCompaction(entries, settings)
 	if prep == nil {
+		return false
+	}
+	model := s.summaryModel(prep)
+	if model == nil {
+		s.emitCompactionEvent(agent.CompactionStartEvent{Reason: reason})
+		s.emitOrderedEventSync(agent.CompactionEndEvent{Reason: reason, ErrorMessage: "Compaction failed: no model can summarize the session"})
 		return false
 	}
 

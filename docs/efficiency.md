@@ -154,20 +154,25 @@ More keys in `efficiency.json`, each on by default:
   newest `keepImages` images (screenshots from `read`, pasted images); older
   ones become a one-line placeholder such as `[image removed from context:
   /tmp/shot.png, 01:43]`. Pruning happens three images at a time, so the
-  cached prompt prefix changes only every few images. Your own pasted images
+  cached prompt prefix changes only every few images; on a model with a
+  window of 200K tokens or more it happens 24 at a time, since each prune
+  rewrites the whole cached conversation there. Your own pasted images
   stay while they are among your three newest. The session file keeps every
   image. Independently of the switch, a request over a provider's size limit
   (24 MB for Anthropic and Bedrock, under their 32 MB cap; 40 MB elsewhere)
-  drops its oldest images until it fits, down to the newest one, and never
-  drops text; an HTTP 413 that still comes back is treated as context
-  overflow and compacted.
+  drops its oldest images until it fits, a block of about half the limit at
+  a time so the next several images fit without moving the cut again, down
+  to the newest one, and never drops text; an HTTP 413 that still comes back
+  is treated as context overflow and compacted.
 - `finalCheck`: the first time a run that changed something (a file tool,
   or a shell command that isn't read-only) would end, the model gets one
-  message asking it to re-read the request, list each requirement, verify
-  each with a command, leave margin on numeric limits, match exact names
-  and formats, and fix what fails before finishing. Once per prompt; a turn
-  that only reads and answers is never checked. The transcript shows it as
-  one muted line.
+  message asking it to re-read the request, check each thing it asked for
+  against what exists now (running the program or tests only if the work
+  has any), leave margin on numeric limits, and fix what falls short, then
+  give its usual reply rather than a list of checks. Once per prompt; a turn
+  that only reads and answers, or only changed prose files (`.md`, `.txt`,
+  `.rst`, `.adoc`), is never checked. The transcript shows it as one muted
+  line.
 - `safetyBackup`: before a shell command that rewrites or discards git
   history or work (`filter-branch`, `filter-repo`, `rebase`, `reset --hard`,
   force `push`, `clean -f`, `checkout -- <path>`, `restore`, `branch -D`,

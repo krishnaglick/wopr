@@ -2,8 +2,31 @@
 
 ## [Unreleased]
 
+- **`wopr serve`**: the session in the working directory is exposed over a local HTTP and SSE API that speaks the opencode client contract, so a phone or another machine can drive the same session — prompt, watch the stream, answer a question, read and write project files. 34 routes, 30 implemented; the rest answer `501`. **There is no authentication and no TLS**: anyone who can reach the port can run tools and read files as this user, so keep it on loopback unless the path between you and the machine is one you trust. File access is confined to the served root. See [the server docs](docs/site/docs/server.md).
 - **`todowrite`**: the model can now keep a task list for a request — plan, work through it, and mark items done as it goes. It is active by default in every mode.
 - **Session directory**: `wopr --dir <path>` and `wopr serve --dir <path>` choose the session or served directory at launch (default: the current directory). `server.allowedRoots` — a global-only launcher guardrail against misconfiguration, not a network boundary — refuses a served root outside its entries. `GET /file?directory=<foreign>` now answers 400 like its siblings, validating the query against the launch-time root instead of selecting a directory.
+
+## [0.2.3] - 2026-10-05
+
+- **Compaction at 200k**: a large window no longer fills to 98% before compacting; the context compacts past 200k tokens, so each turn re-reads far less. `/settings` → Compact at picks 100k, 200k, 400k, or the window (`compaction.maxContextTokens`).
+- **Compaction on the conversation's model**: summaries run on the model running the conversation, never a routed side model such as a slow local one; when the conversation is larger than its window, it summarizes the newest messages that fit, so compaction never fails on size.
+- **Fixed: sessions that pruned never compacted**: after context pruning the size estimate read about a third low (a 994k-token session read as 666k), so the window filled and replies were cut off. Automatic compaction now says when it fails instead of failing silently.
+- **Plans**: the model lists a multi-step task's steps with `update_plan` up front and marks each done, giving online compaction its boundaries.
+
+## [0.2.2] - 2026-10-04
+
+- **Background work**: `bash` with `run_in_background` starts long jobs in their own process group and returns at once; the model is told when a job ends (exit code and last output), so it never sleep-polls. A strip above the prompt lists running subagents and shell jobs; down on an empty prompt focuses it, enter opens a live view with Stop and Close.
+- **Subagents can write**: `task` type `general` runs with the full tools under the session's undo and backup hooks, locks the files it changes, and reports them.
+- **Longer prompt cache**: the interactive conversation uses Anthropic's 1-hour and OpenAI's 24-hour cache, so a pause over 5 minutes no longer rewrites the whole cached conversation. Context pruning and image pruning move the cached prefix far less often.
+- **Images**: sent only to models that accept them, sized by tile budget; requests carry the newest images and older ones become placeholders, with a size guard under the provider's limit.
+- **Safety backup**: before a shell command rewrites git history or opens a SQLite database with live `-wal`/`-shm` files, wopr saves what it could destroy and tells the model how to restore it.
+- **Final check**: the first time a run that changed something would end, the model verifies each requirement against the request.
+- **Tool batches**: read-only calls run together; any other call waits for the ones before it, so a write and a read of the same file in one message see the finished file.
+- **Edits**: `edit` matches looser when the text isn't found as written (indentation, whitespace, doubled backslashes) and lists each failing edit with its closest lines; hashline anchors turn off per model when they fail more than exact-text edits.
+- **Models**: model lists come from providers and models.dev, not a hand-written catalog; a provider's default is its current flagship; an unpriced model shows "unknown", never $0.
+- **Providers and auth**: OpenCode Zen under Add an API key (thanks @krishnaglick), with a real key check; `/logout` and `wopr logout` list every stored credential, API keys included.
+- **Print mode**: `--deadline` / `WOPR_DEADLINE` gives a run a time budget; piped stdin no longer hangs on a pipe that never closes; provider errors exit nonzero in JSON mode; `--gtw` runs Global Thermonuclear War.
+- **Fixes**: large tool output and oversized session lines no longer freeze scrolling or resume; bare URLs in output are clickable; faster rendering per keystroke; Anthropic web-search replies are replayed correctly and no longer inflate context size; war council time budgets scale with each member's speed; `web_fetch` retries HTTP 406; a DuckDuckGo bot check pauses searches instead of retrying.
 
 ## [0.2.1] - 2026-09-30
 

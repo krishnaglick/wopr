@@ -636,7 +636,7 @@ func main() {
 	}
 	trace.Mark("pre-system-prompt")
 	projectCtxFiles := loadContextFiles(cwd, agentDir, flags.NoContextFiles)
-	promptOptions := systemPromptOptions(cwd, agentDir, projectTrusted, flags, agentToolNames, skillDefs, projectCtxFiles)
+	promptOptions := systemPromptOptions(cwd, agentDir, projectTrusted, flags, agentToolNames, skillDefs, projectCtxFiles, services.SettingsManager().Get().GetSystemPrompt())
 	systemPromptSections := prompts.BuildSystemPromptSections(promptOptions)
 	systemPrompt := prompts.BuildDefaultPrompt(promptOptions)
 
@@ -736,6 +736,9 @@ func main() {
 
 	trace.Mark("pre-session")
 	codingSess, err := coding.StartSession(services, startOpts)
+	if err == nil {
+		codingSess.SetPersona(codingagent.SystemPromptPersona(agentDir, services.SettingsManager().Get().GetSystemPrompt()))
+	}
 	if err != nil {
 		fatalf("error: construct session: %v", err)
 	}

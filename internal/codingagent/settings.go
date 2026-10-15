@@ -53,6 +53,9 @@ type Settings struct {
 	// SteeringMode and FollowUpMode dispatch queued messages "all" at once or
 	// "one-at-a-time" (the default).
 	SteeringMode string `json:"steeringMode,omitempty"`
+	// SystemPrompt names the saved system prompt new sessions start with
+	// (system-prompts/<name>.md in the agent directory). Default: "coding".
+	SystemPrompt string `json:"systemPrompt,omitempty"`
 	FollowUpMode string `json:"followUpMode,omitempty"`
 
 	Theme string `json:"theme,omitempty"`
@@ -189,6 +192,9 @@ type CompactionSettingsJSON struct {
 	Enabled          *bool `json:"enabled,omitempty"`
 	ReserveTokens    *int  `json:"reserveTokens,omitempty"`
 	KeepRecentTokens *int  `json:"keepRecentTokens,omitempty"`
+	// MaxContextTokens compacts once the context passes it, even on a larger
+	// window. Default 200000; 0 lets the window alone decide.
+	MaxContextTokens *int `json:"maxContextTokens,omitempty"`
 	// ModelOverrides maps exact "provider/modelId" keys to token settings
 	// that take precedence for that model.
 	ModelOverrides map[string]CompactionModelOverride `json:"modelOverrides,omitempty"`
@@ -803,6 +809,9 @@ func (s Settings) GetDoubleEscapeAction() string { return cmp.Or(s.DoubleEscapeA
 // GetSteeringMode and GetFollowUpMode return the queue dispatch modes.
 // Default: "one-at-a-time".
 func (s Settings) GetSteeringMode() string { return cmp.Or(s.SteeringMode, "one-at-a-time") }
+
+// GetSystemPrompt is the saved system prompt new sessions start with.
+func (s Settings) GetSystemPrompt() string { return cmp.Or(s.SystemPrompt, CodingSystemPrompt) }
 func (s Settings) GetFollowUpMode() string { return cmp.Or(s.FollowUpMode, "one-at-a-time") }
 
 // GetTerminalCapabilityOverrides maps the terminal settings onto capability
@@ -924,9 +933,14 @@ type CompactionConfig struct {
 	Enabled          bool
 	ReserveTokens    int
 	KeepRecentTokens int
+	MaxContextTokens int
 }
 
-var defaultCompactionConfig = CompactionConfig{Enabled: true}
+// defaultMaxContextTokens is where a large window compacts: a turn past it
+// re-reads that much cached context, and a summary of it stays fast.
+const defaultMaxContextTokens = 200_000
+
+var defaultCompactionConfig = CompactionConfig{Enabled: true, MaxContextTokens: defaultMaxContextTokens}
 
 // BranchSummaryConfig is the resolved branch summary settings.
 type BranchSummaryConfig struct {
@@ -968,6 +982,7 @@ func (s Settings) GetModelCompactionSettings(provider, modelID string) Compactio
 	result.Enabled = boolOr(c.Enabled, true)
 	setInt(&result.ReserveTokens, c.ReserveTokens)
 	setInt(&result.KeepRecentTokens, c.KeepRecentTokens)
+	setInt(&result.MaxContextTokens, c.MaxContextTokens)
 	if provider == "" && modelID == "" {
 		return result
 	}

@@ -17,10 +17,16 @@ import (
 // become a one-line placeholder. The session file keeps them all.
 
 const (
-	// imagePruneStep is how many images past the kept count accumulate
+	// ImagePruneStep is how many images past the kept count accumulate
 	// before the oldest are pruned together, so the cached prompt prefix
 	// changes only every few images instead of on every one.
-	imagePruneStep = 3
+	ImagePruneStep = 3
+	// ImagePruneStepLarge is the step for a model with a large window, where
+	// a changed prefix rewrites hundreds of thousands of cached tokens: an
+	// image session of 78 images changed the prefix 23 times at step 3 and 3
+	// times at 24, keeping at most 26 images (about 40K tokens, read from
+	// cache) in a request.
+	ImagePruneStepLarge = 24
 	// keepUserImages is how many of the user's own newest pasted images stay
 	// whatever the kept count.
 	keepUserImages = 3
@@ -47,7 +53,7 @@ type imageLoc struct {
 }
 
 // ProjectImages replaces images older than the newest keep with a
-// placeholder, in steps of imagePruneStep. Images are kept by batch, the
+// placeholder, in steps of step images (ImagePruneStep when 0). Images are kept by batch, the
 // images one assistant turn's tool calls returned, so the newest batch
 // always arrives whole however large it is, and the model sees every image
 // at least once. The user's newest keepUserImages stay too. keep 0 turns
@@ -56,7 +62,10 @@ type imageLoc struct {
 // has seen first, down to the newest one. Text is never dropped. Messages
 // are copied, never mutated. name returns a tool result's file name by tool
 // call ID, or "".
-func ProjectImages(messages []agent.AgentMessage, keep, maxBytes int, name func(callID string) string) ([]agent.AgentMessage, ImageProjection) {
+func ProjectImages(messages []agent.AgentMessage, keep, step, maxBytes int, name func(callID string) string) ([]agent.AgentMessage, ImageProjection) {
+	if step <= 0 {
+		step = ImagePruneStep
+	}
 	var locs []imageLoc
 	lastAssistant := -1
 	for i, m := range messages {
@@ -109,7 +118,7 @@ func ProjectImages(messages []agent.AgentMessage, keep, maxBytes int, name func(
 				kept++
 			}
 		}
-		frontier := older / imagePruneStep * imagePruneStep
+		frontier := older / step * step
 		for k := range frontier {
 			if !protected[k] && !unseen(k) {
 				pruned[k] = true
@@ -118,8 +127,37 @@ func ProjectImages(messages []agent.AgentMessage, keep, maxBytes int, name func(
 			}
 		}
 	}
-	if maxBytes > 0 {
-		left := len(locs) - out.Pruned
+	if maxBytes > 0 && out.Bytes > maxBytes {
+		// Move the cut forward a whole block at a time. Blocks are runs of
+		// images about half the limit in size, counted from the start of
+		// the conversation, so adding images never moves an earlier
+		// boundary, and each move frees room for several more images:
+		// dropping one image per new image changed the cached prefix on
+		// nearly every request of an image-heavy session at the size limit.
+		blockBytes := max(maxBytes/2, 1)
+		var starts []int
+		for k, run := 0, 0; k < len(locs); k++ {
+			if k == 0 || run >= blockBytes {
+				starts = append(starts, k)
+				run = 0
+			}
+			run += locs[k].size
+		}
+		for _, frontier := range starts[1:] {
+			if out.Bytes <= maxBytes {
+				break
+			}
+			for k := range frontier {
+				if !pruned[k] && !protected[k] && !unseen(k) {
+					pruned[k] = true
+					out.SizePruned++
+					out.Bytes -= locs[k].size
+				}
+			}
+		}
+		// Still over (the user's or unseen images alone are too big): the
+		// oldest remaining ones go too, down to the newest one.
+		left := len(locs) - out.Pruned - out.SizePruned
 		for _, unseenToo := range []bool{false, true} {
 			for k := 0; k < len(locs) && out.Bytes > maxBytes && left > 1; k++ {
 				if pruned[k] || unseen(k) && !unseenToo {
