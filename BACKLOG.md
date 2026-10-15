@@ -1262,37 +1262,60 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Gates:** a `ServerSettings` field addition cannot produce a false unknown-key warning
   (derive the known set from the struct tags, or add a test coupling the two).
 
+---
+
+## V2 contract coverage
+
 ### serve-v2-api-parity — full contract coverage of opencode V2 `/api/*`
 
 - **Status:** READY — filed 2026-10-15. Spec: `docs/plans/2026-10-15-serve-v2-full-support.md`,
   which supersedes `docs/plans/2026-10-07-serve-v2-api-parity.md` (Rev-1; its pin was a file in
   `/tmp` and is gone).
-- **Why:** wopr serves the opencode V1 contract. V2 is a separate surface (`/api/*`) on its own
-  experimental line (`opencode-src` @ v1.18.34 has no `/api` route literals), so no V2 client works
-  against wopr today beyond the two V1-era routes wopr happens to serve under that prefix.
+- **Why:** wopr serves the opencode V1 contract. V2 (`/api/*`) is a **second, separate surface**, and the
+  plan pins only one of the two: the published `https://opencode.ai/v2/openapi.json` (142 operations),
+  while `opencode-src` @ v1.18.34's `packages/protocol/src/groups/` is a second V2 route set (58
+  endpoints — 46 shared with the published spec, 12 protocol-only, 96 published-only). The two disagree,
+  so no V2 client works against wopr today beyond the two V1-era routes wopr happens to serve under that
+  prefix.
 - **Scope (owner, 2026-10-15): full contract coverage, not literal parity.** Every `/api/*` path
-  answers a spec-valid response — real where wopr has the engine (30 operations), a
-  `503 ServiceUnavailableError` stub with a named reason for the other 112. No route answers Go's
-  bare 404. Implementing PTY, worktrees, VCS, MCP, credentials, integrations, plugin RPC, pairing,
-  a durable inbox, and the form engine is out of scope: no engine, and it breaks the
-  `internal/codingagent/serve` never-imports-`coding/` invariant.
+  answers a spec-valid response — real where wopr has the engine (T1, 28 operations), a
+  `503 ServiceUnavailableError` stub with a named reason for T2 (113), and one T3 namespace
+  conflict, `GET /api/command` (1). The three tiers partition all 142 published-spec operations; wopr's
+  `GET /api/health` is in no published spec and in no tier (it is one of the 12 protocol-only
+  endpoints). No route answers Go's bare 404. Implementing PTY,
+  worktrees, VCS, MCP, credentials, integrations, plugin RPC, pairing, a durable inbox, and the
+  form engine is out of scope: no engine, and it would force the root `coding` package across the
+  `internal/codingagent/serve` seam.
 - **Spec pin:** `https://opencode.ai/v2/openapi.json`, sha256
   `3fcd666b597b746bad26f56a92fe782cc86338a0b4498f43b435a2f97e4fa05a`, 578,272 bytes, OpenAPI 3.1.0,
   118 paths / 142 operations / 285 schemas, fetched 2026-10-15. The spec moved inside eight days
   (+1 path, +1 operation, +29 schemas), so the pin is a table and a hash, never a vendored file.
-- **Carries two open decisions:** D7 — `GET /api/command` is served today with
-  `location.project`, which V2's `Location.PublicRef` (`additionalProperties:false`) rejects;
-  recommend dropping the key and verifying against a KKCode capture. D5 — forms stay a stub;
-  questions flow through `question.v2.asked` on the event stream.
+- **Carries five open decisions**, none blocking: **D9 — which V2 surface is the specification for
+  `wopr serve`? — the most consequential, and the owner's to make (`GET /api/health` is already
+  conformant under the protocol surface and unclassified under the published spec; 96 operations exist
+  only under the published spec). Recommend specifying against **both**, with the 46 shared endpoints
+  as the floor.** D1 — capture KKCode's real V2 traffic, now
+  non-blocking because the spec is pinned and S1 classifies all 142 operations from it. D5 — forms
+  stay a stub; recommend (b), rename to `question.v2.asked/replied/rejected` **in the V2 encoder
+  only**, since the bus constants at `serve_sse.go:52-54` feed the V1 stream KKCode consumes. D7 —
+  `GET /api/command` is served today with `location.project`, which V2's `Location.PublicRef`
+  (`additionalProperties:false`) rejects; recommend dropping the key and verifying against a KKCode
+  capture. D8 — V2 identifier format (`^ses`/`^msg_` vs wopr's UUIDs), low priority.
 - **Files:** `internal/codingagent/serve/` (`serve_v2.go`, `serve_v2_dto.go`, `serve_v2_sse.go`,
   `serve_v2_test.go`, plus a generated `testdata/opencode-v2-inventory.json`), `cmd/wopr/serve.go`
-  wiring, `docs/site/docs/server.md`, `docs/site/docs/settings.md`, `docs/threat-model.md`.
-- **Gates:** per slice the standard set; S1 additionally asserts 142 classified operations with no
-  duplicates and an unchanged generator output; S4 adds a manual live-curl probe, because this
-  package's suite has coexisted with live wire bugs five times (`serve-3`, `serve-4`).
+  wiring, `docs/site/docs/server.md`, `docs/threat-model.md`, and `docs/site/docs/settings.md`
+  **only if a V2 setting ships** — D3 dropped `server.authToken`, so as things stand no V2 content
+  reaches that file.
+- **Gates:** per slice the standard set, hermetic (temp `WOPR_HOME`, provider credentials cleared).
+  S1's gate is **not** a test over the committed inventory: that is the change-detector category
+  `AGENTS.md` bans, and the V1 conformance plan ruled against it in writing. S1 is done when the
+  three tiers partition the spec's operation set exactly. S3 and S4 carry a round-trip decode gate
+  per V2 DTO against the pinned schemas; S4 adds a manual live-curl probe, because this package's
+  suite has coexisted with live wire bugs five times (`serve-3`, `serve-4`).
 - **Notes:** the two `/api/*` routes wopr already serves are V1-era KKCode handshake shims
   (`/api/health`, `/api/command`), and V2 has already taken over that prefix — the namespace is
-  crowded, so new V2 work must not assume it is clean. Settled by owner 2026-10-07: ignore the
+  crowded, so new V2 work must not assume it is clean. S3 also depends on the unmerged
+  `serve-delete-hard-delete`, which requires hard delete. Settled by owner 2026-10-07: ignore the
   client's `Authorization` header and never emit 401, unlike the spec, which documents 401 on all
   142 operations and defines no security scheme.
 
