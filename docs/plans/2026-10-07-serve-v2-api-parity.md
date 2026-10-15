@@ -1,10 +1,15 @@
 # serve-v2-api-parity — implementation plan
 
 - Date: 2026-10-07
-- Backlog item: to be filed as `serve-v2-api-parity` in `BACKLOG.md` (this plan is it)
+- Backlog item: `serve-v2-api-parity` in `BACKLOG.md` (filed 2026-10-15)
 - Worktree: none yet (this is the spec; execute in `.worktrees/wave-serve-v2-api-parity`)
-- Status: **Rev-1.** Not yet run through `verify-fan`. Every `file:line` below was re-read in
-  the primary checkout at `f77342d`; the V2 spec claims were re-derived from
+- Status: **SUPERSEDED 2026-10-15 by `docs/plans/2026-10-15-serve-v2-full-support.md`.** Read that
+  document instead; §0 of it lists every claim here that the spec no longer supports. The pins
+  below are dead: the model-of-record file was in `/tmp` and is gone, the spec has since moved
+  (118 paths / 142 operations / 285 schemas, sha `3fcd666b…`), and D2, D3, D4, and D6 are now
+  settled. Kept unedited so the diff against its replacement is legible.
+- Status at the time: **Rev-1.** Not yet run through `verify-fan`. Every `file:line` below was
+  re-read in the primary checkout at `f77342d`; the V2 spec claims were re-derived from
   `/tmp/openapi-v2.json` (sha256 `1795168957…556e5b`, see §9). Treat the spec-shape claims as
   verified and the client-behaviour claims as **unverified** — KKCode is closed source.
 - Model of record: `/tmp/openapi-v2.json`, 537.9 KB, OpenAPI 3.1.0, 117 paths / 141 operations /

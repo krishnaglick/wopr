@@ -1262,6 +1262,40 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Gates:** a `ServerSettings` field addition cannot produce a false unknown-key warning
   (derive the known set from the struct tags, or add a test coupling the two).
 
+### serve-v2-api-parity — full contract coverage of opencode V2 `/api/*`
+
+- **Status:** READY — filed 2026-10-15. Spec: `docs/plans/2026-10-15-serve-v2-full-support.md`,
+  which supersedes `docs/plans/2026-10-07-serve-v2-api-parity.md` (Rev-1; its pin was a file in
+  `/tmp` and is gone).
+- **Why:** wopr serves the opencode V1 contract. V2 is a separate surface (`/api/*`) on its own
+  experimental line (`opencode-src` @ v1.18.34 has no `/api` route literals), so no V2 client works
+  against wopr today beyond the two V1-era routes wopr happens to serve under that prefix.
+- **Scope (owner, 2026-10-15): full contract coverage, not literal parity.** Every `/api/*` path
+  answers a spec-valid response — real where wopr has the engine (30 operations), a
+  `503 ServiceUnavailableError` stub with a named reason for the other 112. No route answers Go's
+  bare 404. Implementing PTY, worktrees, VCS, MCP, credentials, integrations, plugin RPC, pairing,
+  a durable inbox, and the form engine is out of scope: no engine, and it breaks the
+  `internal/codingagent/serve` never-imports-`coding/` invariant.
+- **Spec pin:** `https://opencode.ai/v2/openapi.json`, sha256
+  `3fcd666b597b746bad26f56a92fe782cc86338a0b4498f43b435a2f97e4fa05a`, 578,272 bytes, OpenAPI 3.1.0,
+  118 paths / 142 operations / 285 schemas, fetched 2026-10-15. The spec moved inside eight days
+  (+1 path, +1 operation, +29 schemas), so the pin is a table and a hash, never a vendored file.
+- **Carries two open decisions:** D7 — `GET /api/command` is served today with
+  `location.project`, which V2's `Location.PublicRef` (`additionalProperties:false`) rejects;
+  recommend dropping the key and verifying against a KKCode capture. D5 — forms stay a stub;
+  questions flow through `question.v2.asked` on the event stream.
+- **Files:** `internal/codingagent/serve/` (`serve_v2.go`, `serve_v2_dto.go`, `serve_v2_sse.go`,
+  `serve_v2_test.go`, plus a generated `testdata/opencode-v2-inventory.json`), `cmd/wopr/serve.go`
+  wiring, `docs/site/docs/server.md`, `docs/site/docs/settings.md`, `docs/threat-model.md`.
+- **Gates:** per slice the standard set; S1 additionally asserts 142 classified operations with no
+  duplicates and an unchanged generator output; S4 adds a manual live-curl probe, because this
+  package's suite has coexisted with live wire bugs five times (`serve-3`, `serve-4`).
+- **Notes:** the two `/api/*` routes wopr already serves are V1-era KKCode handshake shims
+  (`/api/health`, `/api/command`), and V2 has already taken over that prefix — the namespace is
+  crowded, so new V2 work must not assume it is clean. Settled by owner 2026-10-07: ignore the
+  client's `Authorization` header and never emit 401, unlike the spec, which documents 401 on all
+  142 operations and defines no security scheme.
+
 ---
 
 ## Follow-ups surfaced by KKCode remote-client testing
