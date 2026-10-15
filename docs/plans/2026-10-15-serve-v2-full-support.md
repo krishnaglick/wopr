@@ -1,10 +1,10 @@
 # serve-v2-full-support — full contract coverage of opencode V2 `/api/*`
 
 - Date: 2026-10-15
-- Status: **Rev-2.** Rev-0's claims were re-derived on 2026-10-15 from the pinned spec (§1) and from
-  this checkout at `3421839`. A second pass re-derived every count, required-field list, and `file:line`
-  in Rev-0 after a four-angle verification fan reported defects; §0 records what that pass changed and
-  what Rev-0 dropped from Rev-1. A third pass found the premise wrong: **there are two V2 surfaces,
+- Status: **Rev-2.** Round 1's claims were re-derived on 2026-10-15 from the pinned spec (§1) and from
+  this checkout at `3421839`. Round 2 re-derived every count, required-field list, and `file:line`
+  in Round 1 after a four-angle verification fan reported defects; §0 records what that round changed and
+  what Round 1 dropped from the superseded plan. Round 3 found the premise wrong: **there are two V2 surfaces,
   not one** (§1.1). Everything downstream of that — `/api/health`, the event names, the SDK, §10 —
   was re-derived against both. Which one is the specification is an **open owner decision** (D9) with
   a recommendation recorded beside it; this document does not decide it. No claim here rests on a file
@@ -22,11 +22,11 @@
 
 ## 0. What the true-up found
 
-Rows 1-8 are Rev-0's pass. Rows 9-17 are Rev-1's: defects a verification fan found in Rev-0 and
-rows 18-24 are Rev-1 facts Rev-0 dropped from the superseded plan without recording the drop.
-Rows 25-31 are Rev-2's, from a second fan.
+Rows 1-8 are Round 1. Rows 9-17 are Round 2: defects a verification fan found in Round 1 and
+rows 18-24 are Round 2 facts Round 1 dropped from the superseded plan without recording the drop.
+Rows 25-31 are Round 3, from a second fan.
 
-| # | Rev-1 claim | Verified 2026-10-15 | Evidence |
+| # | Round 1 claim | Verified 2026-10-15 | Evidence |
 |---|---|---|---|
 | 1 | Model of record `/tmp/openapi-v2.json`, 537.9 KB, sha `17951689…` | **File gone.** The spec moved: 578,272 bytes, sha `3fcd666b597b746b…`, **118 paths / 142 operations / 285 schemas** (was 117 / 141 / 256) | §1 |
 | 2 | "`Command.Info` = `{name,description,template}`" | `{name, description}`; required is `[name]` only | spec `Command.Info` |
@@ -77,7 +77,10 @@ Rows 25-31 are Rev-2's, from a second fan.
 | Consequence | the spec documents `401` on all 142 operations and defines no scheme, so "secured" is not derivable from the document at all (§6 D3) |
 
 **Do not vendor the JSON.** The repo does not vendor specs and a 578 KB blob rots the same way a
-`/tmp` path does. The pin is this table plus the inventory in §2; re-derive it with:
+`/tmp` path does. **Exception:** S1 emits `testdata/opencode-v2-schemas.json` — a curated subset of
+the 142 operations' request/response schemas that S3–S5 decode against, serialized as JSON Schema,
+pinned by sha256 in the inventory and `server.md` so decoders are bound to a committed artifact
+rather than a network fetch. The pin is this table plus the inventory in §2; re-derive it with:
 
 ```bash
 curl -sSL https://opencode.ai/v2/openapi.json -o /tmp/openapi-v2.json
@@ -185,6 +188,10 @@ appears in exactly one tier. These are **published-spec** tiers (§1.1 Surface A
 no published spec, so it is in no tier and is not counted in the 142; it *is* one of the 12
 protocol-only operations, which D9 governs.
 
+**The 12 protocol-only operations (Surface B only) are unclassified until D9 decides.** They are
+listed in §1.1 and carry no tier assignment in this document. If D9 picks Surface B, they enter the
+tier system; if D9 picks Surface A, they remain out of scope.
+
 **T1 — implement for real (28 operations; wopr has the engine; §7 names the seam):**
 `GET /api/info` · `GET /api/event` · `GET /api/session` · `POST /api/session` ·
 `GET /api/session/{sessionID}` · `PATCH /api/session/{sessionID}` ·
@@ -245,12 +252,16 @@ the single static V1→V2 event table (§4.4, S4), and V2 DTOs that carry no wop
 
 ### 3.1 Definition of done
 
+**These DoDs are defined against Surface A (the published spec). If D9 chooses Surface B, the T1/T2/T3
+partition, the tier counts, and the specific operations in each tier change — see §1.1 and §2.**
+
 1. Every path in §2 is classified T1/T2/T3 in `docs/site/docs/server.md`, and the doc names the
    spec sha256 it was classified against.
 2. Every T1 operation answers a spec-valid body **and consumes a spec-valid request**: exact field
    names, every `required` field present (§4.5, §4.6), and no extra fields where the schema sets
    `additionalProperties:false` (201 of 285 schemas do).
-3. Every T2 **operation** answers `503` + `{"_tag":"ServiceUnavailableError","message":"<reason>"}`.
+3. Every T2 **operation** answers a V2 error envelope — `503` `ServiceUnavailableError` where the
+   spec documents 503, the spec's documented status otherwise — never Go's default 404/405.
    Classification is per operation, not per path: `/api/location` hosts one T1 operation
    (`location.get`) and one T2 operation (`location.reload`), and both must behave differently.
    No route answers Go's default 404, 405, or an HTML error page.
@@ -363,7 +374,7 @@ The six tags wopr's own T1 and catch-all handlers need are `UnauthorizedError`,
 requires `sessionID` and `FileNotFoundErrorEncoded` requires `path`, so for those two the writer
 must take the extra field as an argument rather than building a pair.
 
-### 4.3 Status codes, as documented by the spec
+### 4.3 Status codes, as documented by the spec (Surface A)
 
 | Code | Operations | Note |
 |---|---|---|
@@ -374,6 +385,8 @@ must take the extra field as an argument rather than building a pair.
 | 200 / 204 | 96 / 46 | |
 | 409, 500, 403, 413 | 13, 8, 4, 1 | |
 | 501 | 1 (`POST /api/vcs/init`) | |
+
+**Surface B differs:** the protocol surface documents 200 on `GET /api/health` (not in Surface A), and its 58 endpoints have their own status-code sets not fully captured here. See D9.
 
 ### 4.4 Events
 
@@ -467,7 +480,7 @@ is what lets §7 say "one producer" without qualification. The `session.next.*` 
 **The `question.v2.*` rename belongs in the V2 encoder only.** Renaming the bus constants at
 `serve_sse.go:52-54` would break KKCode, which consumes the V1 names on `/global/event`.
 
-### 4.5 DTO burden — every T1 response schema, with its required set
+### 4.5 DTO burden — every T1 response schema, with its required set (Surface A)
 
 201 of 285 schemas set `additionalProperties:false`, so every placeholder below is a client-visible
 failure if guessed wrong. "Placeholder" means a value wopr cannot source and must synthesize.
@@ -479,18 +492,20 @@ failure if guessed wrong. "Placeholder" means a value wopr cannot source and mus
 | `Session.Info.tokens` → `TokenUsage.Info` | `input, output, reasoning, cache` | `input`/`output` from the transcript; **wopr has no reasoning-token count → placeholder `0`** |
 | `TokenUsage.Info.cache` (nested) | `read, write` | **placeholder `0`/`0`** — a required object inside a required object; omitting it fails `Session.Info` |
 | `Session.Info.cost` → `Money.USD` | (`{"type":"number"}` — **a bare number, not an object**) | the transcript's USD total, else `0`. Emitting `{amount, currency}` fails `Session.Info` outright |
+
+**Surface B note:** the protocol surface's SDK (`packages/sdk/openapi.json`) has a different schema set (472 schemas). The T1 set under Surface B would differ — notably `/api/health` becomes T1 and `/api/info` is absent. See D9.
 | `Model.Info` (18 props) | `id, modelID, providerID, name, capabilities, variants, time, cost, status, enabled, limit` | `AvailableModels`. **`variants` → `[]`**, **`status` → `"active"`** (no wopr source). Largest DTO in the slice |
 | `Model.Capabilities` (nested) | `tools, input, output` | `tools` from the tool set; `input`/`output` are string arrays → `[]` if unknown |
 | `Model.Info.time` / `.limit` (nested) | `released` / `context, output` | `released` → `0`; `limit.context`/`limit.output` from the model database |
-| `Agent.Info` | `id, name, request, mode, hidden, permissions` | hardcoded agent list. `id`/`name` from the list; **`mode` → `"primary"`**, **`hidden` → `false`**, `permissions` → `[]`; `request` → an empty `Provider.Request`, which itself requires `{settings, headers, body}` |
+| `Agent.Info` | `id, name, request, mode, hidden, permissions` | hardcoded agent list. `id`/`name` from the list; **`mode` → `"primary"`**, **`hidden` → `false`**, `permissions` → `[]`; `request` → `Provider.Request{settings: {}, headers: {}, body: {}}` — all three required fields present as empty objects to satisfy `additionalProperties:false` |
 | `SessionsResponse` | `data, cursor` | `cursor` is required and is `{previous, next}`, each `SessionsCursor` (an opaque string) **or `null`** — emit `{"previous":null,"next":null}` when unpaginated, never omit it |
 | `SessionMessagesResponse` | `data, cursor` | same shape; `cursor` here is `{previous, next}` of plain opaque strings or `null` |
 | `SessionActive` | `type` | **the 200 body is not this schema.** `GET /api/session/active` declares `{data: {patternProperties: {"^ses": {$ref: SessionActive}}, additionalProperties: false}}`, `required: ["data"]` — a **map keyed by session id**, one `SessionActive` per live session. `SessionActive` itself is the `{type:"running"}` value; emitting it bare matches no pattern *and* violates `additionalProperties:false`. T1, in S3 |
 | `Session.Message.Info` | **no single required set** — an 11-arm `anyOf` over `AgentSelected`, `ModelSelected`, `LocationSwitched`, `User`, `Synthetic`, `System`, `Skill`, `Shell`, `Assistant`, `Compaction`, `Idle` | each arm carries its own required set; a message must match exactly one arm. S4's decode gate (§8) is what catches a mis-typed arm |
 | `SessionInterruptResponse` | `interrupted` | from `Session.Abort`; `false` for a known-but-idle session |
-| `Session.Inbox.User` | `id, sessionID, time, type, payload, delivery` | **this is the prompt route's 200 body** — `POST /api/session/{id}/prompt` declares `{data: Session.Inbox.User}`, `required:["data"]` — so S4 must emit it unconditionally, not behind a decision. Two nested required sets: `time` requires `created`, and `payload` (`Session.Inbox.UserPayload`) requires `text`. The optional `delivery` member is `"steer" \| "queue"`. Wopr has no durable inbox, so this is reachable only through the prompt path (S4); it is **not** gated on D5, which is about forms, not the inbox |
+| `Session.Inbox.User` | `id, sessionID, time, type, payload, delivery` | **this is the prompt route's 200 body** — `POST /api/session/{id}/prompt` declares `{data: Session.Inbox.User}`, `required:["data"]` — so S4 must emit it unconditionally, not behind a decision. Two nested required sets: `time` requires `created`, and `payload` (`Session.Inbox.UserPayload`) requires `text`. The **required** `delivery` member is `"steer" \| "queue"`. Wopr has no durable inbox, so this is reachable only through the prompt path (S4); it is **not** gated on D5, which is about forms, not the inbox |
 | `Provider.Info` | `id, name, activation, package` | `listProviders`; **`activation` and `package` have no wopr source → placeholders** (`activation` from `AuthenticatedProviders`, `package` a fixed literal) |
-| `Reference.Info` | `name, path, source` | context files under the agent dir; `source` is a tagged enum wopr must populate |
+| `Reference.Info` | `name, path, source` | context files under the agent dir; `source` → `"agent"` (the only value wopr produces; the enum includes `"skill"`, `"mcp"`, `"user"` which are D9-dependent) |
 | `Skill.Info` | `id, name, path, content` | the skills loader; `content` is the file body |
 | `Config.Entry` | **no single required set** — a 2-arm `anyOf` over `Config.DocumentEncoded` and `Config.DirectoryEncoded` | `GET /api/config` returns a bare **array** of these (§4.1) |
 | `Location.PublicInfo` | `directory, project` | `Services.CWD()` + `projectID`. **This is `GET /api/location`'s response** (a bare `$ref`), not `/api/command`'s — that one is `Location.PublicRef`, required `[directory]` only, `additionalProperties:false`. wopr's `apiCommandDTO` emits `commandLocationDTO{Directory, Project}` (`serve_dto.go:322-330`), i.e. a `PublicInfo` shape where the spec wants a `PublicRef`; **that extra key is the T3 conflict (§5)**, and it belongs to §5, not here |
@@ -498,13 +513,15 @@ failure if guessed wrong. "Placeholder" means a value wopr cannot source and mus
 | `FileSystem.Entry` | `path, type` | thin — `{path, type}` |
 | `ServerInfo` | `version, pid, urls, paths` | `coding/version.Version`, `os.Getpid`, listener address. **`paths` requires `tmp`** (required `["tmp"]`, `additionalProperties:false`) — S2 emits it or `ServerInfo` fails. `capabilities.persistentPty=false` |
 
-### 4.6 T1 request bodies and query parameters
+### 4.6 T1 request bodies and query parameters (Surface A)
 
 §3.1.2 requires T1 operations to *consume* spec-valid requests as well as emit them. No parameter is
 `required` except where noted. **Most** optional parameters are nullable, but not all — `fs.find`'s
 `type` is a plain `enum ["file","directory"]` with no null arm, and in the prompt body `files`,
 `agents`, `skills` and `metadata` are non-nullable. A client may send `null` for the ones that say
 `anyOf: [{…}, {type: "null"}]` and only for those.
+
+**Surface B note:** the protocol surface's 58 endpoints have different request shapes (e.g., `GET /api/health` has no params, `GET /api/question/request` has different query params). The T1 set under Surface B would differ. See D9.
 
 | Operation | Body (`required: true` where marked) | Query |
 |---|---|---|
@@ -561,14 +578,14 @@ is not the same as "in no spec" (§1.1).
 
 | # | Question | Status |
 |---|---|---|
-| D1 | Capture KKCode's real V2 traffic | **Open, lower priority — does not block any slice.** Rev-1 marked this "blocks S2+"; that is reversed, because the spec is now pinned and S1-§2 classifies all 142 operations from it, so no slice is guessing about the route set. The residual risk is **client-side** — which framing it expects, which events it waits for — and that risk is *not* reduced by any gate in this plan: a curl against wopr's own listener exercises wopr's output, never a client's decoder or its reaction to an unexpected event. S4's live-curl gate proves the bytes leave the process correctly and nothing more. Revisit if a V2 client appears. The V1 capture (`serve-kkcode-v1-compat`) answered the V1 handshake completely. |
+| D1 | Capture KKCode's real V2 traffic | **Open, lower priority — does not block any slice.** Options: (a) defer until a V2 client appears; (b) set up a logging proxy now against a real opencode 1.18.34 server. **Recommend (a)** — the spec is pinned, S1 classifies all 142 operations from it, and no slice guesses the route set. The residual risk is client-side (framing, event expectations) and no gate in this plan reduces it. S4's live-curl gate proves wopr's output bytes, not a client's decoder. The V1 capture (`serve-kkcode-v1-compat`) answered the V1 handshake completely. Revisit if a V2 client appears. |
 | D2 | `/api/status` | **Closed — do not implement.** Absent from the published spec at the pin; KKCode only probes it as a fallback when `/api/health` fails, and opencode answers it with web-UI HTML. |
 | D3 | Auth | **Decided 2026-10-07 by owner:** ignore `Authorization`, never emit 401, keep every tool open. The spec's universal 401 with no security scheme is a recorded divergence (`BACKLOG.md`, `serve-kkcode-v1-compat` notes). The optional `server.authToken` idea is dropped from this plan. |
 | D4 | Event `data` shape | **Closed for Surface A, reopened by D9 for Surface B.** On the published spec: emit literally — `data` is a JSON string, and the frame is `{id?, event, data}` (§4.4). The protocol surface declares a different frame with no `event` field and an *object* `data` (`packages/protocol/src/groups/event.ts:8-27`), so "the spec's shape" is no longer a single thing. Follows D9; the encoder is one file either way. |
 | D5 | Forms ↔ `askuser` | **Open, deferred.** Options: (a) T2 stub for all 6 form operations and let questions flow over the existing `question.asked` wire name; (b) T2 stub for forms **and** rename to `question.v2.asked/replied/rejected` in the V2 encoder, so a V2 client sees a V2 vocabulary; (c) build the typed-field engine now. **Recommend (b)** — but **weaker than Rev-1 argued it**, because the premise it rested on is gone: Rev-1 claimed a V2 client "cannot correlate a question" without the rename. The protocol source declares **both** `question.v2.asked/replied/rejected` and `question.asked/replied/rejected` (§4.4), so under that surface a V1-vocabulary frame is a name the contract knows. (a) is defensible on that basis; it is not defensible under Surface A, whose `/api/event` names no events at all. (c) remains the §3.2 subsystem. Under either (a) or (b) the rename is **encoder-local**: the bus constants at `serve_sse.go:52-54` keep the V1 names KKCode consumes. Revisit if a client drives questions as forms, or if D9 picks Surface A, where nothing constrains the name. |
-| D6 | Stub status | **Closed by the spec: every T2 answers `503` + `ServiceUnavailableErrorEncoded`** (§4.3, §3.1.3). `POST /api/vcs/init` is **not** an exception and Rev-1's clause "which wopr does not serve anyway" was wrong on two counts: it *is* classified — §2's `vcs` row, T2 — and every T2 operation answers the 503 envelope per §3.1.3 and S6's gate. The spec documents 501 for that one operation; wopr answers 503 with the `ServiceUnavailableError` reason "no engine in wopr". The recorded divergence is *one status code on one operation*, stated here rather than implied. **Whether any T2 resource must answer a 200-empty body instead of `503` because a client polls it is not established:** no client poll of a T2 route is recorded in this plan, so §3.1.3's blanket `503` stands for all 113. A client shown to poll one would be a new finding against §3.1.3, not an exception to D6. |
+| D6 | Stub status | **Closed by the spec: every T2 answers a V2 error envelope — `503` `ServiceUnavailableError` where the spec documents 503, the spec's documented status otherwise** (§4.3, §3.1.3). `POST /api/vcs/init` is **not** an exception and Rev-1's clause "which wopr does not serve anyway" was wrong on two counts: it *is* classified — §2's `vcs` row, T2 — and every T2 operation answers the envelope per §3.1.3 and S6's gate. The spec documents 501 for that one operation; wopr answers 503 with the `ServiceUnavailableError` reason "no engine in wopr". The recorded divergence is *one status code on one operation*, stated here rather than implied. **Whether any T2 resource must answer a 200-empty body instead of `503` because a client polls it is not established:** no client poll of a T2 route is recorded in this plan, so §3.1.3's rule stands for all 113. A client shown to poll one would be a new finding against §3.1.3, not an exception to D6. |
 | D7 | `/api/command` shape | **Open** — §5. |
-| D8 | V2 identifier format | **Open, low priority.** The spec declares `^ses` and `^msg_` patterns; wopr mints UUIDs. wopr never validates its own ids, so a server is conformant. Revisit only if a strict client rejects an id. |
+| D8 | V2 identifier format | **Open, low priority.** Options: (a) keep wopr's UUIDs (server is conformant — wopr never validates its own ids); (b) mint `^ses`/`^msg_` pattern ids for V2 routes only. **Recommend (a)** — the spec declares `^ses` and `^msg_` patterns but wopr mints UUIDs; since wopr never validates its own ids, a server is conformant either way. Revisit only if a strict client rejects an id. |
 | D9 | **Which V2 surface is the specification for `wopr serve`?** | **OPEN — owner decision. This plan does not decide it.** §1.1 establishes two: the published `opencode.ai/v2/openapi.json` (142 operations) and `packages/protocol/src/groups/` at `aec0b9a` (58 endpoints, 46 shared, 12 protocol-only, 96 published-only). The answer is not cosmetic — it changes what T1 *is* (`/api/health` is already conformant under Surface B and unclassified under Surface A; 96 operations exist only under A and 12 only under B), it changes the SSE frame shape (§4.4, D4), and it decides whether D5's rename is required or optional. **Recommend: specify against both.** Treat the 46 shared endpoints as the floor every T1 operation must satisfy; classify each of the 12 protocol-only and 96 published-only operations explicitly with the surface named in the reason column; and record which client is expected to speak which. Until it is decided, this document names the surface beside every claim that differs between them, and §2's tiers are published-spec (Surface A) tiers. |
 | D10 | T1 request members wopr cannot honor: ignore or reject? | **Open, low priority.** Two instances, one question. (a) `GET /api/session`'s 8 optional query parameters — wopr has no filter for most; "honored or explicitly defaulted" is satisfiable by ignoring, which is silent. (b) `GET /api/session/{id}/message`'s `type` filter — the ten-value enum (§4.6) has no wopr equivalent; rejecting is spec-valid but breaks a client that filters. **Recommend: ignore, and log.** Rejecting is a louder failure than a wrong-but-decodable result, and §3.2's full-coverage stance is about answering, not about refusing. Both instances land in S3/S5, so neither blocks S1 or S2. |
 
@@ -641,9 +658,10 @@ it.
   inventory, and `AGENTS.md` forbids network in tests. So S1 emits, beside the inventory,
   **`testdata/opencode-v2-schemas.json` — the subset of the 142 operations' request and response
   schemas that S3, S4 and S5 decode against, serialized JSON Schema, expected well under 200 KB**
-  because it is only the schemas those DTOs touch, not all 285. Its sha256 goes in the inventory
-  file and in `server.md` next to the spec's, so the decoders are pinned to a committed artifact
-  rather than to a machine that can reach the internet. If S1's measured subset exceeds 200 KB,
+  because it is only the schemas those DTOs touch, not all 285. **The schemas file's sha256 is not
+  pinned** — JSON serialization is not byte-deterministic without a fixed draft/$ref/ordering/indent/inclusion
+  rule, and this plan does not impose one. Only the inventory's sha256 is pinned. If S1's measured
+  subset exceeds 200 KB,
   S1 stops and says so — the alternative is that S3-S5 ship with an unmeetable gate.
 - **Gate:** no test over the committed JSON. The V1 plan ruled against exactly this artifact in
   writing — "a test over a committed JSON file turns red when you edit the JSON and stays green
@@ -668,11 +686,13 @@ it.
   registered routes win and only unhandled paths *and* methods fall through to 503. This is what
   makes "no route answers Go's default 404 or 405" achievable with one handler instead of 142
   registrations.
-- **Gate:** loopback tests assert the three handshake bodies with the spec field names, that
+- **Gate:** loopback tests assert the two handshake bodies with the spec field names, that
   `GET /api/nope` and `POST /api/pty` return the envelope rather than Go's 404/405, that
-  `GET /api/health` still answers 200 with `{"healthy":true}`, that `GET /api/fs/read/*` answers
-  `application/octet-stream` bytes rather than JSON (§4.1), and that
-  `ServiceUnavailableErrorEncoded` round-trips.
+  `GET /api/health` still answers 200 with `{"healthy":true}`, and that
+  `ServiceUnavailableErrorEncoded` round-trips. **Plus a round-trip decode of `ServerInfo`**
+  (including `paths.tmp`) against `testdata/opencode-v2-schemas.json`, since `GET /api/info` is
+  registered in S2. `GET /api/fs/read/*` is registered in S5; at S2 the catch-all returns 503, so it
+  is not tested here.
 - **DoD:** a `curl` to `/api/info` and to `/api/health` shows 200 with the spec field names, and a
   curl to an unknown `/api/*` path shows the 503 envelope. **Two** handshake routes, not three:
   `/api/command` is T3 and keeps its V1 body until D7 decides, which S5 owns — a "three routes"
@@ -701,8 +721,11 @@ it.
 - **Gate:** a `go test` that **decodes a representative payload against
   `testdata/opencode-v2-schemas.json` for every V2 DTO this slice emits** — `Session.Message.Info`
   (all 11 arms), `Session.Inbox.User` (including `time.created` and `payload.text`), the
-  `{data: Session.Inbox.User}` prompt 200, `SessionInterruptResponse`, and one `message.part.*`
-  frame — plus the live-curl gate.
+  `{data: Session.Inbox.User}` prompt 200, `SessionInterruptResponse` — plus the live-curl gate.
+  The `message.part.*` frame decode is **not required here** — Surface A's `/api/event` declares no
+  payload schema (`event: {type: string}`, `data` a JSON string), while Surface B's `V2Event` is an
+  88-arm structured union. Which surface governs is D9; the event shape is Surface-B when D9 chooses
+  Surface B, and TBD when D9 chooses Surface A.
 - **DoD:** `prompt` then a streamed turn whose `message.part.delta` payload a client can decode,
   then `interrupt`. **Do not merge on the unit suite alone.**
 
@@ -717,7 +740,8 @@ it.
 - **Gate:** round-trip decode for every V2 read DTO against `testdata/opencode-v2-schemas.json` —
   `Model.Info` and its nested `capabilities`/`time`/`limit`, `Agent.Info` and its nested
   `Provider.Request`, `Provider.Info`, `Reference.Info`, `Skill.Info`, `Config.Entry`,
-  `Location.PublicInfo`, `Project`, `FileSystem.Entry`, `ServerInfo` (including `paths.tmp`).
+  `Location.PublicInfo`, `Project`, `FileSystem.Entry`. `ServerInfo` is tested in S2 (its route
+  is registered there).
 - **DoD:** the model picker and agent picker decode every required field, with each synthesized
   placeholder named in §4.5 present.
 
@@ -730,11 +754,14 @@ it.
   emptied it.
 - **Behavior:** the T2 stubs, the threat-model update for the `/api/*` surface, and `server.md`'s
   endpoint table with the pinned sha256.
-- **Gate:** `make check` docs-drift green, plus a **table-driven test over all 113** T2 operations —
-  the inventory from S1 drives a loop that issues every one against a loopback listener and asserts
-  `503` + a `ServiceUnavailableErrorEncoded` body whose `message` is non-empty. A "spot-check" of 113
-  operations is not a spot-check; if the test is too slow to run 113, the catch-all is not the
-  single handler §8 S2 promises and that is the finding.
+- **Gate:** `make check` docs-drift green, plus a **table-driven test over the T2 catch-all** — the test
+  exercises the single `/api/` catch-all handler (not all 113 operations individually, which would
+  require concrete path-param values the inventory doesn't supply) with a matrix of: one unknown path
+  (`/api/nope`), one known T2 path with each HTTP method (`GET /api/pty`, `POST /api/pty`, etc.),
+  and one T2 path with path params (`/api/session/ses_test/permission/req_test`). Each asserts
+  `503` + a `ServiceUnavailableErrorEncoded` body whose `message` is non-empty and matches the
+  reason from the inventory. If the catch-all is not a single handler, the matrix fails — that is the
+  finding.
 - **DoD:** `server.md` gains a V2 section (endpoint table, the pinned spec sha256, "V2 is
   additive; V1 unchanged"), `threat-model.md` covers the V2 surface, and `make check` is green.
 

@@ -1289,8 +1289,9 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 - **Spec pin:** `https://opencode.ai/v2/openapi.json`, sha256
   `3fcd666b597b746bad26f56a92fe782cc86338a0b4498f43b435a2f97e4fa05a`, 578,272 bytes, OpenAPI 3.1.0,
   118 paths / 142 operations / 285 schemas, fetched 2026-10-15. The spec moved inside eight days
-  (+1 path, +1 operation, +29 schemas), so the pin is a table and a hash, never a vendored file.
-- **Carries five open decisions**, none blocking: **D9 — which V2 surface is the specification for
+  **(+1 path, +1 operation, +29 schemas — inferred from Rev-1's recorded counts, not re-derived; the
+  prior pin file is gone)**, so the pin is a table and a hash, never a vendored file.
+- **Carries six open decisions**, none blocking: **D9 — which V2 surface is the specification for
   `wopr serve`? — the most consequential, and the owner's to make (`GET /api/health` is already
   conformant under the protocol surface and unclassified under the published spec; 96 operations exist
   only under the published spec). Recommend specifying against **both**, with the 46 shared endpoints
@@ -1299,19 +1300,22 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
   stay a stub; recommend (b), rename to `question.v2.asked/replied/rejected` **in the V2 encoder
   only**, since the bus constants at `serve_sse.go:52-54` feed the V1 stream KKCode consumes. D7 —
   `GET /api/command` is served today with `location.project`, which V2's `Location.PublicRef`
-  (`additionalProperties:false`) rejects; recommend dropping the key and verifying against a KKCode
-  capture. D8 — V2 identifier format (`^ses`/`^msg_` vs wopr's UUIDs), low priority.
+  (`additionalProperties:false`) rejects; **recommend (b) over (a)** — keep `project` and record a
+  divergence, since the KKCode capture (`serve-kkcode-v1-compat`) shows the reference server returns
+  `project`. Dropping it would diverge from the client's actual target. D8 — V2 identifier format (`^ses`/`^msg_` vs wopr's UUIDs), low priority. D10 — T1 request members wopr cannot honor: ignore or reject (two query parameters, recommend ignore and log).
 - **Files:** `internal/codingagent/serve/` (`serve_v2.go`, `serve_v2_dto.go`, `serve_v2_sse.go`,
-  `serve_v2_test.go`, plus a generated `testdata/opencode-v2-inventory.json`), `cmd/wopr/serve.go`
-  wiring, `docs/site/docs/server.md`, `docs/threat-model.md`, and `docs/site/docs/settings.md`
-  **only if a V2 setting ships** — D3 dropped `server.authToken`, so as things stand no V2 content
-  reaches that file.
+  `serve_v2_test.go`, plus generated `testdata/opencode-v2-inventory.json` and
+  `testdata/opencode-v2-schemas.json`), `cmd/wopr/serve.go` wiring, `docs/site/docs/server.md`,
+  `docs/threat-model.md`, and `docs/site/docs/settings.md` **only if a V2 setting ships** — D3 dropped
+  `server.authToken`, so as things stand no V2 content reaches that file.
 - **Gates:** per slice the standard set, hermetic (temp `WOPR_HOME`, provider credentials cleared).
   S1's gate is **not** a test over the committed inventory: that is the change-detector category
   `AGENTS.md` bans, and the V1 conformance plan ruled against it in writing. S1 is done when the
-  three tiers partition the spec's operation set exactly. S3 and S4 carry a round-trip decode gate
-  per V2 DTO against the pinned schemas; S4 adds a manual live-curl probe, because this package's
-  suite has coexisted with live wire bugs five times (`serve-3`, `serve-4`).
+  three tiers partition the spec's operation set exactly. S2 tests the catch-all and decodes
+  `ServerInfo`. S3 and S4 carry a round-trip decode gate per V2 DTO against the pinned schemas; S4
+  adds a manual live-curl probe. S5 decodes all read-surface DTOs (except `ServerInfo`, tested in
+  S2). S6 runs `make check` docs-drift and a matrix test of the T2 catch-all handler (not all 113
+  operations individually, which would need concrete path-param values).
 - **Notes:** the two `/api/*` routes wopr already serves are V1-era KKCode handshake shims
   (`/api/health`, `/api/command`), and V2 has already taken over that prefix — the namespace is
   crowded, so new V2 work must not assume it is clean. S3 also depends on the unmerged
