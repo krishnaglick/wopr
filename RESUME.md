@@ -1,18 +1,9 @@
 # Resume point
 
-**`serve-prompt-system` — DONE on `wave-serve-prompt-system`, pending merge into `main`. (A concurrent wave, `serve-v1-conformance-and-parity`, is in flight in `.worktrees/wave-serve-v1-conformance`.)**
+**Draft PR #2 is open: `alexrudloff/wopr` #2, `krishnaglick:wopr-serve` → `main`, draft, 100 commits, 121 files, +27623/-1378. `main` (local) is untouched at `3bc36c8`; the worktree is on `wopr-serve`, which is `main` + a `--no-ff` merge of `origin/main` (upstream v0.2.2/v0.2.3) at `f1eba01`.**
 
-- **State:** wave branch `wave-serve-prompt-system`, worktree `.worktrees/wave-serve-prompt-system`,
-  branched from `main` at `04dc273`. Commits: `01b23b2` (claim + spec), `2ce42a8` (implementation),
-  plus the tracker-reconcile commit. Slice gates green: `go build`, `go vet` (touched), `go test -count=1`
-  (touched, 462 pass), gate `TestPromptSystemAppliesToTheTurn`, `go tool golangci-lint run` (0 issues),
-  `go fix -diff` (empty), `make docs-drift`, `go test -race` (ai + serve).
-- **Not run:** `make check` stops at `test-prereqs` because `tmux` is absent, so `make test-integration`
-  did not run. The change does not touch the pty/TUI loop, but the integration tier is UNVERIFIED here.
-- **Shipped:** per-prompt `system` on both prompt endpoints. opencode parity is **append** (base + `"\n"` +
-  text, last), persisted on `UserMessage.System`, echoed on `GET /session/{id}/message` and both SSE user
-  frames. Empty string treated as absent (recorded divergence D1 in `BACKLOG.md`).
-- **Next step:** merge `wave-serve-prompt-system` `--no-ff` into `main`, prune the worktree. Then the
-  sibling S3 items `serve-prompt-no-reply` and `serve-prompt-parts-agent-subtask` remain READY.
-- **Do not:** claim the item text's "override" wording — it is an append. The gate asserts the provider
-  request, not a model response.
+- **Why the merge:** the serve work branched before upstream shipped v0.2.2/v0.2.3. Without the merge the PR proposed deleting 11 files that already shipped. The merge had exactly one conflict, `CHANGELOG.md`, resolved by keeping both sections and adding the `wopr serve` entry.
+- **Gates:** `make check` on `wopr-serve` — **all gates green, exit 0**, including the tmux integration tier (`tmux` is present on this machine now; the old "tmux absent" caveat no longer applies). Verbatim log in the PR comment; copy at `/tmp/opencode/make-check-wopr-serve.log` (temp).
+- **Still in flight:** `.worktrees/wave-serve-v1-conformance` (`bc04325`) and `.worktrees/wave-serve-prompt-no-reply` (`944d54e`). Neither is on `wopr-serve`, so the PR predates them.
+- **Next steps, in order:** (1) merge both wave branches into `wopr-serve` and re-push — the PR is the review surface for the whole serve feature; (2) when the PR is ready to land, push `wopr-serve` to `origin` (or merge to local `main` first — `main` is 28 commits behind upstream and does not contain the merge); (3) `RESUME.md`'s old `serve-prompt-system` entry is retired: that slice is merged into `main` as `3bc36c8`.
+- **Do not:** open the PR as ready for review yet — `serve-v1-conformance-and-parity` is the slice that decides the remaining opencode-parity questions, and `serve-delete-hard-delete` reinstates a behavior change (hard delete) that a reviewer should see land in its own commit.
