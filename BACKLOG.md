@@ -1874,7 +1874,7 @@ step is what found #5, and the break-the-code-underneath-the-test step is what f
 
 ### serve-prompt-no-reply — persist user message without an assistant turn
 
-- **Status:** READY — filed 2026-10-10. `PromptInput.noReply` is an optional boolean. When true, the session
+- **Status:** IN-PROGRESS — claimed 2026-10-11 on `wave-serve-prompt-no-reply`; filed 2026-10-10. `PromptInput.noReply` is an optional boolean. When true, the session
   appends the user message and returns immediately without running the agent loop. The gate: a prompt with
   `noReply:true` produces a user message in the transcript and no assistant message; the session model is
   unchanged. Gate: assert the transcript has +1 user entry, 0 assistant entries.
